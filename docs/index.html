@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1419">
+<title>Data Architect Study Tracker</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <a href="#/" id="home-link" aria-label="Home">🏛️ Study Tracker</a>
+  <div id="top-actions">
+    <button id="btn-export" title="Export progress JSON">⬇</button>
+    <button id="btn-import" title="Import progress JSON">⬆</button>
+  </div>
+</header>
+<div id="runner-banner" class="hidden"></div>
+<main id="view"></main>
+<input type="file" id="import-file" accept="application/json" class="hidden">
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
