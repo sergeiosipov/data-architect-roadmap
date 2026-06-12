@@ -5,7 +5,8 @@ A four-year, from-zero study plan to top-tier **Data Architect (financial servic
 ## Contents
 
 - **[STUDY_PLAN.md](STUDY_PLAN.md)** — the complete plan: Phase 0 (computing foundations, every module with a skip test) through Phase 8 (data products & architect practice), 252 taxonomy topics + 31 gap additions, 1,100 h planned against a 1,152 h budget. Read it directly in the GitHub mobile app.
-- **[docs/](docs/)** — the **Study Tracker PWA**: each of the 169 study items is a page with its content, a start/stop **timer** that books time to that topic (survives closing the app), status tracking, skip-test bank, journal notes, and hours-vs-budget dashboards. Host on GitHub Pages (`Settings → Pages → main /docs`) or open `docs/index.html` locally. Progress lives in browser localStorage — **export (⬇) weekly** and commit the JSON here as backup.
+- **[docs/](docs/)** — the **Study Tracker PWA**: each of the 169 study items is a page with its content, a start/stop **timer** that books time to that topic (survives closing the app), status tracking, skip-test bank, journal notes, and hours-vs-budget dashboards. Host on GitHub Pages (`Settings → Pages → main /docs`) or open `docs/index.html` locally.
+- **Cross-device sync (free):** the tracker syncs through a **secret GitHub Gist** — in the app open *set up sync*, paste a classic GitHub token with **only the `gist` scope**, and sync. Devices merge safely (time sessions are unioned; newest status/notes win). No server, no account beyond GitHub. The ⬇/⬆ JSON export/import remains as an offline backup path.
 - **Build scripts** (run with [uv](https://docs.astral.sh/uv/)):
   - `uv run _assemble_and_qa.py` — assembles STUDY_PLAN.md from `_parts/` and runs the QA assertions (coverage, anchors, resources, DAG, budget).
   - `uv run _build_appendix_c.py` — regenerates the coverage matrix from `_worklist.md`.
