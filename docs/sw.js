@@ -1,4 +1,4 @@
-const CACHE = "spt-cache-v2";
+const CACHE = "spt-cache-v3";
 const ASSETS = ["./", "index.html", "style.css", "app.js", "data.js", "manifest.webmanifest", "icon.svg"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

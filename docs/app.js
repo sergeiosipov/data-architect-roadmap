@@ -186,7 +186,17 @@
           <div class="sub">months ${p.months} · ${h1(pa.spent)} h / ${pa.est.toFixed(0)} h est · ${ppct}%</div>
         </div><span class="muted">›</span></a>`;
     });
+    html += `<h2>Plan reference</h2>`;
+    (PLAN.pages || []).forEach((pg) => {
+      html += `<a class="row" href="#/doc/${pg.key}"><div class="grow"><div class="title">📖 ${esc(pg.title)}</div></div><span class="muted">›</span></a>`;
+    });
     return html;
+  }
+
+  function docView(key) {
+    const pg = (PLAN.pages || []).find((p) => p.key === key);
+    if (!pg) return home();
+    return `<a class="back" href="#/">‹ Home</a><h1>${esc(pg.title)}</h1><div class="card content">${pg.html}</div>`;
   }
 
   function phaseView(n) {
@@ -197,6 +207,7 @@
       <h1>Phase ${p.n}: ${esc(p.title)}</h1>
       <div class="card"><div class="muted">months ${p.months} · ${h1(pa.spent)} h logged / ${pa.est.toFixed(0)} h estimated</div>
       <div class="bar"><i class="g" style="width:${Math.round(((pa.doneEst + pa.skipEst) / pa.est) * 100)}%"></i></div></div>`;
+    if (p.intro) html += `<details class="card content"><summary><b>Phase goal, prerequisites & exit criteria</b></summary>${p.intro}</details>`;
     p.items.forEach((it) => {
       const r = S.items[it.key] || { st: "todo", min: 0 };
       html += `<a class="row" href="#/i/${it.key}">
@@ -262,6 +273,7 @@
     let html, m;
     if ((m = hash.match(/^#\/p\/(\d)/))) html = phaseView(+m[1]);
     else if ((m = hash.match(/^#\/i\/(.+)$/))) html = itemView(decodeURIComponent(m[1]));
+    else if ((m = hash.match(/^#\/doc\/(\w+)/))) html = docView(m[1]);
     else if (hash === "#/sync") html = syncView();
     else html = home();
     $("#view").innerHTML = html;
