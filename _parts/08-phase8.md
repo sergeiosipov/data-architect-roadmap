@@ -1,6 +1,8 @@
 <a id="phase-8"></a>
 ## Phase 8: Data Products, Semantic Layer & the Architect's Practice (months 44–48, 103 h + 18.5 h Appendix A)
 
+*Phase 8 of 8 · months 44–48 · 121.5 h (103 h + 18.5 h Appendix A) · capstone: Productized fund data product.*  ← [Phase 7](#phase-7) · finish →
+
 **Goal:** convert the governed platform into *products* — contracted, SLA-backed, semantically defined, consumable — and consolidate the formal architect's practice: DDD for boundaries, TOGAF/ArchiMate for the enterprise conversation, regulatory reporting as the domain's flagship deliverable, and the build-vs-buy fluency that Appendix D distills.
 **Entry prerequisites:** Phases 1–7 (everything; this phase productizes the accumulated platform).
 **Exit criteria:** you can (1) cut data-product boundaries with DDD and defend them; (2) publish a data product with an enforced contract, SLOs, and a semantic layer; (3) design a submission-grade regulatory reporting pipeline; (4) speak TOGAF/ArchiMate fluently in an EA forum; (5) win a build-vs-buy argument in any taxonomy domain with named tools and costs.

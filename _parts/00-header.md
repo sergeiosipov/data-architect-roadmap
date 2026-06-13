@@ -10,7 +10,7 @@
 <a id="how-to-use"></a>
 ## How to Use This Document
 
-1. **Day one: take the [Skip List](#skip-list) tests.** Work through each Phase-0 skip test honestly, on a real machine, not in your head. Mark each module *do* or *skip*. That marked-up table is your personal starting line — revisit it only to downgrade a "skip" you regret.
+1. **Day one: take each [Phase-0](#phase-0) module's Skip test.** Each module's *Done when* checklist is its Skip test — work through them honestly, on a real machine, not in your head. Mark each module *do* or *skip*. That marked-up list is your personal starting line — revisit it only to downgrade a "skip" you regret.
 2. **Work the phases strictly in order.** Each phase's prerequisites and capstone build on the previous one (the dependency chain is checked: 0→1→…→8). Inside a phase, take the T1/T2 entries roughly top to bottom; the T3 table can be sprinkled into spare half-hours anytime within the phase.
 3. **Read a topic entry as a contract:** *Why* tells you what the topic buys you in the target role — if it doesn't resonate, reread it after the Do. *Learn* is the checklist of concepts you must be able to explain. *Resource* is ONE primary source — resist collecting alternatives; the alternate is only for when the primary doesn't land. *Tools* is dual-track: **FOSS** = install and use it; **Corp** = evaluation level, meaning you can explain in a meeting what it costs, when it wins, and what locks you in — without ever installing it. *Do* is non-negotiable: the exercise *is* the learning. *Done when* is the exit gate — self-test it before moving on. *Est. hours* is a planning estimate, not a quota: stop when *Done when* is true.
 4. **Tier discipline:** **T1** topics get everything — do, redo, and be able to teach them; they are your interview spine. **T2** = complete the entry once, honestly. **T3** = read the one linked source for the listed minutes and move on; depth there is a deliberate non-goal — return only when a real project demands it.
@@ -72,38 +72,11 @@ The plan's content already covers these syllabi — certification is **recogniti
 **Renewal reality:** Microsoft role-based certs renew annually via a free online assessment; Databricks expires after 2 years; CDMP needs continuing-education credits every 3 years; TOGAF doesn't expire. Put renewals in the quarterly review.
 
 <a id="phase-map"></a>
+## Phase Map
 
-| Phase | Theme | Months | Hours | Capstone |
-|---|---|---|---|---|
-| [0](#phase-0) | Computing & data foundations — from zero (skippable per module) | 1–6 | 46 | Personal data toolbox (Python + SQL + Docker + Git, reproducible) |
-| [1](#phase-1) | Distributed data systems & modeling core | 7–11 | 118 | Fund reference OLTP + reporting mart (PostgreSQL, C4, ADRs) |
-| [2](#phase-2) | Lakehouse & analytics engineering | 12–16 | 123 | Fund-document lakehouse (MinIO + Iceberg + dbt/DuckDB/Trino medallion) |
-| [3](#phase-3) | Distributed compute, orchestration & engineering practice | 17–21 | 118 | Orchestrated Spark NAV pipeline (Dagster/Airflow, CI, lakeFS) |
-| [4](#phase-4) | Streaming & event-driven integration | 22–27 | 119 | Real-time price/flow CDC streaming (Kafka + Debezium + Flink) |
-| [5](#phase-5) | Cloud platform architecture & operations (Azure) | 28–33 | 108 | IaC-provisioned platform on Kubernetes + Azure Well-Architected review |
-| [6](#phase-6) | Governance, security & compliance | 34–39 | 120 | Governed platform: catalog + lineage + DQ + policy + DCAM self-assessment |
-| [7](#phase-7) | AI/ML & LLM platforms for fund data | 40–43 | 74 | LLM extraction of fund documents (RAG + evaluation harness) |
-| [8](#phase-8) | Data products, semantic layer & the architect's practice | 44–48 | 103 | Productized fund data product: contracts, SLAs, semantic layer, regulatory report |
-| [A](#appendix-a) | Gap additions (scheduled within phases 0, 1, 5, 6, 7, 8 above) | — | 173 | of which 90 h are the Phase-0 foundations A.27–A.31 |
-| | **Total** | **48** | **1,100** | **vs 1,152 h budget → 4.5% slack (964 h / 16% with Phase 0 skipped)** |
+The phase sequence — months, hours and capstone — now leads **each phase**: every phase heading is followed by a one-line locator (with prev/next navigation), and the same map is the home screen of the [tracker app](#tracking-progress). Budget reconciliation: 927 h of phase work + 173 h [Appendix A](#appendix-a) gap additions = **1,100 h** vs the **1,152 h** budget (4.5% slack; **964 h / 16%** if all of Phase 0 is skip-tested out). Phases run strictly in order, 0 → 8; each phase's capstone reuses the previous one's artifacts, ending in one governed, productized fund-data platform. Jump in: [Phase 0](#phase-0) · [1](#phase-1) · [2](#phase-2) · [3](#phase-3) · [4](#phase-4) · [5](#phase-5) · [6](#phase-6) · [7](#phase-7) · [8](#phase-8).
 
 <a id="skip-list"></a>
 ## Skip List
 
-Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip test** below — take it honestly; pass = skip the module and bank the hours, any doubt = do the module. (No other phase is skippable.)
-
-| Module | Covers | Hours banked | Skip if you can do this cold, today |
-|---|---|---|---|
-| 0.1 Linux & shell | A.27 | 12 | In a terminal: find all `.csv` under a directory, count lines matching a pattern with a pipe, fix a permission error, ssh into a machine, and explain what `$PATH` does. |
-| 0.2 Python | A.28 | 36 | Write (without a template) a CLI script that reads a CSV, filters rows via a function you define, writes JSON, handles a malformed line gracefully — and run it with `uv run`. |
-| 0.3 SQL | A.29 | 26 | Against two joined tables: explain why a LEFT JOIN changed the row count, write a GROUP BY with HAVING, and return the latest row per group with a window function. |
-| 0.4 Git & GitHub | 9.2.1 | 8 | Branch, commit, push, open a PR, resolve a merge conflict, and name when `revert` is safer than `reset`. |
-| 0.5 Docker | A.30 | 8 | Write a Dockerfile from scratch and a two-service `docker-compose.yml` with a volume and a healthcheck; debug a failing container from its logs. |
-| 0.6 Networking & web | A.31 | 8 | Narrate everything between typing a URL and the page rendering (DNS, TCP, TLS, HTTP), and read `curl -v` output line by line. |
-| 0.7 Data basics | 1.1.1–1.1.3 | 6 | Explain UTF-8 mojibake, name three ways CSV files break, and classify five datasets as structured/semi-structured/unstructured. |
-| 0.8 Workloads & batch | 1.2.1, 1.3.1, 1.3.2 | 4 | Sort ten workloads into OLTP/OLAP/batch and say why a row store loses to a column store on scans. |
-| 0.9 pandas & notebooks | 5.4.2, 14.5.2 | 10 | Load a messy CSV in JupyterLab, clean it, groupby-aggregate, chart it, write Parquet — and explain the hidden-state danger of notebooks. |
-| 0.10 Editor & IDE | 9.1.1, 9.1.2 | 2 | Debug with a breakpoint (no prints), and your editor runs lint + terminal + notebooks in one window. |
-| 0.11 Unit testing | 9.4.1 | 4 | Write pytest cases incl. a parametrized edge case, and structure code so it's testable (pure functions). |
-| 0.12 Code review | 9.5.1 | 2 | Self-review a PR with a checklist and write line comments that critique code, not people. |
-| Capstone 0 | — | 10 | Skip only if every test above passed — the capstone exists to prove they compose. |
+Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist is also its Skip test** — the criteria, and the hours you bank by passing them cold, live in each module under [Phase 0](#phase-0). Take each honestly: tick every box cold today → skip that module and bank its hours as slack (up to the full **136 h** of Phase 0); any box you can't → do the module. No other phase is skippable. Record what you bank in the skip ledger ([Tracking Progress](#tracking-progress)).

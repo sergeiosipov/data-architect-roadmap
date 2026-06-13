@@ -1,7 +1,9 @@
 <a id="phase-0"></a>
 ## Phase 0: Computing & Data Foundations — from zero (months 1–6, 46 h + 90 h Appendix A)
 
-**Goal:** everything later phases silently stand on, taught from nothing: a Linux working environment, Python, SQL, Git, Docker, how networks and the web work, what data physically is, and the daily toolkit (pandas, notebooks, tests, code review). **Nothing in this plan assumes prior knowledge** — instead, every module below has a **skip test** (collected in the [Skip List](#skip-list)). Pass the test honestly → skip the module and bank its hours as slack. Fail any part → do the module.
+*Phase 0 of 8 · months 1–6 · 136 h total (46 h in-phase + 90 h foundation modules) — every hour skip-testable · capstone: Personal data toolbox.*  start · [Phase 1](#phase-1) →
+
+**Goal:** everything later phases silently stand on, taught from nothing: a Linux working environment, Python, SQL, Git, Docker, how networks and the web work, what data physically is, and the daily toolkit (pandas, notebooks, tests, code review). **Nothing in this plan assumes prior knowledge** — instead, **each module's *Done when* checklist doubles as its Skip test**. If you can tick every box cold today → skip the module and bank its hours as slack (the mechanism is summarized in the [Skip List](#skip-list)). Any box you can't → do the module.
 **Entry prerequisites:** none. A computer with admin rights is enough.
 **Exit criteria:** you can (1) live in a terminal (navigate, pipe, grep, ssh, write a small script); (2) write a Python program that reads files, calls functions you wrote, and runs under `uv`; (3) answer questions from a multi-table database with joins, aggregation, and a window function; (4) commit, branch, and open a pull request; (5) run a two-service Docker Compose stack; (6) explain what happens between typing a URL and seeing a page.
 
@@ -32,10 +34,10 @@
   2. Write `fetch_count.sh`: `curl` downloads a public CSV (any ECB series works), `grep -c` counts rows matching a pattern passed as `$1`, and a `date`-stamped line is appended to `run.log` with `>>`.
   3. Harden it: `set -euo pipefail`, a usage message when `$1` is missing, non-zero exit on download failure; prove each path with a deliberate failure.
   4. Schedule it with cron (compose the expression with crontab.guru), let it run a few cycles, and confirm `run.log` grows; note where cron's own output goes.
-- **Done when:**
-  - [ ] Stop reaching for the file explorer — daily file work (move, inspect, search) happens in the terminal without thinking.
-  - [ ] Pass the skip test in the Skip List cold.
-  - [ ] Explain every field of your crontab line and read an unfamiliar pipeline (`grep ... | sort | uniq -c`) aloud correctly.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 12 h)*
+  - [ ] Daily file work (move, inspect, search) happens in the terminal without reaching for the file explorer.
+  - [ ] Find all `.csv` under a directory tree, count pattern matches through a pipe, fix a permission error, and ssh into a machine — cold.
+  - [ ] Explain every field of your crontab line, what `$PATH` does, and read an unfamiliar pipeline (`grep ... | sort | uniq -c`) aloud correctly.
 - Est. hours: counted as A.27 (12 h, Appendix A)
 
 #### 0.2 — A.28 Programming from zero: Python
@@ -61,8 +63,8 @@
   3. Split it into functions — parse, filter, summarize, write — so each is callable (and, in 0.11, testable) on its own.
   4. Make failure honest: a malformed row raises with its row number; a missing input file exits non-zero with a one-line message, not a raw traceback.
   5. Write `--help` text good enough that someone else can run it without reading the code.
-- **Done when:**
-  - [ ] Write a 100-line script without copying structure from examples.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 36 h)*
+  - [ ] Write a 100-line script (read a CSV, filter rows via a function you define, write JSON, handle a malformed line) without copying structure from examples.
   - [ ] Verify `uv run fundcli.py --help` behaves like a real tool — flags documented, errors clean, exit codes correct.
   - [ ] Diagnose a planted TypeError from its traceback alone, narrating the read order.
 - Est. hours: counted as A.28 (36 h, Appendix A)
@@ -90,8 +92,8 @@
   2. Answer 15 questions of rising difficulty in a committed `.sql` file: filters → joins → GROUP BY → CTEs → "latest NAV per fund via window function".
   3. Break one join on purpose (duplicate a fund row) and document the row-count multiplication before fixing it.
   4. For two of the slower queries, run `EXPLAIN` before and after adding an index and note what changed.
-- **Done when:**
-  - [ ] Demonstrate joins and GROUP BY as reflexes — no syntax lookups for the core 15 questions.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 26 h)*
+  - [ ] Demonstrate joins and GROUP BY (with HAVING) as reflexes — no syntax lookups for the core 15 questions.
   - [ ] Explain a LEFT JOIN row-count surprise to someone else, using your duplicated-fund example.
   - [ ] Predict which of three given queries an index would help, and verify with EXPLAIN.
 - Est. hours: counted as A.29 (26 h, Appendix A)
@@ -117,8 +119,8 @@
   2. Develop a feature (e.g., a `--format csv|json` flag) on a branch with small commits and real messages; open a PR to yourself and merge it.
   3. Force a merge conflict — edit the same function on two branches — and resolve it by reading the conflict markers, not by clicking "accept theirs".
   4. Practice undo: `git restore` a bad edit, `git revert` a merged commit, `git reset` an unpushed one; write one line each on when it's safe.
-- **Done when:**
-  - [ ] Survive a deliberately broken rebase/merge without fear — you know which undo applies.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 8 h)*
+  - [ ] Survive a deliberately broken rebase/merge without fear — you know which undo applies and when `revert` is safer than `reset`.
   - [ ] Explain the three states and trace a file through them with `git status` at each step.
   - [ ] Show a PR with a clean description, small commits and a resolved conflict in its history.
 - Est. hours: 8
@@ -144,8 +146,8 @@
   3. Prove persistence: `docker compose down && docker compose up` shows the data survived; then `down -v` — explain why it didn't.
   4. Break the loader (wrong env var for the DB password) and diagnose it from `docker logs` alone.
   5. Run a cleanup pass (`docker system df`, then prune) and record what was reclaimed.
-- **Done when:**
-  - [ ] Explain image vs container vs volume to a colleague in plain words.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 8 h)*
+  - [ ] Explain image vs container vs volume to a colleague in plain words, and write a Dockerfile + two-service `docker-compose.yml` (volume + healthcheck) from scratch.
   - [ ] Debug a failing container from its logs without rebuilding blindly.
   - [ ] Start the whole stack with one `docker compose up` from a clean clone.
 - Est. hours: counted as A.30 (8 h, Appendix A)
@@ -171,8 +173,8 @@
   2. `curl -v` the URL and annotate every line of the output in a committed text file: resolution, TCP connect, TLS handshake, request headers, response status and headers.
   3. Probe your local 0.5 Postgres port and a firewalled port; classify each failure ("refused" vs "timeout") by layer.
   4. Write a one-page triage table: "slow / blocked / cert error / name not found" → first layer to check → first command to run.
-- **Done when:**
-  - [ ] Map "it's slow / it's blocked / cert error" each to a layer you'd check first.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 8 h)*
+  - [ ] Map "it's slow / it's blocked / cert error" each to a layer you'd check first, and narrate URL→page (DNS, TCP, TLS, HTTP).
   - [ ] Annotate a fresh `curl -v` of an unseen URL correctly on the first pass.
   - [ ] Explain why DNS can succeed while the connection still times out, with one plausible cause per layer.
 - Est. hours: counted as A.31 (8 h, Appendix A)
@@ -198,8 +200,8 @@
   2. Break the CSV twice: inject a stray separator inside a fund name, then re-save a copy in Latin-1 so accented names mangle.
   3. Detect both programmatically — a column-count check per row, and a decode-with-fallback that flags suspect lines — then fix and reload.
   4. Write ten lines: which shape you'd mandate for a vendor NAV feed and why, citing the failure modes you just caused.
-- **Done when:**
-  - [ ] Name the failure modes of CSV from your own scars, not a list.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 6 h)*
+  - [ ] Name the failure modes of CSV from your own scars (and explain UTF-8 mojibake), not a list.
   - [ ] Classify NAV table / EMT file / prospectus PDF as structured / semi-structured / unstructured with one-line justifications.
   - [ ] Demonstrate detecting and repairing an encoding mangle programmatically.
 - Est. hours: 6
@@ -225,8 +227,8 @@
   2. Run the same "average NAV per fund per month" query on Postgres and on DuckDB-over-Parquet; record timings, cold and warm.
   3. Run a single-row lookup by fund key on both; record timings again and note the reversal.
   4. Write five sentences on why they differ, arguing from row-vs-column layout — no hand-waving about "DuckDB is fast".
-- **Done when:**
-  - [ ] Sort ten example workloads into OLTP/OLAP/batch without hesitation.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 4 h)*
+  - [ ] Sort ten example workloads into OLTP/OLAP/batch without hesitation, and say why a row store loses to a column store on scans.
   - [ ] Explain your timing results from storage layout, including the case each engine wins.
   - [ ] State where the daily-NAV batch sits on the split and what that implies for where it runs.
 - Est. hours: 4
@@ -254,8 +256,8 @@
   3. Produce a monthly per-fund summary via groupby/resample and one chart answering a stated question (e.g., "which fund's NAV is most volatile?").
   4. Write the result to both Parquet and Postgres (to_sql against the 0.5 stack); read each back and assert equality.
   5. Restart kernel, Run All — fix whatever breaks, and note which hidden-state assumption bit you.
-- **Done when:**
-  - [ ] Pass the skip test.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 10 h)*
+  - [ ] Load a messy CSV in JupyterLab, clean it, groupby-aggregate, chart it, and write Parquet — cold.
   - [ ] Explain *why* notebook state burned you at least once, and the restart-and-run-all habit that prevents it.
   - [ ] Reproduce the entire cleaned output from a fresh kernel in one run.
 - Est. hours: 10
@@ -280,8 +282,8 @@
   2. Plant a bug in a `fundcli` function (e.g., a filter that drops the wrong currency) on a branch.
   3. Debug it with a breakpoint inside the function: inspect variables, step through the filter, fix it — without a single print.
   4. Drill the bindings for run, breakpoint toggle, command palette and go-to-definition until the mouse is optional.
-- **Done when:**
-  - [ ] Run the edit-run-debug loop frictionlessly, entirely inside the editor + terminal.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 2 h)*
+  - [ ] Run the edit-run-debug loop frictionlessly, entirely inside the editor + terminal (lint + terminal + notebooks in one window).
   - [ ] Fix a planted bug via breakpoints and variable inspection, no prints.
   - [ ] Open any repo, terminal and debugger without touching the mouse.
 - Est. hours: 2
@@ -305,8 +307,8 @@
   2. Add tests: happy path, empty file, malformed row, wrong currency — the malformed-row cases via `@pytest.mark.parametrize`.
   3. Use a fixture for the sample funds data; keep tests file-free where possible, with one tmp_path test for the file boundary.
   4. Watch one test fail, then fix the code, not the test; commit the failing test and the fix separately to show the habit.
-- **Done when:**
-  - [ ] Write the test first naturally for any new function.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 4 h)*
+  - [ ] Write the test first naturally for any new function, including a parametrized edge case.
   - [ ] Show green `uv run pytest` covering happy path, empty file, malformed row and wrong currency.
   - [ ] Explain why the parser is testable without touching the filesystem.
 - Est. hours: 4
@@ -327,8 +329,8 @@
   2. Leave five genuine line comments on your own PR — at least one design-level, not all nitpicks — using Conventional Comments labels.
   3. Fix all five in follow-up commits, replying to each comment as you would to a human reviewer.
   4. Write a three-line personal review checklist you'll apply to every future PR before requesting review.
-- **Done when:**
-  - [ ] Submit PRs pre-reviewed by you, with the checklist running in your head.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 2 h)*
+  - [ ] Submit PRs pre-reviewed by you, with the checklist running in your head; line comments critique code, not people.
   - [ ] Show five genuine self-review comments and their fixes in a real PR.
   - [ ] Distinguish a design-level comment from a nitpick in your own review record.
 - Est. hours: 2
@@ -342,4 +344,4 @@
 - **Acceptance criteria:** a stranger with Docker and uv reproduces everything from the README on a fresh machine; `uv run pytest` green; the chart answers a stated question; the Git history shows ≥3 PRs with self-review comments; rerunning the loader leaves row counts unchanged (truncate-reload verified).
 - Est. hours: 10
 
-*Phase 0 total: 46 h in-phase (taxonomy entries 36 h + capstone 10 h) + 90 h via A.27–A.31 = 136 h — every hour of it skippable via the [Skip List](#skip-list) tests.*
+*Phase 0 total: 46 h in-phase (taxonomy entries 36 h + capstone 10 h) + 90 h via A.27–A.31 = 136 h — every hour of it skippable: each module's *Done when* checklist is its Skip test (mechanism in the [Skip List](#skip-list)).*

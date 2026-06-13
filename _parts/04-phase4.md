@@ -1,6 +1,8 @@
 <a id="phase-4"></a>
 ## Phase 4: Streaming & Event-Driven Integration (months 22–27, 119 h)
 
+*Phase 4 of 8 · months 22–27 · 119 h · capstone: Real-time price/flow CDC streaming.*  ← [Phase 3](#phase-3) · [Phase 5](#phase-5) →
+
 **Goal:** close the streaming gap end-to-end: Kafka as the integration backbone, CDC off operational systems, the Beam-model semantics (event time, watermarks, windows), Flink for stateful processing, schema governance on the wire, and the event-driven patterns (outbox, saga, event sourcing) that regulated trade lifecycles are built from.
 **Entry prerequisites:** Phases 1–3 (integration-pattern theory from DDIA; lakehouse + orchestrator to land streams into).
 **Exit criteria:** you can (1) design a CDC-to-lakehouse flow with stated delivery guarantees and prove them; (2) explain watermarks well enough to debug a wrong window result; (3) own a schema-compatibility policy and show the registry enforcing it; (4) choose among Kafka/Event Hubs/Service Bus/Temporal/Camunda for a given fund workflow and defend it.

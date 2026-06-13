@@ -199,9 +199,9 @@ def autolink(html: str) -> str:
 
 
 ANCHOR_MAP = {
-    "how-to-use": "#/doc/guide", "phase-map": "#/doc/guide",
+    "how-to-use": "#/doc/guide", "phase-map": "#/",
     "tracking-progress": "#/doc/tracking", "certifications": "#/doc/tracking",
-    "publishing": "#/doc/tracking", "skip-list": "#/doc/skiplist",
+    "publishing": "#/doc/tracking", "skip-list": "#/p/0",
     "excluded": "#/doc/excluded", "appendix-a": "#/doc/appa",
     "appendix-b": "#/doc/appb", "appendix-c": "#/doc/appc", "appendix-d": "#/doc/appd",
 }
@@ -299,10 +299,11 @@ assert abs(total_est - 1100) < 1, f"hours drifted: {total_est}"
 header = (parts / "00-header.md").read_text(encoding="utf-8")
 g_end = header.index('<a id="tracking-progress"></a>')
 t_end = header.index('<a id="phase-map"></a>')
+# Phase map -> the home screen; skip tests -> each Phase-0 module's Done-when.
+# So the trailing "Phase Map / Skip List" pointer block (header[t_end:]) is not a standalone page.
 pages = [
     {"key": "guide", "title": "Overview & how to use", "md": header[:g_end]},
     {"key": "tracking", "title": "Tracking, certifications & publishing", "md": header[g_end:t_end]},
-    {"key": "skiplist", "title": "Phase map & skip tests", "md": header[t_end:]},
     {"key": "excluded", "title": "Excluded topics", "md": (parts / "09-excluded.md").read_text(encoding="utf-8")},
     {"key": "appa", "title": "Appendix A — Gap additions", "md": (parts / "10-appendix-a.md").read_text(encoding="utf-8")},
     {"key": "appb", "title": "Appendix B — Reading order", "md": (parts / "11-appendix-b.md").read_text(encoding="utf-8")},

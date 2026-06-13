@@ -1,6 +1,8 @@
 <a id="phase-1"></a>
 ## Phase 1: Distributed Data Systems & Modeling Core (months 7–11, 118 h)
 
+*Phase 1 of 8 · months 7–11 · 118 h · capstone: Fund reference OLTP + reporting mart.*  ← [Phase 0](#phase-0) · [Phase 2](#phase-2) →
+
 **Goal:** rebuild the theoretical foundation an architect reasons from — transaction guarantees, consistency, distribution tradeoffs, database internals — and turn existing modeling intuition into formal, teachable practice (conceptual→logical→physical, dimensional), documented with C4 and ADRs from day one.
 **Entry prerequisites:** Phase 0 — or its skip tests passed (Linux/shell, Python, SQL, Git, Docker, networking).
 **Exit criteria:** you can (1) explain isolation anomalies and pick an isolation level for a fund-order workload; (2) argue a replication/partitioning choice with PACELC, not folklore; (3) read a Postgres `EXPLAIN ANALYZE` and fix the plan; (4) produce a 3-level model + star schema for a fund domain and defend every key and SCD choice; (5) ship C4 diagrams + ADRs as a matter of habit.

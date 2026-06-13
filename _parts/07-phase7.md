@@ -1,6 +1,8 @@
 <a id="phase-7"></a>
 ## Phase 7: AI/ML & LLM Platforms for Fund Data (months 40–43, 74 h + 7 h Appendix A)
 
+*Phase 7 of 8 · months 40–43 · 81 h (74 h + 7 h Appendix A) · capstone: LLM extraction of fund documents.*  ← [Phase 6](#phase-6) · [Phase 8](#phase-8) →
+
 **Goal:** working-level command of the ML/LLM platform stack from the *data architect's* seat: the lifecycle (MLflow), feature serving, vector storage, RAG over fund documents, and — critically for regulated use — evaluation and tracing. Depth is deliberately T2/T3: you architect the platform ML teams run on; you don't compete with them on modeling.
 **Entry prerequisites:** Phases 2–6 (lakehouse, orchestration, governance — ML platforms inherit all of it). No ML-theory prerequisite: this phase targets platform-architecture depth, not modeling depth — the entries stay at the intuition level, and each resource is self-contained.
 **Exit criteria:** you can (1) design the MLOps lifecycle on your platform with registry, tracking, and promotion gates; (2) choose vector storage and defend hybrid search for RAG; (3) build and *evaluate* an LLM extraction pipeline over fund documents; (4) tell a CIO what LLMOps controls a regulated deployment needs (traces, evals, human gates) and show them running.

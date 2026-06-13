@@ -10,7 +10,7 @@
 <a id="how-to-use"></a>
 ## How to Use This Document
 
-1. **Day one: take the [Skip List](#skip-list) tests.** Work through each Phase-0 skip test honestly, on a real machine, not in your head. Mark each module *do* or *skip*. That marked-up table is your personal starting line — revisit it only to downgrade a "skip" you regret.
+1. **Day one: take each [Phase-0](#phase-0) module's Skip test.** Each module's *Done when* checklist is its Skip test — work through them honestly, on a real machine, not in your head. Mark each module *do* or *skip*. That marked-up list is your personal starting line — revisit it only to downgrade a "skip" you regret.
 2. **Work the phases strictly in order.** Each phase's prerequisites and capstone build on the previous one (the dependency chain is checked: 0→1→…→8). Inside a phase, take the T1/T2 entries roughly top to bottom; the T3 table can be sprinkled into spare half-hours anytime within the phase.
 3. **Read a topic entry as a contract:** *Why* tells you what the topic buys you in the target role — if it doesn't resonate, reread it after the Do. *Learn* is the checklist of concepts you must be able to explain. *Resource* is ONE primary source — resist collecting alternatives; the alternate is only for when the primary doesn't land. *Tools* is dual-track: **FOSS** = install and use it; **Corp** = evaluation level, meaning you can explain in a meeting what it costs, when it wins, and what locks you in — without ever installing it. *Do* is non-negotiable: the exercise *is* the learning. *Done when* is the exit gate — self-test it before moving on. *Est. hours* is a planning estimate, not a quota: stop when *Done when* is true.
 4. **Tier discipline:** **T1** topics get everything — do, redo, and be able to teach them; they are your interview spine. **T2** = complete the entry once, honestly. **T3** = read the one linked source for the listed minutes and move on; depth there is a deliberate non-goal — return only when a real project demands it.
@@ -72,47 +72,22 @@ The plan's content already covers these syllabi — certification is **recogniti
 **Renewal reality:** Microsoft role-based certs renew annually via a free online assessment; Databricks expires after 2 years; CDMP needs continuing-education credits every 3 years; TOGAF doesn't expire. Put renewals in the quarterly review.
 
 <a id="phase-map"></a>
+## Phase Map
 
-| Phase | Theme | Months | Hours | Capstone |
-|---|---|---|---|---|
-| [0](#phase-0) | Computing & data foundations — from zero (skippable per module) | 1–6 | 46 | Personal data toolbox (Python + SQL + Docker + Git, reproducible) |
-| [1](#phase-1) | Distributed data systems & modeling core | 7–11 | 118 | Fund reference OLTP + reporting mart (PostgreSQL, C4, ADRs) |
-| [2](#phase-2) | Lakehouse & analytics engineering | 12–16 | 123 | Fund-document lakehouse (MinIO + Iceberg + dbt/DuckDB/Trino medallion) |
-| [3](#phase-3) | Distributed compute, orchestration & engineering practice | 17–21 | 118 | Orchestrated Spark NAV pipeline (Dagster/Airflow, CI, lakeFS) |
-| [4](#phase-4) | Streaming & event-driven integration | 22–27 | 119 | Real-time price/flow CDC streaming (Kafka + Debezium + Flink) |
-| [5](#phase-5) | Cloud platform architecture & operations (Azure) | 28–33 | 108 | IaC-provisioned platform on Kubernetes + Azure Well-Architected review |
-| [6](#phase-6) | Governance, security & compliance | 34–39 | 120 | Governed platform: catalog + lineage + DQ + policy + DCAM self-assessment |
-| [7](#phase-7) | AI/ML & LLM platforms for fund data | 40–43 | 74 | LLM extraction of fund documents (RAG + evaluation harness) |
-| [8](#phase-8) | Data products, semantic layer & the architect's practice | 44–48 | 103 | Productized fund data product: contracts, SLAs, semantic layer, regulatory report |
-| [A](#appendix-a) | Gap additions (scheduled within phases 0, 1, 5, 6, 7, 8 above) | — | 173 | of which 90 h are the Phase-0 foundations A.27–A.31 |
-| | **Total** | **48** | **1,100** | **vs 1,152 h budget → 4.5% slack (964 h / 16% with Phase 0 skipped)** |
+The phase sequence — months, hours and capstone — now leads **each phase**: every phase heading is followed by a one-line locator (with prev/next navigation), and the same map is the home screen of the [tracker app](#tracking-progress). Budget reconciliation: 927 h of phase work + 173 h [Appendix A](#appendix-a) gap additions = **1,100 h** vs the **1,152 h** budget (4.5% slack; **964 h / 16%** if all of Phase 0 is skip-tested out). Phases run strictly in order, 0 → 8; each phase's capstone reuses the previous one's artifacts, ending in one governed, productized fund-data platform. Jump in: [Phase 0](#phase-0) · [1](#phase-1) · [2](#phase-2) · [3](#phase-3) · [4](#phase-4) · [5](#phase-5) · [6](#phase-6) · [7](#phase-7) · [8](#phase-8).
 
 <a id="skip-list"></a>
 ## Skip List
 
-Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip test** below — take it honestly; pass = skip the module and bank the hours, any doubt = do the module. (No other phase is skippable.)
-
-| Module | Covers | Hours banked | Skip if you can do this cold, today |
-|---|---|---|---|
-| 0.1 Linux & shell | A.27 | 12 | In a terminal: find all `.csv` under a directory, count lines matching a pattern with a pipe, fix a permission error, ssh into a machine, and explain what `$PATH` does. |
-| 0.2 Python | A.28 | 36 | Write (without a template) a CLI script that reads a CSV, filters rows via a function you define, writes JSON, handles a malformed line gracefully — and run it with `uv run`. |
-| 0.3 SQL | A.29 | 26 | Against two joined tables: explain why a LEFT JOIN changed the row count, write a GROUP BY with HAVING, and return the latest row per group with a window function. |
-| 0.4 Git & GitHub | 9.2.1 | 8 | Branch, commit, push, open a PR, resolve a merge conflict, and name when `revert` is safer than `reset`. |
-| 0.5 Docker | A.30 | 8 | Write a Dockerfile from scratch and a two-service `docker-compose.yml` with a volume and a healthcheck; debug a failing container from its logs. |
-| 0.6 Networking & web | A.31 | 8 | Narrate everything between typing a URL and the page rendering (DNS, TCP, TLS, HTTP), and read `curl -v` output line by line. |
-| 0.7 Data basics | 1.1.1–1.1.3 | 6 | Explain UTF-8 mojibake, name three ways CSV files break, and classify five datasets as structured/semi-structured/unstructured. |
-| 0.8 Workloads & batch | 1.2.1, 1.3.1, 1.3.2 | 4 | Sort ten workloads into OLTP/OLAP/batch and say why a row store loses to a column store on scans. |
-| 0.9 pandas & notebooks | 5.4.2, 14.5.2 | 10 | Load a messy CSV in JupyterLab, clean it, groupby-aggregate, chart it, write Parquet — and explain the hidden-state danger of notebooks. |
-| 0.10 Editor & IDE | 9.1.1, 9.1.2 | 2 | Debug with a breakpoint (no prints), and your editor runs lint + terminal + notebooks in one window. |
-| 0.11 Unit testing | 9.4.1 | 4 | Write pytest cases incl. a parametrized edge case, and structure code so it's testable (pure functions). |
-| 0.12 Code review | 9.5.1 | 2 | Self-review a PR with a checklist and write line comments that critique code, not people. |
-| Capstone 0 | — | 10 | Skip only if every test above passed — the capstone exists to prove they compose. |
+Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist is also its Skip test** — the criteria, and the hours you bank by passing them cold, live in each module under [Phase 0](#phase-0). Take each honestly: tick every box cold today → skip that module and bank its hours as slack (up to the full **136 h** of Phase 0); any box you can't → do the module. No other phase is skippable. Record what you bank in the skip ledger ([Tracking Progress](#tracking-progress)).
 
 
 <a id="phase-0"></a>
 ## Phase 0: Computing & Data Foundations — from zero (months 1–6, 46 h + 90 h Appendix A)
 
-**Goal:** everything later phases silently stand on, taught from nothing: a Linux working environment, Python, SQL, Git, Docker, how networks and the web work, what data physically is, and the daily toolkit (pandas, notebooks, tests, code review). **Nothing in this plan assumes prior knowledge** — instead, every module below has a **skip test** (collected in the [Skip List](#skip-list)). Pass the test honestly → skip the module and bank its hours as slack. Fail any part → do the module.
+*Phase 0 of 8 · months 1–6 · 136 h total (46 h in-phase + 90 h foundation modules) — every hour skip-testable · capstone: Personal data toolbox.*  start · [Phase 1](#phase-1) →
+
+**Goal:** everything later phases silently stand on, taught from nothing: a Linux working environment, Python, SQL, Git, Docker, how networks and the web work, what data physically is, and the daily toolkit (pandas, notebooks, tests, code review). **Nothing in this plan assumes prior knowledge** — instead, **each module's *Done when* checklist doubles as its Skip test**. If you can tick every box cold today → skip the module and bank its hours as slack (the mechanism is summarized in the [Skip List](#skip-list)). Any box you can't → do the module.
 **Entry prerequisites:** none. A computer with admin rights is enough.
 **Exit criteria:** you can (1) live in a terminal (navigate, pipe, grep, ssh, write a small script); (2) write a Python program that reads files, calls functions you wrote, and runs under `uv`; (3) answer questions from a multi-table database with joins, aggregation, and a window function; (4) commit, branch, and open a pull request; (5) run a two-service Docker Compose stack; (6) explain what happens between typing a URL and seeing a page.
 
@@ -143,10 +118,10 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Write `fetch_count.sh`: `curl` downloads a public CSV (any ECB series works), `grep -c` counts rows matching a pattern passed as `$1`, and a `date`-stamped line is appended to `run.log` with `>>`.
   3. Harden it: `set -euo pipefail`, a usage message when `$1` is missing, non-zero exit on download failure; prove each path with a deliberate failure.
   4. Schedule it with cron (compose the expression with crontab.guru), let it run a few cycles, and confirm `run.log` grows; note where cron's own output goes.
-- **Done when:**
-  - [ ] Stop reaching for the file explorer — daily file work (move, inspect, search) happens in the terminal without thinking.
-  - [ ] Pass the skip test in the Skip List cold.
-  - [ ] Explain every field of your crontab line and read an unfamiliar pipeline (`grep ... | sort | uniq -c`) aloud correctly.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 12 h)*
+  - [ ] Daily file work (move, inspect, search) happens in the terminal without reaching for the file explorer.
+  - [ ] Find all `.csv` under a directory tree, count pattern matches through a pipe, fix a permission error, and ssh into a machine — cold.
+  - [ ] Explain every field of your crontab line, what `$PATH` does, and read an unfamiliar pipeline (`grep ... | sort | uniq -c`) aloud correctly.
 - Est. hours: counted as A.27 (12 h, Appendix A)
 
 #### 0.2 — A.28 Programming from zero: Python
@@ -172,8 +147,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   3. Split it into functions — parse, filter, summarize, write — so each is callable (and, in 0.11, testable) on its own.
   4. Make failure honest: a malformed row raises with its row number; a missing input file exits non-zero with a one-line message, not a raw traceback.
   5. Write `--help` text good enough that someone else can run it without reading the code.
-- **Done when:**
-  - [ ] Write a 100-line script without copying structure from examples.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 36 h)*
+  - [ ] Write a 100-line script (read a CSV, filter rows via a function you define, write JSON, handle a malformed line) without copying structure from examples.
   - [ ] Verify `uv run fundcli.py --help` behaves like a real tool — flags documented, errors clean, exit codes correct.
   - [ ] Diagnose a planted TypeError from its traceback alone, narrating the read order.
 - Est. hours: counted as A.28 (36 h, Appendix A)
@@ -201,8 +176,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Answer 15 questions of rising difficulty in a committed `.sql` file: filters → joins → GROUP BY → CTEs → "latest NAV per fund via window function".
   3. Break one join on purpose (duplicate a fund row) and document the row-count multiplication before fixing it.
   4. For two of the slower queries, run `EXPLAIN` before and after adding an index and note what changed.
-- **Done when:**
-  - [ ] Demonstrate joins and GROUP BY as reflexes — no syntax lookups for the core 15 questions.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 26 h)*
+  - [ ] Demonstrate joins and GROUP BY (with HAVING) as reflexes — no syntax lookups for the core 15 questions.
   - [ ] Explain a LEFT JOIN row-count surprise to someone else, using your duplicated-fund example.
   - [ ] Predict which of three given queries an index would help, and verify with EXPLAIN.
 - Est. hours: counted as A.29 (26 h, Appendix A)
@@ -228,8 +203,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Develop a feature (e.g., a `--format csv|json` flag) on a branch with small commits and real messages; open a PR to yourself and merge it.
   3. Force a merge conflict — edit the same function on two branches — and resolve it by reading the conflict markers, not by clicking "accept theirs".
   4. Practice undo: `git restore` a bad edit, `git revert` a merged commit, `git reset` an unpushed one; write one line each on when it's safe.
-- **Done when:**
-  - [ ] Survive a deliberately broken rebase/merge without fear — you know which undo applies.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 8 h)*
+  - [ ] Survive a deliberately broken rebase/merge without fear — you know which undo applies and when `revert` is safer than `reset`.
   - [ ] Explain the three states and trace a file through them with `git status` at each step.
   - [ ] Show a PR with a clean description, small commits and a resolved conflict in its history.
 - Est. hours: 8
@@ -255,8 +230,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   3. Prove persistence: `docker compose down && docker compose up` shows the data survived; then `down -v` — explain why it didn't.
   4. Break the loader (wrong env var for the DB password) and diagnose it from `docker logs` alone.
   5. Run a cleanup pass (`docker system df`, then prune) and record what was reclaimed.
-- **Done when:**
-  - [ ] Explain image vs container vs volume to a colleague in plain words.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 8 h)*
+  - [ ] Explain image vs container vs volume to a colleague in plain words, and write a Dockerfile + two-service `docker-compose.yml` (volume + healthcheck) from scratch.
   - [ ] Debug a failing container from its logs without rebuilding blindly.
   - [ ] Start the whole stack with one `docker compose up` from a clean clone.
 - Est. hours: counted as A.30 (8 h, Appendix A)
@@ -282,8 +257,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. `curl -v` the URL and annotate every line of the output in a committed text file: resolution, TCP connect, TLS handshake, request headers, response status and headers.
   3. Probe your local 0.5 Postgres port and a firewalled port; classify each failure ("refused" vs "timeout") by layer.
   4. Write a one-page triage table: "slow / blocked / cert error / name not found" → first layer to check → first command to run.
-- **Done when:**
-  - [ ] Map "it's slow / it's blocked / cert error" each to a layer you'd check first.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 8 h)*
+  - [ ] Map "it's slow / it's blocked / cert error" each to a layer you'd check first, and narrate URL→page (DNS, TCP, TLS, HTTP).
   - [ ] Annotate a fresh `curl -v` of an unseen URL correctly on the first pass.
   - [ ] Explain why DNS can succeed while the connection still times out, with one plausible cause per layer.
 - Est. hours: counted as A.31 (8 h, Appendix A)
@@ -309,8 +284,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Break the CSV twice: inject a stray separator inside a fund name, then re-save a copy in Latin-1 so accented names mangle.
   3. Detect both programmatically — a column-count check per row, and a decode-with-fallback that flags suspect lines — then fix and reload.
   4. Write ten lines: which shape you'd mandate for a vendor NAV feed and why, citing the failure modes you just caused.
-- **Done when:**
-  - [ ] Name the failure modes of CSV from your own scars, not a list.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 6 h)*
+  - [ ] Name the failure modes of CSV from your own scars (and explain UTF-8 mojibake), not a list.
   - [ ] Classify NAV table / EMT file / prospectus PDF as structured / semi-structured / unstructured with one-line justifications.
   - [ ] Demonstrate detecting and repairing an encoding mangle programmatically.
 - Est. hours: 6
@@ -336,8 +311,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Run the same "average NAV per fund per month" query on Postgres and on DuckDB-over-Parquet; record timings, cold and warm.
   3. Run a single-row lookup by fund key on both; record timings again and note the reversal.
   4. Write five sentences on why they differ, arguing from row-vs-column layout — no hand-waving about "DuckDB is fast".
-- **Done when:**
-  - [ ] Sort ten example workloads into OLTP/OLAP/batch without hesitation.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 4 h)*
+  - [ ] Sort ten example workloads into OLTP/OLAP/batch without hesitation, and say why a row store loses to a column store on scans.
   - [ ] Explain your timing results from storage layout, including the case each engine wins.
   - [ ] State where the daily-NAV batch sits on the split and what that implies for where it runs.
 - Est. hours: 4
@@ -365,8 +340,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   3. Produce a monthly per-fund summary via groupby/resample and one chart answering a stated question (e.g., "which fund's NAV is most volatile?").
   4. Write the result to both Parquet and Postgres (to_sql against the 0.5 stack); read each back and assert equality.
   5. Restart kernel, Run All — fix whatever breaks, and note which hidden-state assumption bit you.
-- **Done when:**
-  - [ ] Pass the skip test.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 10 h)*
+  - [ ] Load a messy CSV in JupyterLab, clean it, groupby-aggregate, chart it, and write Parquet — cold.
   - [ ] Explain *why* notebook state burned you at least once, and the restart-and-run-all habit that prevents it.
   - [ ] Reproduce the entire cleaned output from a fresh kernel in one run.
 - Est. hours: 10
@@ -391,8 +366,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Plant a bug in a `fundcli` function (e.g., a filter that drops the wrong currency) on a branch.
   3. Debug it with a breakpoint inside the function: inspect variables, step through the filter, fix it — without a single print.
   4. Drill the bindings for run, breakpoint toggle, command palette and go-to-definition until the mouse is optional.
-- **Done when:**
-  - [ ] Run the edit-run-debug loop frictionlessly, entirely inside the editor + terminal.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 2 h)*
+  - [ ] Run the edit-run-debug loop frictionlessly, entirely inside the editor + terminal (lint + terminal + notebooks in one window).
   - [ ] Fix a planted bug via breakpoints and variable inspection, no prints.
   - [ ] Open any repo, terminal and debugger without touching the mouse.
 - Est. hours: 2
@@ -416,8 +391,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Add tests: happy path, empty file, malformed row, wrong currency — the malformed-row cases via `@pytest.mark.parametrize`.
   3. Use a fixture for the sample funds data; keep tests file-free where possible, with one tmp_path test for the file boundary.
   4. Watch one test fail, then fix the code, not the test; commit the failing test and the fix separately to show the habit.
-- **Done when:**
-  - [ ] Write the test first naturally for any new function.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 4 h)*
+  - [ ] Write the test first naturally for any new function, including a parametrized edge case.
   - [ ] Show green `uv run pytest` covering happy path, empty file, malformed row and wrong currency.
   - [ ] Explain why the parser is testable without touching the filesystem.
 - Est. hours: 4
@@ -438,8 +413,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
   2. Leave five genuine line comments on your own PR — at least one design-level, not all nitpicks — using Conventional Comments labels.
   3. Fix all five in follow-up commits, replying to each comment as you would to a human reviewer.
   4. Write a three-line personal review checklist you'll apply to every future PR before requesting review.
-- **Done when:**
-  - [ ] Submit PRs pre-reviewed by you, with the checklist running in your head.
+- **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 2 h)*
+  - [ ] Submit PRs pre-reviewed by you, with the checklist running in your head; line comments critique code, not people.
   - [ ] Show five genuine self-review comments and their fixes in a real PR.
   - [ ] Distinguish a design-level comment from a nitpick in your own review record.
 - Est. hours: 2
@@ -453,11 +428,13 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 - **Acceptance criteria:** a stranger with Docker and uv reproduces everything from the README on a fresh machine; `uv run pytest` green; the chart answers a stated question; the Git history shows ≥3 PRs with self-review comments; rerunning the loader leaves row counts unchanged (truncate-reload verified).
 - Est. hours: 10
 
-*Phase 0 total: 46 h in-phase (taxonomy entries 36 h + capstone 10 h) + 90 h via A.27–A.31 = 136 h — every hour of it skippable via the [Skip List](#skip-list) tests.*
+*Phase 0 total: 46 h in-phase (taxonomy entries 36 h + capstone 10 h) + 90 h via A.27–A.31 = 136 h — every hour of it skippable: each module's *Done when* checklist is its Skip test (mechanism in the [Skip List](#skip-list)).*
 
 
 <a id="phase-1"></a>
 ## Phase 1: Distributed Data Systems & Modeling Core (months 7–11, 118 h)
+
+*Phase 1 of 8 · months 7–11 · 118 h · capstone: Fund reference OLTP + reporting mart.*  ← [Phase 0](#phase-0) · [Phase 2](#phase-2) →
 
 **Goal:** rebuild the theoretical foundation an architect reasons from — transaction guarantees, consistency, distribution tradeoffs, database internals — and turn existing modeling intuition into formal, teachable practice (conceptual→logical→physical, dimensional), documented with C4 and ADRs from day one.
 **Entry prerequisites:** Phase 0 — or its skip tests passed (Linux/shell, Python, SQL, Git, Docker, networking).
@@ -805,6 +782,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 
 <a id="phase-2"></a>
 ## Phase 2: Lakehouse & Analytics Engineering (months 12–16, 123 h)
+
+*Phase 2 of 8 · months 12–16 · 123 h · capstone: Fund-document lakehouse.*  ← [Phase 1](#phase-1) · [Phase 3](#phase-3) →
 
 **Goal:** master the open lakehouse stack — object storage, columnar formats, ACID table formats, federated SQL, dbt — and ground the whole plan in the fund-data domain by learning the financial standards the platform will carry (ISO 20022, EMT/EPT, instrument identifiers).
 **Entry prerequisites:** Phase 1 (modeling discipline, Postgres internals vocabulary, Docker Compose stack).
@@ -1282,6 +1261,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 <a id="phase-3"></a>
 ## Phase 3: Distributed Compute, Orchestration & Engineering Practice (months 17–21, 118 h)
 
+*Phase 3 of 8 · months 17–21 · 118 h · capstone: Orchestrated Spark NAV pipeline.*  ← [Phase 2](#phase-2) · [Phase 4](#phase-4) →
+
 **Goal:** close the two biggest gaps that block scale — Spark and orchestration — and wrap the platform in software-engineering discipline: CI/CD for data, data versioning with write-audit-publish, integration testing, and managed schema change.
 **Entry prerequisites:** Phase 2 (lakehouse running; dbt project to orchestrate).
 **Exit criteria:** you can (1) explain a Spark job's stages and fix a skewed join from the UI; (2) defend Airflow vs Dagster vs ADF for a given team; (3) ship a pipeline change through CI with tests, data diff, and an audited publish; (4) run schema change in a regulated estate without downtime (expand–contract).
@@ -1541,6 +1522,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 
 <a id="phase-4"></a>
 ## Phase 4: Streaming & Event-Driven Integration (months 22–27, 119 h)
+
+*Phase 4 of 8 · months 22–27 · 119 h · capstone: Real-time price/flow CDC streaming.*  ← [Phase 3](#phase-3) · [Phase 5](#phase-5) →
 
 **Goal:** close the streaming gap end-to-end: Kafka as the integration backbone, CDC off operational systems, the Beam-model semantics (event time, watermarks, windows), Flink for stateful processing, schema governance on the wire, and the event-driven patterns (outbox, saga, event sourcing) that regulated trade lifecycles are built from.
 **Entry prerequisites:** Phases 1–3 (integration-pattern theory from DDIA; lakehouse + orchestrator to land streams into).
@@ -2014,6 +1997,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 <a id="phase-5"></a>
 ## Phase 5: Cloud Platform Architecture & Operations — Azure (months 28–33, 108 h + 37 h Appendix A)
 
+*Phase 5 of 8 · months 28–33 · 145 h (108 h + 37 h Appendix A) · capstone: IaC platform on Kubernetes + Well-Architected review.*  ← [Phase 4](#phase-4) · [Phase 6](#phase-6) →
+
 **Goal:** turn the laptop platform into a cloud-shaped one: Azure reference architecture (WAF/CAF), infrastructure as code, Kubernetes as the runtime substrate, the Azure data services at evaluation depth, and the operations disciplines (observability, DR, FinOps) that keep a regulated platform alive and affordable.
 **Entry prerequisites:** Phases 2–4 (a real multi-service stack worth provisioning); Appendix A items A.3 (networking), A.4 (Fabric), A.5 (KQL), A.6 (Kubernetes), A.22 (relational HA), A.25 (warehouse performance), A.26 (chaos/resilience testing) are scheduled inside this phase.
 **Exit criteria:** you can (1) run a Well-Architected review of your own design and find real findings; (2) provision and tear down the platform from code alone; (3) state RTO/RPO for each platform tier and the topology that delivers it; (4) produce a defensible monthly-cost model for the Azure target architecture; (5) operate the stack on Kubernetes locally and explain what AKS changes.
@@ -2406,6 +2391,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 
 <a id="phase-6"></a>
 ## Phase 6: Governance, Security & Compliance (months 34–39, 120 h + 14 h Appendix A)
+
+*Phase 6 of 8 · months 34–39 · 134 h (120 h + 14 h Appendix A) · capstone: Governed platform — catalog, lineage, DQ, policy, DCAM.*  ← [Phase 5](#phase-5) · [Phase 7](#phase-7) →
 
 **Goal:** build the control plane of a regulated data platform: catalog + lineage as the metadata backbone, data quality as an engineering discipline, MDM/RDM for the entities the fund industry lives on, fine-grained access control and masking, and the regulatory frameworks (GDPR, DORA, DCAM) that decide what "good" means in Luxembourg.
 **Entry prerequisites:** Phases 2–5 (a platform worth governing; OTel/observability foundations).
@@ -2977,6 +2964,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 <a id="phase-7"></a>
 ## Phase 7: AI/ML & LLM Platforms for Fund Data (months 40–43, 74 h + 7 h Appendix A)
 
+*Phase 7 of 8 · months 40–43 · 81 h (74 h + 7 h Appendix A) · capstone: LLM extraction of fund documents.*  ← [Phase 6](#phase-6) · [Phase 8](#phase-8) →
+
 **Goal:** working-level command of the ML/LLM platform stack from the *data architect's* seat: the lifecycle (MLflow), feature serving, vector storage, RAG over fund documents, and — critically for regulated use — evaluation and tracing. Depth is deliberately T2/T3: you architect the platform ML teams run on; you don't compete with them on modeling.
 **Entry prerequisites:** Phases 2–6 (lakehouse, orchestration, governance — ML platforms inherit all of it). No ML-theory prerequisite: this phase targets platform-architecture depth, not modeling depth — the entries stay at the intuition level, and each resource is self-contained.
 **Exit criteria:** you can (1) design the MLOps lifecycle on your platform with registry, tracking, and promotion gates; (2) choose vector storage and defend hybrid search for RAG; (3) build and *evaluate* an LLM extraction pipeline over fund documents; (4) tell a CIO what LLMOps controls a regulated deployment needs (traces, evals, human gates) and show them running.
@@ -3250,6 +3239,8 @@ Nothing is skipped by assumption. Each [Phase 0](#phase-0) module has a **skip t
 
 <a id="phase-8"></a>
 ## Phase 8: Data Products, Semantic Layer & the Architect's Practice (months 44–48, 103 h + 18.5 h Appendix A)
+
+*Phase 8 of 8 · months 44–48 · 121.5 h (103 h + 18.5 h Appendix A) · capstone: Productized fund data product.*  ← [Phase 7](#phase-7) · finish →
 
 **Goal:** convert the governed platform into *products* — contracted, SLA-backed, semantically defined, consumable — and consolidate the formal architect's practice: DDD for boundaries, TOGAF/ArchiMate for the enterprise conversation, regulatory reporting as the domain's flagship deliverable, and the build-vs-buy fluency that Appendix D distills.
 **Entry prerequisites:** Phases 1–7 (everything; this phase productizes the accumulated platform).

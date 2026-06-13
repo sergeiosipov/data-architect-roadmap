@@ -1,6 +1,8 @@
 <a id="phase-6"></a>
 ## Phase 6: Governance, Security & Compliance (months 34–39, 120 h + 14 h Appendix A)
 
+*Phase 6 of 8 · months 34–39 · 134 h (120 h + 14 h Appendix A) · capstone: Governed platform — catalog, lineage, DQ, policy, DCAM.*  ← [Phase 5](#phase-5) · [Phase 7](#phase-7) →
+
 **Goal:** build the control plane of a regulated data platform: catalog + lineage as the metadata backbone, data quality as an engineering discipline, MDM/RDM for the entities the fund industry lives on, fine-grained access control and masking, and the regulatory frameworks (GDPR, DORA, DCAM) that decide what "good" means in Luxembourg.
 **Entry prerequisites:** Phases 2–5 (a platform worth governing; OTel/observability foundations).
 **Exit criteria:** you can (1) stand up a catalog with end-to-end lineage and answer an impact-analysis question from it; (2) design a DQ framework from profiling to alerting with rules tied to the six dimensions; (3) design a security-master MDM with match/merge and survivorship; (4) implement RLS/CLS and policy-as-code on the lakehouse; (5) map your platform to GDPR/DORA obligations and lead a DCAM self-assessment.

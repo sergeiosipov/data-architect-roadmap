@@ -1,6 +1,8 @@
 <a id="phase-2"></a>
 ## Phase 2: Lakehouse & Analytics Engineering (months 12–16, 123 h)
 
+*Phase 2 of 8 · months 12–16 · 123 h · capstone: Fund-document lakehouse.*  ← [Phase 1](#phase-1) · [Phase 3](#phase-3) →
+
 **Goal:** master the open lakehouse stack — object storage, columnar formats, ACID table formats, federated SQL, dbt — and ground the whole plan in the fund-data domain by learning the financial standards the platform will carry (ISO 20022, EMT/EPT, instrument identifiers).
 **Entry prerequisites:** Phase 1 (modeling discipline, Postgres internals vocabulary, Docker Compose stack).
 **Exit criteria:** you can (1) explain a Parquet footer and an Iceberg snapshot to a skeptic; (2) defend Iceberg vs Delta for a given estate; (3) run a tested, documented dbt project with layered models; (4) design a raw vault for an audit-driven warehouse; (5) read an ISO 20022 message and an EMT file and say where each field lands in your model.

@@ -1,6 +1,8 @@
 <a id="phase-3"></a>
 ## Phase 3: Distributed Compute, Orchestration & Engineering Practice (months 17–21, 118 h)
 
+*Phase 3 of 8 · months 17–21 · 118 h · capstone: Orchestrated Spark NAV pipeline.*  ← [Phase 2](#phase-2) · [Phase 4](#phase-4) →
+
 **Goal:** close the two biggest gaps that block scale — Spark and orchestration — and wrap the platform in software-engineering discipline: CI/CD for data, data versioning with write-audit-publish, integration testing, and managed schema change.
 **Entry prerequisites:** Phase 2 (lakehouse running; dbt project to orchestrate).
 **Exit criteria:** you can (1) explain a Spark job's stages and fix a skewed join from the UI; (2) defend Airflow vs Dagster vs ADF for a given team; (3) ship a pipeline change through CI with tests, data diff, and an audited publish; (4) run schema change in a regulated estate without downtime (expand–contract).
