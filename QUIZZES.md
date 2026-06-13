@@ -30151,3 +30151,10254 @@ Flyway scans the directories (and classpath locations) listed in its `locations`
 Expand–contract breaks a scary change into individually safe steps; DB-before-code with backward-compatible migrations sequences each step so the live system never sees an incompatible schema; roll-forward gives a tested, append-only recovery model backed by backups instead of untested down-scripts. The result is that even a destructive change like a column rename happens under live traffic with zero failed loads and a complete history-table audit trail. That combination is exactly what lets a regulated estate satisfy a change advisory board while keeping the dealing window open.
 
 </details>
+
+
+## Phase 4 · 2.4.1 Distributed logs (Kafka) — 100 self-test questions
+
+<details><summary><b>1.</b> What is the core abstraction Kafka provides, in one sentence?</summary>
+
+Kafka is a distributed, append-only, replayable commit log: producers append records to the end of a log and consumers read forward at their own pace by tracking a position called an offset. Unlike a queue, reading a record does not remove it — records persist for the configured retention so many independent consumers can replay the same history. For a fund estate this is what lets a trade-event stream be both a live feed and an auditable, reprocessable record of what happened.
+
+</details>
+
+<details><summary><b>2.</b> What is a `topic` in Kafka?</summary>
+
+A `topic` is a named logical stream of records — the unit producers write to and consumers subscribe to, analogous to a table name or a category. It is a purely logical grouping; the physical storage and parallelism come from the partitions underneath it. Example: a `fund-orders` topic carries all order events, while `fund-reference` carries reference-data changes.
+
+</details>
+
+<details><summary><b>3.</b> What is a `partition` and why does Kafka split topics into them?</summary>
+
+A partition is an ordered, immutable, append-only sequence of records — the actual physical log on disk and the unit of parallelism and ordering. A topic is split into partitions so that throughput can scale horizontally across brokers and so that multiple consumers in a group can each own a distinct slice. The key consequence is that ordering is guaranteed only within a single partition, never across the whole topic.
+
+</details>
+
+<details><summary><b>4.</b> What is an `offset` and what scope does it have?</summary>
+
+An offset is a monotonically increasing integer that uniquely identifies a record's position within one partition — it is the per-partition sequence number, starting at 0. Offsets are meaningful only inside their own partition; offset 100 in partition 0 has no relation to offset 100 in partition 1. A consumer's progress is just the set of offsets it has read per partition, which is what makes replay (reset to an earlier offset) possible.
+
+</details>
+
+<details><summary><b>5.</b> What is a log `segment` and why does Kafka use them instead of one giant file?</summary>
+
+A partition's log is physically broken into segment files, each a chunk of the log plus its index files; only the newest (active) segment is open for writes while older ones are sealed. Segmentation is what makes retention and compaction tractable: Kafka deletes or compacts whole closed segments rather than rewriting one enormous file. The active segment is never deleted, which is why a very small topic can keep data longer than its retention suggests.
+
+</details>
+
+<details><summary><b>6.</b> What two configuration knobs roll a segment to a new file?</summary>
+
+A segment rolls when it reaches `segment.bytes` (size limit, default 1 GiB) or when `segment.ms` elapses since the segment was created (time limit). Whichever triggers first closes the active segment and opens a new one, making the closed segment eligible for retention-based deletion or compaction. Tuning these matters because retention and compaction only ever act on closed segments, so huge segments delay cleanup.
+
+</details>
+
+<details><summary><b>7.</b> What is the difference between retention and compaction as cleanup policies?</summary>
+
+Retention (`cleanup.policy=delete`) discards whole segments once they age past `retention.ms` or the partition exceeds `retention.bytes`, regardless of keys — it is time/size-bounded history. Compaction (`cleanup.policy=compact`) instead keeps the latest value per key forever and only removes superseded older values, turning the log into a changelog. They answer different questions: retention bounds how far back you can replay; compaction bounds storage while preserving current state per key.
+
+</details>
+
+<details><summary><b>8.</b> Can a topic use both retention and compaction at once?</summary>
+
+Yes — set `cleanup.policy=compact,delete` and Kafka both compacts (keeps the latest value per key) and applies time/size retention to age out old data entirely. This suits a changelog that should keep current state per key but still not retain genuinely ancient keys forever. Without `delete` added, a purely compacted topic never drops a key whose latest value is a real (non-tombstone) record.
+
+</details>
+
+<details><summary><b>9.</b> What does `retention.ms=-1` mean on a topic?</summary>
+
+A value of `-1` disables time-based retention, meaning Kafka never deletes segments because of age — data is kept indefinitely (subject to `retention.bytes` if set). This is used for topics meant as a permanent record, such as an event-sourced ledger you intend to replay from the beginning. Be deliberate: infinite retention is a real storage and compliance commitment, not a default to reach for casually.
+
+</details>
+
+<details><summary><b>10.</b> A consumer asks for offset 5 but the partition's earliest available offset is 200 — what happens?</summary>
+
+The requested offset is below the log-start offset because retention already deleted those segments, so the broker returns an out-of-range condition and the consumer must follow its `auto.offset.reset` policy. With `auto.offset.reset=earliest` it jumps to the new earliest offset (200); with `latest` it jumps to the end; with `none` it raises an error. The lesson is that retention can silently invalidate stored offsets if a consumer is offline longer than the retention window.
+
+</details>
+
+<details><summary><b>11.</b> What is the `log-start offset` versus the `log-end offset` of a partition?</summary>
+
+The log-start offset is the offset of the earliest record still retained (it rises as old segments are deleted), and the log-end offset is one past the last written record — the position the next append will take. The difference between a consumer's committed offset and the log-end offset is its lag. These two markers define the replayable window: you can rewind anywhere between log-start and log-end.
+
+</details>
+
+<details><summary><b>12.</b> What is a producer `acks` setting and what do the three values mean?</summary>
+
+`acks` controls how many broker acknowledgements a producer waits for before considering a send successful: `acks=0` waits for none (fire-and-forget, may lose data), `acks=1` waits for the leader only, and `acks=all` (a.k.a. `-1`) waits for all in-sync replicas. It is the durability dial — higher acks trade latency for stronger guarantees against loss on broker failure. For settlement-grade events you use `acks=all`.
+
+</details>
+
+<details><summary><b>13.</b> What exactly does `acks=all` guarantee, and what does it not guarantee alone?</summary>
+
+`acks=all` guarantees the record is persisted on the leader and replicated to every replica currently in the in-sync replica set before the producer is told it succeeded, so a single broker loss cannot lose an acknowledged record. It does not by itself guarantee against duplicates from producer retries, nor does it help if the ISR has shrunk to just the leader — that is why it must be paired with `min.insync.replicas` and idempotence. Alone it answers "won't lose," not "won't duplicate" or "enough replicas."
+
+</details>
+
+<details><summary><b>14.</b> What problem does the idempotent producer solve?</summary>
+
+It prevents duplicate records caused by producer retries: when a send times out and the producer resends, the broker would normally write the message twice, but an idempotent producer deduplicates so each record is written exactly once per partition. It works by tagging each batch with a producer ID and a per-partition sequence number the broker uses to detect and drop resends. This gives you exactly-once-into-the-partition for a single producer session without transactions.
+
+</details>
+
+<details><summary><b>15.</b> How do you enable the idempotent producer, and is it on by default in current Kafka?</summary>
+
+You set `enable.idempotence=true`; in modern Kafka (3.0+) this is the default, which also implicitly requires `acks=all`, `retries` greater than 0, and `max.in.flight.requests.per.connection` at most 5. If you explicitly set conflicting values (e.g. `acks=1`) the client will reject the config or disable idempotence. The practical takeaway is that out of the box you already get retry-safe, no-duplicate writes per partition.
+
+</details>
+
+<details><summary><b>16.</b> What do Kafka transactions add on top of the idempotent producer?</summary>
+
+Transactions let a producer write to multiple partitions (and commit consumer offsets) atomically — either all writes become visible together or none do — extending idempotence from one partition to a set. You configure a `transactional.id`, call `beginTransaction`/`commitTransaction`, and consumers reading with `isolation.level=read_committed` see only committed records. This is the building block of consume-process-produce exactly-once within Kafka, e.g. read an order, compute, and write a result atomically.
+
+</details>
+
+<details><summary><b>17.</b> What does `isolation.level=read_committed` change for a consumer?</summary>
+
+It makes the consumer skip records that belong to aborted transactions and not read past any open (uncommitted) transaction, so it only ever sees data that was atomically committed. The default `read_uncommitted` shows all records including those later aborted. The cost is a small added latency, because a consumer must wait for a transaction to commit or abort before delivering records beyond the last stable offset.
+
+</details>
+
+<details><summary><b>18.</b> What is the Last Stable Offset (LSO) and why does it matter to a read_committed consumer?</summary>
+
+The LSO is the offset up to which all transactional records are decided (committed or aborted); a `read_committed` consumer will not deliver records beyond the LSO because their fate is still unknown. It is what causes a read_committed consumer to appear to "wait" when a long-running transaction is open upstream. A stuck or hung transaction can therefore stall committed consumers until it is committed, aborted, or fenced by the transaction timeout.
+
+</details>
+
+<details><summary><b>19.</b> For ordering within a single partition under retries, what setting prevents reordering?</summary>
+
+Enabling the idempotent producer (`enable.idempotence=true`) preserves per-partition order even with retries and multiple in-flight requests, because the broker uses sequence numbers to reject out-of-order or duplicate batches. Without idempotence, you would have to set `max.in.flight.requests.per.connection=1` to guarantee a retried batch cannot land after a later one. So idempotence buys both no-duplicates and no-reordering without throttling to one in-flight request.
+
+</details>
+
+<details><summary><b>20.</b> What is a consumer group and what does it accomplish?</summary>
+
+A consumer group is a set of consumers sharing a `group.id` that cooperatively divide a topic's partitions so each partition is consumed by exactly one member of the group at a time. It provides horizontal scaling (add consumers to process more partitions in parallel) and fault tolerance (if one dies its partitions are reassigned). Different groups are independent, so two groups each get a full copy of the stream — this is how Kafka does fan-out.
+
+</details>
+
+<details><summary><b>21.</b> What is the relationship between partition count and the maximum useful consumers in a group?</summary>
+
+Within one group, a partition is assigned to only one consumer, so the number of partitions is the hard ceiling on parallelism — extra consumers beyond the partition count sit idle. If `fund-orders` has 3 partitions, a 4th consumer in the group gets nothing until a rebalance moves a partition to it. This is why partition count is a capacity decision made up front: you cannot scale a group's parallelism past it without adding partitions.
+
+</details>
+
+<details><summary><b>22.</b> What is a rebalance, and what event triggers one?</summary>
+
+A rebalance is the process of reassigning partitions among the members of a consumer group; it triggers when membership changes (a consumer joins, leaves, or is deemed dead), when the subscribed topics' partition count changes, or on certain metadata changes. During a rebalance the group coordinator redistributes ownership so the new membership covers all partitions. Frequent or slow rebalances are a common operational pain point because they interrupt consumption.
+
+</details>
+
+<details><summary><b>23.</b> What is the difference between eager and cooperative (incremental) rebalancing?</summary>
+
+Eager rebalancing has every consumer revoke all its partitions at the start, then everyone rejoins and gets a fresh assignment — a full stop-the-world pause. Cooperative (incremental) rebalancing revokes only the partitions that actually need to move, letting consumers keep processing their unaffected partitions throughout. Cooperative is far less disruptive, which is why the cooperative-sticky assignor is the modern default choice.
+
+</details>
+
+<details><summary><b>24.</b> What does the `CooperativeStickyAssignor` do specifically?</summary>
+
+It is the partition-assignment strategy that combines stickiness (try to keep each consumer's existing partitions to preserve local state and caches) with cooperative rebalancing (move only the minimum set of partitions, in two rounds, without a global revoke). You select it via `partition.assignment.strategy`. The result is minimal disruption: most consumers keep their partitions across a rebalance, so a single consumer restart does not stall the whole group.
+
+</details>
+
+<details><summary><b>25.</b> What is consumer lag and why is it the core health signal?</summary>
+
+Consumer lag is the difference, per partition, between the partition's log-end offset and the consumer group's committed offset — how many records behind real time the group is. It is the single best health metric because rising lag means the consumers cannot keep up (or are stuck), independent of CPU or memory readings. In a fund pipeline, sustained lag on the order-events consumer is the early warning that NAV-flow totals are falling behind the market.
+
+</details>
+
+<details><summary><b>26.</b> Lag is high and flat (not growing, not shrinking) — what does that typically indicate?</summary>
+
+Flat, elevated lag usually means the consumer is processing at exactly the inbound rate but started behind and is not catching up, or it is stuck retrying a single record at the same throughput. You check whether the consumer is actually committing progress (offsets advancing) versus spinning on one poison record. If offsets are advancing steadily but lag stays flat, you need more consumers/partitions; if offsets are frozen, you have a stuck or crashed-and-restarting member.
+
+</details>
+
+<details><summary><b>27.</b> A consumer group shows one partition with ever-growing lag while others are fine — first thing to check?</summary>
+
+That pattern points at data skew or a stuck single consumer, so first check whether one key (and thus one partition) is receiving disproportionate traffic, or whether the consumer owning that partition is blocked. Because ordering is per partition, a hot ISIN that all maps to one partition will overload exactly one consumer while the rest idle. The fix is usually a better partition key or, if it is a stuck member, restarting it and checking for a poison record.
+
+</details>
+
+<details><summary><b>28.</b> What is `session.timeout.ms` versus `max.poll.interval.ms` in triggering a rebalance?</summary>
+
+`session.timeout.ms` governs the heartbeat: if the coordinator misses heartbeats for that long, the consumer is considered dead and a rebalance starts. `max.poll.interval.ms` governs progress: if the application takes longer than this between `poll()` calls (e.g. a slow per-record operation), the consumer is removed even though heartbeats are fine. A common bug is long per-batch processing tripping `max.poll.interval.ms` and causing repeated rebalances.
+
+</details>
+
+<details><summary><b>29.</b> What is a replica, a leader, and a follower in Kafka replication?</summary>
+
+Each partition has `replication.factor` copies (replicas) spread across brokers; one replica is elected leader and handles all reads and writes, while the others are followers that replicate the leader's log. Producers and consumers talk only to the leader; followers exist to take over if the leader's broker fails. Replication is per partition, so different partitions of the same topic have leaders on different brokers for load spreading.
+
+</details>
+
+<details><summary><b>30.</b> What is the In-Sync Replica set (ISR)?</summary>
+
+The ISR is the subset of a partition's replicas that are currently caught up with the leader — within `replica.lag.time.max.ms` of the leader's log-end offset. Only replicas in the ISR are eligible to be elected leader without data loss, and `acks=all` waits for all ISR members. A replica that falls behind (slow disk, network) is removed from the ISR until it catches up again, which shrinks the durability guarantee.
+
+</details>
+
+<details><summary><b>31.</b> What does `min.insync.replicas` do, and what happens when the ISR drops below it?</summary>
+
+`min.insync.replicas` sets the minimum number of in-sync replicas that must acknowledge a write for an `acks=all` produce to succeed; if the ISR shrinks below it, the broker rejects the produce with a NotEnoughReplicas error. This deliberately chooses unavailability over silent under-replication — the producer is blocked rather than writing data that only lives on too few replicas. It is the guardrail that makes `acks=all` meaningful.
+
+</details>
+
+<details><summary><b>32.</b> Why is `acks=all` alone insufficient without setting `min.insync.replicas` appropriately?</summary>
+
+Because `acks=all` only waits for the current ISR, and if replicas have fallen out the ISR could be just the leader — a single broker — so an acknowledged write would live on one disk and be lost if that broker dies. Setting `min.insync.replicas=2` (with replication factor 3) forces at least two copies before acknowledging, restoring real durability. The classic safe trio is `replication.factor=3`, `min.insync.replicas=2`, `acks=all`.
+
+</details>
+
+<details><summary><b>33.</b> With `replication.factor=3` and `min.insync.replicas=2`, how many broker failures can you tolerate while still accepting writes?</summary>
+
+You can tolerate one broker failure and keep accepting writes, because two in-sync replicas remain, which meets the minimum. If a second broker holding that partition's replica also fails, the ISR drops to one, falls below `min.insync.replicas`, and produces are rejected to protect durability — reads of already-committed data can still proceed. This is the deliberate availability-vs-durability boundary of that configuration.
+
+</details>
+
+<details><summary><b>34.</b> What is unclean leader election and what does it trade off?</summary>
+
+Unclean leader election allows a replica that was NOT in the ISR (i.e. behind the leader) to become the new leader when no in-sync replica is available — restoring availability at the cost of losing the records the old leader had that the new one never received. It trades durability for availability. It is controlled by `unclean.leader.election.enable`, which is `false` by default in modern Kafka precisely because silent data loss is usually worse than a brief outage.
+
+</details>
+
+<details><summary><b>35.</b> In a regulated fund estate, would you enable `unclean.leader.election.enable=true` on a trade-events topic? Why?</summary>
+
+No — for settlement or order events, silently losing acknowledged records to restore availability is exactly the failure auditors trace to a design decision, so you keep it `false` and accept that the partition becomes unavailable until an in-sync replica returns. The correct response to "no ISR available" for regulated data is to wait and recover, not to promote a stale replica. You would rather page an operator than quietly drop a settlement instruction.
+
+</details>
+
+<details><summary><b>36.</b> What is KRaft mode and what does it replace?</summary>
+
+KRaft (Kafka Raft) is Kafka's built-in consensus mechanism for storing and replicating cluster metadata, replacing the external ZooKeeper ensemble that older Kafka required. Metadata (topics, partitions, configs, ACLs, leader assignments) now lives in an internal `__cluster_metadata` log managed by a quorum of controller nodes using a Raft-based protocol. This removes a whole separate distributed system from the operational picture.
+
+</details>
+
+<details><summary><b>37.</b> As of which release was ZooKeeper removed, and is KRaft the default now?</summary>
+
+Apache Kafka 4.0 (released 18 March 2025) removed ZooKeeper support entirely, and KRaft has been production-ready since 3.3 and is the default for new clusters — there is no ZooKeeper option in 4.0. So any cluster you stand up today is KRaft. Migration from ZooKeeper to KRaft had to be completed before upgrading to 4.0, since 4.0 cannot run in ZooKeeper mode at all.
+
+</details>
+
+<details><summary><b>38.</b> What is the metadata quorum (controller quorum) in KRaft?</summary>
+
+It is a small set of controller nodes (typically 3 or 5) that run the Raft protocol to elect an active controller and replicate the metadata log among themselves, so cluster metadata survives controller failures. The active controller serves metadata changes; the others are hot standbys with up-to-date copies. Because metadata is now just another replicated Kafka log, controller failover is fast and recovery does not depend on an external ZooKeeper quorum.
+
+</details>
+
+<details><summary><b>39.</b> What does the `process.roles` config do in a KRaft cluster?</summary>
+
+`process.roles` declares whether a node acts as a `broker`, a `controller`, or both (`broker,controller`) — the combined mode being what enables a single-binary, all-in-one cluster for development. In production you usually separate the roles so controllers are dedicated, but for a local lab one node with both roles is a complete cluster. This is why a single-binary KRaft broker in Docker Compose is the entire Phase-4 Kafka lab.
+
+</details>
+
+<details><summary><b>40.</b> Why are single-binary KRaft clusters now the norm for local development?</summary>
+
+Because KRaft folds metadata management into Kafka itself, you no longer need to run ZooKeeper alongside the broker — one Kafka process with `process.roles=broker,controller` is a fully functional cluster. That halves the moving parts in a Compose file and removes a class of ZooKeeper-connectivity startup failures. The result is the recommended lab setup: one container, KRaft mode, no external coordinator.
+
+</details>
+
+<details><summary><b>41.</b> When formatting storage for a new KRaft cluster, what one-time step is required before first start?</summary>
+
+You must generate a cluster ID and format the controller/broker storage with `kafka-storage.sh format` using that ID and the KRaft config, which writes the `meta.properties` and initial metadata records. Skipping it (or reusing an old data dir with a different cluster ID) causes the broker to refuse to start with a cluster-ID mismatch. In Compose this is usually done by an init step or the official image's auto-format on an empty volume.
+
+</details>
+
+<details><summary><b>42.</b> What is the fundamental rule about message ordering in Kafka?</summary>
+
+Ordering is guaranteed only within a single partition, never across partitions of a topic. Records with the same key go to the same partition and are therefore strictly ordered relative to each other; records across different partitions can be interleaved arbitrarily on the consumer side. This single fact drives every partition-key design decision: if two events must be ordered, they must share a key.
+
+</details>
+
+<details><summary><b>43.</b> How does Kafka decide which partition a keyed record goes to by default?</summary>
+
+For a record with a key, the default partitioner computes a hash of the key (murmur2) modulo the number of partitions, so the same key deterministically lands in the same partition. For a null-key record, the modern default uses sticky batching to spread load across partitions efficiently. The keyed-hash behaviour is what makes "same key, same partition, ordered" hold.
+
+</details>
+
+<details><summary><b>44.</b> Why is the partition key a data-model decision rather than just a performance tuning?</summary>
+
+Because the key determines which records are co-located and therefore ordered, choosing the key decides what your system can guarantee about ordering — it is a correctness decision, not just throughput. Pick the wrong key and events that must be processed in order land in different partitions and get reordered. So the architect chooses the key from the domain's ordering requirements first, then checks the load distribution second.
+
+</details>
+
+<details><summary><b>45.</b> In the fund-orders example, why key by ISIN, and what does that guarantee?</summary>
+
+Keying order events by ISIN sends every event for a given security to the same partition, guaranteeing that all orders for that ISIN are consumed in the exact sequence they were produced. That is the right guarantee when per-instrument ordering matters (e.g. processing buys and sells for one fund share class in order). It explicitly does not guarantee ordering across different ISINs, which is fine because cross-instrument ordering is rarely required.
+
+</details>
+
+<details><summary><b>46.</b> What is the risk of keying by ISIN if one security is extremely heavily traded?</summary>
+
+All events for that hot ISIN map to one partition, so that single partition (and the one consumer owning it) becomes a hotspot while others are underused — partition skew that caps throughput and grows lag on just that key. The ordering guarantee is preserved but capacity is wasted. Mitigations include increasing partition count, or composite keys for sub-streams where strict per-ISIN order is not actually required.
+
+</details>
+
+<details><summary><b>47.</b> If you increase a topic's partition count later, what happens to keyed ordering?</summary>
+
+Adding partitions changes the key-to-partition mapping (hash modulo a new partition count), so records for a given key produced after the change may land in a different partition than before, breaking the contiguous per-key history. Existing records do not move, so a key's stream is now split across an old and a new partition with no global order between them. This is why partition count is chosen up front for ordering-sensitive topics rather than scaled casually.
+
+</details>
+
+<details><summary><b>48.</b> Why can you not reduce the number of partitions on a Kafka topic?</summary>
+
+Kafka does not support decreasing partition count because it would require moving or merging existing records and would scramble the key-to-partition mapping and per-partition offsets that consumers rely on. The only supported change is increasing partitions. The practical consequence is that over-provisioning partitions is a one-way, hard-to-undo decision, so you size with future growth in mind but avoid wild over-partitioning.
+
+</details>
+
+<details><summary><b>49.</b> What is a compacted topic conceptually, and why call it "a table from a log"?</summary>
+
+A compacted topic keeps only the most recent record per key, so reading it from beginning to end gives you exactly one current value for every key — the same shape as a key/value table. The log is still the storage, but compaction makes it equivalent to a materialised snapshot of latest-per-key. This is why a changelog topic keyed by entity ID becomes a queryable reference table you can rebuild state from.
+
+</details>
+
+<details><summary><b>50.</b> What `cleanup.policy` value turns a topic into a compacted one, and what guarantee does compaction give about the latest value?</summary>
+
+You set `cleanup.policy=compact`. Compaction guarantees that the latest value for each key is always retained (it is never removed by the compaction process), while older values for the same key are eventually garbage-collected. It does not guarantee removal of every duplicate immediately — a consumer may still see some superseded values in the not-yet-compacted "head" of the log — but it guarantees the head plus compacted tail always contains the current value per key.
+
+</details>
+
+<details><summary><b>51.</b> What is a tombstone in a compacted topic and what does it do?</summary>
+
+A tombstone is a record with a non-null key and a null value; in a compacted topic it signals that the key should be deleted, and after compaction the key's data is removed entirely. It is how you express "this entity no longer exists" in a changelog-as-table. Consumers must handle null values specially, treating them as deletes rather than as a value of the key.
+
+</details>
+
+<details><summary><b>52.</b> How long is a tombstone retained before compaction removes it, and which config controls that?</summary>
+
+A tombstone is kept for at least `delete.retention.ms` (default 24 hours / 86400000 ms) after it becomes eligible, so that all consumers — including ones reading the compacted tail — have a chance to observe the delete before it disappears. This delay prevents a consumer rebuilding state from missing the delete and resurrecting an old value. After that window, compaction can remove the tombstone and the key is gone.
+
+</details>
+
+<details><summary><b>53.</b> What does `min.cleanable.dirty.ratio` control and what is its default?</summary>
+
+It sets the minimum ratio of "dirty" (un-compacted) bytes to total bytes in the log before the cleaner will compact that partition, defaulting to 0.5 — meaning compaction kicks in once roughly half the log is un-compacted. A higher ratio compacts less often (less CPU/IO, more duplicates linger); a lower ratio compacts more aggressively. If you expect quick deduplication and it's not happening, this ratio and the cleaner thread count are the first things to check.
+
+</details>
+
+<details><summary><b>54.</b> Why does a compacted topic still let a consumer see more than one value per key sometimes?</summary>
+
+Because compaction only acts on closed segments that have crossed the dirty-ratio threshold; the active segment and recently written, not-yet-cleaned data (the "dirty" head of the log) can contain multiple values for a key. Compaction is a background, eventually-consistent process, not a per-write deduplication. So a state-building consumer must always take the last value it reads per key, never assume exactly one.
+
+</details>
+
+<details><summary><b>55.</b> In the lab, you write several updates per ISIN to `fund-reference` and expect only the latest to survive — what must hold for the test to actually demonstrate compaction?</summary>
+
+The cleaner must have run on closed segments, which means you need enough data (or a forced segment roll) to cross `min.cleanable.dirty.ratio` on closed segments, plus time for the cleaner thread. If everything is still in the active segment you'll see all versions and wrongly conclude compaction failed. The reliable demonstration consumes from the beginning after the cleaner has compacted, then confirms exactly one (latest) record per ISIN key survives.
+
+</details>
+
+<details><summary><b>56.</b> How would a downstream service "serve a table" from a compacted reference topic?</summary>
+
+It consumes the compacted topic from the beginning, applying each record into a local key/value store (last value per key wins, tombstones delete), producing an up-to-date materialised view of current reference data. Because the latest value per key is guaranteed retained, the service can rebuild its entire state by replaying the topic after a restart. This is the changelog-to-table pattern that backs things like Kafka Streams' KTables.
+
+</details>
+
+<details><summary><b>57.</b> For fund reference data (e.g. ISIN-to-instrument mappings), why is a compacted topic a good fit?</summary>
+
+Reference data is naturally keyed (by ISIN) and you only ever care about the current value, not the full history of changes, so compaction keeps storage bounded while always serving the latest mapping per ISIN. Any consumer can rebuild the full reference table by replaying the topic from offset 0. Deletes (a delisted instrument) are clean tombstones, and time-travel is unnecessary, which is exactly the trade compaction makes.
+
+</details>
+
+<details><summary><b>58.</b> What is Redpanda and in what sense is it Kafka-compatible?</summary>
+
+Redpanda is a streaming platform that implements the Kafka API wire protocol, so existing Kafka clients, Connect, and tooling talk to it unchanged — it is a drop-in broker, written in C++ with no JVM and no ZooKeeper, aiming for lower latency and simpler ops. Compatibility is at the protocol level: producers/consumers and the admin API behave like Kafka's. It is positioned as a lighter local broker and a managed-cloud alternative for the same workloads.
+
+</details>
+
+<details><summary><b>59.</b> Where does Kafka-API compatibility typically "end" with an alternative like Redpanda?</summary>
+
+Compatibility covers the core produce/consume/admin protocol, but ecosystem internals and JVM-specific extensions can differ: things like the exact internals of the JVM broker, some specific configs, certain Kafka Streams/transactional edge behaviours, and broker-side plugins may not map one-to-one. The point for an architect is to validate the specific features you depend on (transactions, compaction semantics, specific Connect transforms) against the alternative rather than assuming full parity. Wire-protocol compatible is not the same as feature-for-feature identical.
+
+</details>
+
+<details><summary><b>60.</b> What is the Azure Event Hubs "Kafka surface" and how do clients use it?</summary>
+
+Event Hubs exposes a Kafka-protocol endpoint so Kafka producers and consumers can connect to an Event Hubs namespace by changing only the bootstrap servers and credentials, treating an event hub like a topic and a consumer group like a Kafka group. It is a managed PaaS broker speaking enough of the Kafka protocol to accept standard clients. This lets a team reuse Kafka client code while Microsoft operates the cluster.
+
+</details>
+
+<details><summary><b>61.</b> Name concrete features the Event Hubs Kafka surface does NOT support that pure Kafka does.</summary>
+
+Notable gaps include Kafka Connect and Kafka Streams are not run by Event Hubs (and historically not all client features), you cannot add partitions to an existing event hub, log compaction and transactions are tier-limited (supported only in higher tiers/preview), and certain admin operations like size-based retention or the Kafka REST API are absent. So a design assuming in-place repartitioning, Streams, or universally-available compaction will hit walls. The architect checks tier and feature support before committing to the Kafka surface.
+
+</details>
+
+<details><summary><b>62.</b> Why does "add a partition to an existing topic" being unsupported on Event Hubs matter for design?</summary>
+
+Because if you cannot increase partitions later, you must fix partition count at creation, and with keyed ordering you also cannot reshuffle keys afterward — so the capacity ceiling is locked in earlier and harder than on self-managed Kafka (where you at least can add partitions, with the ordering caveat). For a growing fund-data stream this means more careful up-front sizing. It is a portability gotcha: code that works on Kafka may assume an operation the managed surface forbids.
+
+</details>
+
+<details><summary><b>63.</b> An architect is choosing between self-hosted Kafka, Redpanda, and Event Hubs for a fund platform — what is the right framing?</summary>
+
+Frame it as a build-vs-buy and feature-dependency decision: Event Hubs trades operational control for a managed surface with known feature gaps (compaction/transactions/partition-add limits by tier); Redpanda offers lighter self-hosted ops with broad but not total parity; self-hosted Kafka gives full feature control at full operational cost. You list the features you actually depend on (EOS transactions, compaction, Connect, in-place repartition) and check each candidate against them. This becomes the ADR-010 log-platform decision with the EU/fund constraint that drove it.
+
+</details>
+
+<details><summary><b>64.</b> A producer is configured `acks=1` — can an acknowledged order event still be lost? When?</summary>
+
+Yes — with `acks=1` the producer is told the write succeeded as soon as the leader persists it, before followers replicate, so if that leader broker fails before any follower copies the record, the acknowledged record is lost. This is the silent-loss trap behind a config that "looked fine" in testing. For settlement-grade events you need `acks=all` with `min.insync.replicas>=2` so an acknowledged record always exists on multiple brokers.
+
+</details>
+
+<details><summary><b>65.</b> With auto-commit enabled and at-least-once intent, where does a duplicate enter on the consumer side?</summary>
+
+If the consumer commits offsets (auto-commit fires) after fetching but before fully processing, then crashes, the restarted consumer resumes past records it never finished — that's a loss. Conversely, committing after processing but crashing before the commit lands causes reprocessing of the last batch — that's a duplicate. Auto-commit ties the commit to a timer rather than to processing completion, which is why precise control needs manual commit-after-process.
+
+</details>
+
+<details><summary><b>66.</b> How do you make a consumer at-least-once with no loss using manual commits?</summary>
+
+You disable auto-commit (`enable.auto.commit=false`) and call commit only after the record's downstream effect has fully succeeded, so a crash before commit causes reprocessing (a duplicate) rather than skipping (a loss). At-least-once accepts duplicates and eliminates loss. To then eliminate the duplicate's visible effect you make the downstream sink idempotent (e.g. upsert by order ID), giving effectively-once results.
+
+</details>
+
+<details><summary><b>67.</b> "Can we lose or duplicate an order event?" — what config matrix do you reason over to answer it correctly every time?</summary>
+
+You reason over four axes: producer `acks` and idempotence (controls duplicates/loss on send), `min.insync.replicas` plus replication factor and unclean-leader setting (controls loss on broker failure), the consumer's commit strategy (auto vs manual-after-process, controls duplicate/loss on consumer crash), and the sink's idempotency (whether duplicates have visible effect). Loss enters with `acks` too weak, ISR too small, unclean election on, or committing before processing; duplicates enter with retries without idempotence or reprocessing into a non-idempotent sink. Walking those four lets you answer for any given config.
+
+</details>
+
+<details><summary><b>68.</b> What does "exactly-once" mean precisely in Kafka, and what is its scope?</summary>
+
+In Kafka, exactly-once semantics (EOS) means the idempotent producer plus transactions plus `read_committed` consumers guarantee that a consume-process-produce loop's writes and offset commits happen atomically and without duplicates — but only within Kafka. It does not extend to an external sink unless that sink participates transactionally or is idempotent. So "Kafka EOS" is a within-broker claim; an end-to-end exactly-once claim into a database needs additional machinery.
+
+</details>
+
+<details><summary><b>69.</b> A trade-events consumer keeps rebalancing every couple of minutes and never makes progress — first things to check?</summary>
+
+First check whether per-record/per-batch processing time exceeds `max.poll.interval.ms`, because slow processing makes the coordinator evict the consumer mid-batch and trigger a rebalance loop. Also check `session.timeout.ms`/heartbeat health and whether a single poison record is making one record take forever. The fix is usually to reduce `max.poll.records`, speed up or offload processing, or raise `max.poll.interval.ms` — and to use the cooperative-sticky assignor so rebalances are less destructive.
+
+</details>
+
+<details><summary><b>70.</b> After a broker restart, one partition stays under-replicated for a long time — what does that mean and what do you check?</summary>
+
+Under-replicated means the partition's ISR has fewer members than its replication factor, so a follower has not caught up to the leader — durability is temporarily reduced. You check the lagging follower broker's health (disk IO, network, GC pauses), `replica.lag.time.max.ms`, and whether the follower is fetching at all. Until the ISR is restored, `acks=all` writes are riskier and may be rejected if the ISR drops below `min.insync.replicas`.
+
+</details>
+
+<details><summary><b>71.</b> A consumer's committed offset is reported as `-1` or "unknown" for a partition — what does that indicate?</summary>
+
+It indicates the group has no committed offset for that partition yet (a brand-new group, or offsets aged out of the `__consumer_offsets` topic via `offsets.retention.minutes`), so on next poll the consumer applies `auto.offset.reset`. This is why a long-idle group can mysteriously "lose its place" and reprocess or skip depending on the reset policy. For critical consumers you keep them active and/or set retention so offsets are not expired.
+
+</details>
+
+<details><summary><b>72.</b> Where are consumer-group offsets stored in modern Kafka?</summary>
+
+They are stored in an internal compacted topic called `__consumer_offsets`, keyed by group/topic/partition, so the latest committed offset per group-partition is what survives compaction. Storing offsets in a Kafka topic (rather than ZooKeeper as in very old versions) makes them replicated and durable like any other data. This is itself an example of the changelog-as-table pattern Kafka uses internally.
+
+</details>
+
+<details><summary><b>73.</b> What does the `kafka-consumer-groups.sh --describe` command show you and why is it your go-to?</summary>
+
+It lists, per partition for a group, the current committed offset, the log-end offset, the lag (the difference), and which consumer/member owns the partition. It is the go-to because it answers the two operational questions at once: are we behind (lag) and who owns what (assignment), letting you spot skew, stuck members, and unassigned partitions. Example: `kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group nav-flow`.
+
+</details>
+
+<details><summary><b>74.</b> What does it mean if a partition in `--describe` output shows lag but no assigned consumer (CONSUMER-ID is "-")?</summary>
+
+It means that partition currently has no live group member consuming it — typically mid-rebalance, or the group has fewer consumers than partitions and this one is genuinely unassigned, or all consumers died. Its lag will grow until a consumer picks it up. If it stays unassigned with a running group, you check whether consumers crashed or whether the assignor failed, because un-consumed partitions silently fall behind.
+
+</details>
+
+<details><summary><b>75.</b> How does a compacted topic differ from a retention-based topic when a consumer replays from offset 0?</summary>
+
+Replaying a retention-based topic from 0 gives the full history that still exists within the retention window — every change in order, but bounded in time. Replaying a compacted topic from 0 gives the latest value per key (plus possibly a few un-compacted recent duplicates) — a current-state snapshot, not full history. So you pick retention when you need the event history and compaction when you need only current state per key.
+
+</details>
+
+<details><summary><b>76.</b> What is the difference between a topic's `retention.bytes` and `segment.bytes`?</summary>
+
+`retention.bytes` is the maximum total size a partition may grow to before old segments are deleted (a cleanup threshold), while `segment.bytes` is the size at which the active segment rolls to a new file (a file-chunking threshold). They operate at different granularities: segment size controls how data is chunked, retention size controls how much chunked data is kept. Cleanup deletes whole segments, so retention is enforced in segment-sized steps, not byte-exact.
+
+</details>
+
+<details><summary><b>77.</b> A topic was created with one partition and you now realise order events for many ISINs share it — what is the consequence and the fix?</summary>
+
+With one partition, every ISIN's events are in the same partition and consumed by a single consumer — you have global ordering but zero parallelism, so throughput is capped and one slow record stalls everything. The fix is to recreate (or expand) the topic with more partitions keyed by ISIN so per-ISIN ordering is preserved while different ISINs spread across partitions and consumers. Note expanding partitions changes future key placement, so for strict per-key history you may need a fresh topic and a migration.
+
+</details>
+
+<details><summary><b>78.</b> What is the purpose of the producer `linger.ms` and `batch.size` settings?</summary>
+
+They control batching: `batch.size` is the max bytes per partition batch and `linger.ms` is how long the producer waits to fill a batch before sending, trading a little latency for much better throughput and compression. Larger batches mean fewer requests and higher throughput; `linger.ms=0` sends as soon as possible for lowest latency. For a high-volume fund-event stream, a small `linger.ms` plus compression markedly improves broker efficiency.
+
+</details>
+
+<details><summary><b>79.</b> What is the broker's role in producer idempotence — what does it track per producer?</summary>
+
+The broker tracks, per partition, the producer ID (PID) and the last sequence number it accepted from that PID; it accepts a batch only if its sequence is exactly the next expected one, rejecting duplicates (already-seen sequence) and gaps (out-of-order). This is how a retried batch with the same PID and sequence is dropped rather than written twice. It is server-side deduplication scoped to a single producer session.
+
+</details>
+
+<details><summary><b>80.</b> Why does an idempotent producer's guarantee not survive across a producer restart (without transactions)?</summary>
+
+Because a plain idempotent producer gets a new producer ID on restart, the broker's per-PID sequence tracking starts fresh, so records resent by application logic after a restart are not recognised as duplicates of the old session's records. Idempotence dedupes within a single producer session only. To get cross-session guarantees you use transactions with a stable `transactional.id`, which fences the old session and gives a recoverable identity.
+
+</details>
+
+<details><summary><b>81.</b> What does the `transactional.id` enable beyond a plain producer ID?</summary>
+
+A stable `transactional.id` lets a restarted producer reclaim its transactional state and "fence" any zombie instance of itself, so a crashed-and-restarted producer cannot have an old instance still committing — exactly-once survives process restarts. The broker maps the `transactional.id` to a producer epoch and bumps the epoch on re-init, rejecting writes from the stale epoch. This is what makes transactional EOS robust to crashes, unlike bare idempotence.
+
+</details>
+
+<details><summary><b>82.</b> What is "fencing" in the context of Kafka transactions?</summary>
+
+Fencing is the mechanism that prevents a zombie producer (an old instance that hung and came back) from corrupting a transaction: when a new producer initialises with the same `transactional.id`, the broker increments the producer epoch and rejects any writes from the older, now-fenced epoch. It guarantees only one live producer per transactional ID can commit. Without fencing, a split-brain producer could write duplicate or interleaved transactional data.
+
+</details>
+
+<details><summary><b>83.</b> A compacted `fund-reference` topic shows two records for the same ISIN to a consumer — is this a bug?</summary>
+
+Not necessarily — compaction is eventual, so a consumer reading the un-compacted head of the log can legitimately see an older and a newer value for the same key before the cleaner runs. A correct consumer applies last-value-wins per key, so seeing two is fine as long as the final one is current. It would only be a real problem if compaction never reduced closed segments, which would point at the cleaner being disabled or the dirty ratio never being crossed.
+
+</details>
+
+<details><summary><b>84.</b> Why must a state-building consumer of a compacted topic process the entire topic, not just the tail?</summary>
+
+Because the current value of a key could have been written long ago and never updated since, so it lives deep in the compacted log; reading only recent records would miss keys whose latest value is old. To materialise the full table you must read from offset 0 to the end. This is the standard bootstrap step when a service rebuilds its KTable-like view after a restart.
+
+</details>
+
+<details><summary><b>85.</b> How does Kafka's per-partition ordering interact with multiple producers writing the same key?</summary>
+
+Records for the same key always go to the same partition, but if two different producers write that key, the partition orders them by arrival at the leader, not by any global clock — so cross-producer order reflects broker receipt order. Within one producer, idempotence preserves send order. So "same key, ordered" means ordered as the leader received them, which is well-defined per partition but not synchronised to wall-clock across producers.
+
+</details>
+
+<details><summary><b>86.</b> What problem would you hit using Kafka for synchronous request/reply between two services?</summary>
+
+Kafka's consumer-group model is built for streaming fan-out and replay, not point-to-point correlation, so request/reply forces you to bolt on correlation IDs, reply topics, and consumer-group gymnastics that a queue gives natively — you fight the model. Latency and per-message acknowledgement semantics also don't fit cleanly. This is the classic "use the log for the wrong job" mistake; a queue/broker (or RPC) is the right tool for request/reply.
+
+</details>
+
+<details><summary><b>87.</b> Why is a replayable log, not a queue, the right backbone for an audit-and-reprocessing fund integration?</summary>
+
+Because a log retains records after consumption and lets new or rewound consumers replay history from any offset, you can re-derive downstream state, onboard a new consumer against the full past, and give auditors a reproducible record — none of which a destructive queue offers. The data is the system of record for "what events occurred," not just transient transport. That replay capability is exactly what regulated reprocessing and lineage depend on.
+
+</details>
+
+<details><summary><b>88.</b> What does `max.poll.records` control and why tune it?</summary>
+
+It caps how many records a single `poll()` returns to the consumer, bounding the work done before the next poll and heartbeat-progress check. Tuning it down keeps per-poll processing under `max.poll.interval.ms` to avoid rebalance eviction during slow processing; tuning it up improves throughput when processing is fast. It is the first lever when slow processing causes rebalance loops.
+
+</details>
+
+<details><summary><b>89.</b> How does Kafka achieve high write throughput at the storage layer?</summary>
+
+Kafka appends sequentially to the active segment (sequential disk IO is far faster than random), relies on the OS page cache rather than a custom in-process cache, and uses zero-copy (`sendfile`) to ship bytes from page cache to socket without copying through user space. Batching and compression further cut per-record overhead. The append-only log design is what makes this sequential, cache-friendly pattern possible.
+
+</details>
+
+<details><summary><b>90.</b> What is the practical meaning of "the log is the source of truth" in an event-driven fund platform?</summary>
+
+It means downstream stores (the lakehouse copy, materialised views, read models) are derived projections of the event log, and the log — not any one database — is the authoritative ordered record of what happened. If a projection is corrupted or you need a new view, you rebuild it by replaying the log. This inverts the usual database-as-truth model and is what gives event-driven systems their auditability and reprocessability.
+
+</details>
+
+<details><summary><b>91.</b> Why is replication factor a per-topic decision rather than cluster-wide?</summary>
+
+Because different topics have different durability and storage needs — a critical settlement topic may want replication factor 3 while a high-volume, low-value debug topic may tolerate 1 or 2 — Kafka sets `replication.factor` per topic at creation. This lets you spend replication storage where durability matters. The architect maps each topic's regulatory/business importance to a replication factor rather than applying one blanket value.
+
+</details>
+
+<details><summary><b>92.</b> If `replication.factor=1`, what durability do you have and when is that acceptable?</summary>
+
+With replication factor 1 there is a single copy per partition, so any broker failure loses that partition's data entirely and makes it unavailable — there is no durability against broker loss. It is acceptable only for truly disposable data (transient test, regenerable cache) where loss costs nothing. It is never acceptable for trade, NAV, or settlement events, where you use at least 3.
+
+</details>
+
+<details><summary><b>93.</b> What is the difference between a consumer "subscribing" to a topic versus "assigning" specific partitions?</summary>
+
+`subscribe()` joins a consumer group and lets Kafka dynamically assign partitions and rebalance them across members; `assign()` manually pins specific partitions to the consumer with no group coordination or rebalancing. Subscribe is for scalable, fault-tolerant group consumption; assign is for cases needing precise control (e.g. a single reader replaying one partition). Mixing them or using assign without understanding gives up automatic failover.
+
+</details>
+
+<details><summary><b>94.</b> How would you replay just the last hour of a topic for reprocessing?</summary>
+
+Use offsets-for-times to look up the offset corresponding to a timestamp one hour ago in each partition, then seek the consumer to those offsets and consume forward — Kafka indexes records by timestamp per segment to support this. Tools like `kafka-consumer-groups.sh --reset-offsets --to-datetime` do the same for a group. This timestamp-to-offset capability is what makes "reprocess from time T" practical for corrections and backfills.
+
+</details>
+
+<details><summary><b>95.</b> A NAV-flow consumer must not double-count an order if it reprocesses — how do you make reprocessing safe end-to-end?</summary>
+
+You make the downstream effect idempotent (e.g. upsert keyed by order ID, or dedupe on event ID) so that consuming the same record twice produces the same final state — at-least-once delivery plus an idempotent sink equals effectively-once. Reprocessing then becomes safe by construction, which is what lets you replay for corrections without inflating totals. Relying on "we won't reprocess" is not a guarantee; idempotent sinks are.
+
+</details>
+
+<details><summary><b>96.</b> What does a Connect/Flink "two-phase-commit sink" add over a plain idempotent consumer?</summary>
+
+A two-phase-commit (transactional) sink coordinates the external write with the stream processor's checkpoint/transaction: it pre-commits (phase 1) and only finalises (phase 2) when the checkpoint/transaction commits, so the external effect and the processing position are made durable together. This gives true exactly-once into the external system, not merely effectively-once via dedup. It is heavier than an idempotent upsert but is the honest answer when the sink cannot be made idempotent.
+
+</details>
+
+<details><summary><b>97.</b> In a design review, how do you justify "3 partitions" for `fund-orders` rather than 1 or 30?</summary>
+
+You justify it from the ordering and throughput requirements: enough partitions to spread expected load across that many consumers in parallel and to allow growth, but not so many that you waste resources, complicate ordering, and bloat metadata. With per-ISIN keying, partitions only help if many ISINs spread across them; 3 gives modest parallelism for a lab while preserving per-ISIN order. The defensible answer cites measured/expected throughput per partition and the consumer parallelism you need.
+
+</details>
+
+<details><summary><b>98.</b> What is the metadata cost of having an enormous number of partitions in a cluster?</summary>
+
+Each partition consumes broker resources — open files, memory for indexes, replication connections, and an entry in the metadata log — so very high partition counts slow leader elections, lengthen rebalances and recovery, and inflate the controller's metadata. KRaft improved metadata scalability over ZooKeeper, but partitions are still not free. So you provision for parallelism and growth, not maximalism.
+
+</details>
+
+<details><summary><b>99.</b> An auditor asks you to prove no settlement order was lost during a broker outage — what configuration and evidence do you point to?</summary>
+
+You point to `acks=all` with `min.insync.replicas=2`, replication factor 3, and `unclean.leader.election.enable=false`, which together guarantee every acknowledged order existed on at least two replicas and that no stale replica was promoted to lose committed data. As evidence you show the producer config, the topic config, broker logs showing the ISR never dropped below the minimum (and producers were rejected, not silently degraded, if it had), and a consumer replay confirming completeness. The configuration is the design decision; the logs and replay are the proof.
+
+</details>
+
+<details><summary><b>100.</b> Summarise the exact trade `min.insync.replicas` plus `acks=all` makes — what it costs and what it protects against.</summary>
+
+It costs availability and latency: writes wait for multiple replicas and are rejected outright when too few are in sync, so the partition can become temporarily unwritable. In return it protects against silent data loss — every acknowledged record provably lives on at least `min.insync.replicas` brokers, so no single (or, with RF3/ISR2, even some multi-) broker failure can lose committed data. For regulated fund events that is the right trade: refuse the write rather than risk losing a settlement instruction.
+
+</details>
+
+
+## Phase 4 · 1.8.2 Delivery semantics (at-most/at-least/exactly-once) — 100 self-test questions
+
+<details><summary><b>1.</b> What are the three delivery guarantees a messaging or streaming system can offer?</summary>
+
+At-most-once, at-least-once, and exactly-once. At-most-once may lose messages but never duplicates them; at-least-once never loses but may duplicate; exactly-once delivers each message effectively one time but is the most expensive to achieve. They are points on a trade-off curve between data loss, duplication, and cost.
+
+</details>
+
+<details><summary><b>2.</b> Define at-most-once delivery in one sentence.</summary>
+
+At-most-once means each message is delivered zero or one times — it may be lost but is never duplicated. It is achieved by committing the read offset before processing, so a crash after commit but before processing silently drops the message. It is the cheapest guarantee and acceptable only where loss is tolerable, such as some metrics or sampled telemetry.
+
+</details>
+
+<details><summary><b>3.</b> Define at-least-once delivery in one sentence.</summary>
+
+At-least-once means each message is delivered one or more times — it is never lost but may be duplicated. It is achieved by committing the offset only after processing, so a crash after processing but before commit causes the message to be reprocessed on restart. It is the default, practical guarantee for most pipelines and the foundation on which end-to-end exactly-once is built.
+
+</details>
+
+<details><summary><b>4.</b> Define exactly-once delivery in one sentence.</summary>
+
+Exactly-once means each message takes effect exactly one time — no loss and no duplication of its observable effect. In practice it is effectively-once: the system may physically deliver more than once, but deduplication or transactional commit ensures the side effect happens once. It is the most expensive guarantee because it requires coordination between delivery and the sink's commit.
+
+</details>
+
+<details><summary><b>5.</b> Why is exactly-once usually called effectively-once by careful practitioners?</summary>
+
+Because the network can always force a retry, so physical exactly-once delivery is impossible in a distributed system; what is achievable is exactly-once effect. The system tolerates duplicate delivery but ensures the side effect (a row written, a NAV updated) occurs once via idempotency or transactions. The term effectively-once makes explicit that the guarantee is about effects, not about how many bytes crossed the wire.
+
+</details>
+
+<details><summary><b>6.</b> Rank the three guarantees from cheapest to most expensive and say what you pay for the strongest.</summary>
+
+At-most-once is cheapest, at-least-once is moderate, exactly-once is most expensive. For exactly-once you pay in latency (transactions add coordination round-trips), throughput (fewer in-flight batches, fencing), and operational complexity (transactional IDs, two-phase commit, idempotent sinks). As an architect you justify that cost only where a duplicate or a loss has a real consequence.
+
+</details>
+
+<details><summary><b>7.</b> For a metrics-sampling pipeline that drops the occasional point, which guarantee is appropriate and why?</summary>
+
+At-most-once is appropriate. Losing a sampled metric point barely changes an aggregate, while the cost of exactly-once coordination would dominate the pipeline budget for no benefit. The principle is to match the guarantee to the consequence of failure, not to default to the strongest.
+
+</details>
+
+<details><summary><b>8.</b> For a settlement instruction or a NAV correction, which guarantee do you require and why?</summary>
+
+You require exactly-once effect: a settlement must not be lost and must not be duplicated, because a duplicate is a double payment and a loss is a missed obligation. Since true exactly-once is effectively-once, you achieve it with at-least-once delivery plus an idempotent or transactional sink. The architect signs off that a duplicate cannot reach a non-idempotent settlement endpoint.
+
+</details>
+
+<details><summary><b>9.</b> An architect's guarantee diagram claims exactly-once on an edge into a non-idempotent sink. Why is that a defect?</summary>
+
+Because the edge is really at-least-once into a sink that applies every duplicate, so a producer retry or consumer reprocess produces a duplicated effect — a duplicated settlement or a doubled NAV adjustment. Labelling it exactly-once hides where the guarantee actually degrades. The fix is to relabel the edge honestly and either make the sink idempotent or wrap it in a transaction.
+
+</details>
+
+<details><summary><b>10.</b> What is the architect skill this lesson is really training, beyond knowing the three terms?</summary>
+
+Reading any pipeline diagram and marking precisely where each guarantee holds, where it degrades, and what restores it. A guarantee is not a global property of the system; it is a property of each edge and each commit boundary. The deliverable is an audited diagram, not a slogan, because exactly-once claims on settlement or NAV data must be proven, not believed.
+
+</details>
+
+<details><summary><b>11.</b> The two classic places where duplication enters a Kafka pipeline are what?</summary>
+
+Producer retries and consumer reprocessing. A producer that does not get an ack resends, appending the same record twice unless deduplicated. A consumer that crashes after processing but before committing its offset reprocesses the same records on restart. Both are normal, healthy failure handling — the duplication is the price of not losing data.
+
+</details>
+
+<details><summary><b>12.</b> Why does a producer retry create a duplicate when the idempotent producer is not enabled?</summary>
+
+If the producer sends a record, the broker writes it, but the ack is lost in the network, the producer assumes failure and resends. Without idempotence the broker cannot tell the resend from a new record, so it appends a second copy. The idempotent producer fixes this by tagging records so the broker can recognise and drop the retry.
+
+</details>
+
+<details><summary><b>13.</b> Why does a consumer that commits offsets after processing risk duplicates rather than loss?</summary>
+
+Because the record is fully processed and its effect applied before the offset is saved, so a crash in that window leaves the offset pointing before the record. On restart the consumer re-reads and reprocesses it, producing a duplicate effect. This is the at-least-once configuration: you trade possible duplication for zero loss.
+
+</details>
+
+<details><summary><b>14.</b> Why does a consumer that commits offsets before processing risk loss rather than duplicates?</summary>
+
+Because the offset advances first, so if the consumer crashes after committing but before finishing processing, the record is never (re)processed — its effect is lost. On restart the consumer reads past it. This is the at-most-once configuration: you trade possible loss for zero duplication.
+
+</details>
+
+<details><summary><b>15.</b> In Kafka, what does enabling the idempotent producer guarantee, and what is its scope?</summary>
+
+It guarantees that producer retries do not create duplicate records and that records are not reordered, for writes to a single partition during the producer's session. The broker deduplicates resends using a producer ID and per-partition sequence numbers. Its scope is one producer to one partition — it does not by itself give multi-partition atomicity; transactions add that.
+
+</details>
+
+<details><summary><b>16.</b> What is the config key for the Kafka idempotent producer and its default in recent versions?</summary>
+
+The key is `enable.idempotence`, and it defaults to `true` from Kafka 3.0 onward. When it is on, the producer also enforces the settings idempotence requires. Before 3.0 you had to set it explicitly, so version awareness matters when reading older configs.
+
+</details>
+
+<details><summary><b>17.</b> When `enable.idempotence=true`, which three other producer settings does Kafka require and to what values?</summary>
+
+It requires `acks=all`, `retries` greater than `0`, and `max.in.flight.requests.per.connection` less than or equal to `5`. If you explicitly set a conflicting value, the producer throws a `ConfigException` at startup. These constraints ensure the broker has the in-sync replicas and bounded in-flight window needed to deduplicate and preserve order.
+
+</details>
+
+<details><summary><b>18.</b> How does the broker actually detect and drop a duplicate from an idempotent producer?</summary>
+
+On its first connection the producer is assigned a Producer ID (PID), and every record carries the PID plus a monotonic per-partition sequence number. The broker tracks the last sequence number it accepted for each PID and partition; a resend arrives with a sequence number it has already seen, so the broker recognises the duplicate and does not append it again. A sequence number that is out of order triggers an `OutOfOrderSequenceException`.
+
+</details>
+
+<details><summary><b>19.</b> Why does `enable.idempotence` require `acks=all` specifically?</summary>
+
+Because deduplication and durability depend on the leader and all in-sync replicas having a consistent view of the accepted sequence numbers. With weaker acks a leader change could lose the record and its sequence state, breaking the no-loss and no-duplicate guarantees. `acks=all` ensures the full in-sync replica set acknowledges before the producer considers the write done.
+
+</details>
+
+<details><summary><b>20.</b> Why is `max.in.flight.requests.per.connection` capped at 5 for the idempotent producer?</summary>
+
+Because the broker tracks recent sequence numbers within a bounded window per partition, and allowing too many unacknowledged in-flight batches would let a retry land out of the deduplication window and break ordering. A cap of 5 lets the producer pipeline for throughput while the broker can still detect duplicates and preserve order. Setting it higher with idempotence on is rejected.
+
+</details>
+
+<details><summary><b>21.</b> What does an `acks=all` write actually wait for?</summary>
+
+It waits for the partition leader plus the full set of in-sync replicas (ISR) to acknowledge the record before the producer's send completes. This guarantees the record survives the loss of any replica as long as one ISR member remains, which is the strongest durability Kafka offers. It is a precondition for the idempotent and transactional guarantees, not just a tuning knob.
+
+</details>
+
+<details><summary><b>22.</b> What does Kafka mean by EOS, and what config turns it on at the producer?</summary>
+
+EOS is Exactly-Once Semantics — the combination of the idempotent producer with transactions so that a set of writes across partitions commits atomically. You enable it by setting a `transactional.id` on the producer (which implies `enable.idempotence=true`) and using the transactional API (`initTransactions`, `beginTransaction`, `commitTransaction`). Consumers must read with `isolation.level=read_committed` to honour it.
+
+</details>
+
+<details><summary><b>23.</b> What does setting `transactional.id` give you that `enable.idempotence` alone does not?</summary>
+
+It gives multi-partition atomicity and cross-session fencing: a group of writes (and consumer offset commits) either all become visible or none do, and a new producer instance with the same `transactional.id` fences out a zombie old instance. Idempotence alone only deduplicates retries to a single partition within one session. The transactional ID is what makes consume-process-produce atomic.
+
+</details>
+
+<details><summary><b>24.</b> In Kafka transactions, what is fencing and why does it matter?</summary>
+
+Fencing prevents a zombie or duplicated producer — for example one that hung and was presumed dead — from committing stale writes after a replacement has taken over the same `transactional.id`. When a new producer calls `initTransactions`, the broker bumps an epoch and rejects any write from the old epoch with a producer-fenced error. This keeps exactly-once intact across producer restarts and failovers.
+
+</details>
+
+<details><summary><b>25.</b> What is the consumer-side requirement to actually observe Kafka exactly-once, and what is the config key?</summary>
+
+The consumer must set `isolation.level=read_committed`. With that, it only sees records from committed transactions and skips records from aborted or in-flight ones; the default `read_uncommitted` shows everything including aborted writes. Without `read_committed` on the consumer, the producer transactions are written but the reader still sees uncommitted data, so the end-to-end guarantee is lost.
+
+</details>
+
+<details><summary><b>26.</b> What is the difference between `read_committed` and `read_uncommitted` for a Kafka consumer?</summary>
+
+`read_uncommitted` (the default) delivers all records up to the high watermark, including those from transactions that later abort. `read_committed` delivers only records from successfully committed transactions and never reads past the Last Stable Offset, the point before any open transaction. Choosing `read_committed` is what makes a downstream consumer honour producer EOS.
+
+</details>
+
+<details><summary><b>27.</b> What is the Last Stable Offset and why does a `read_committed` consumer care about it?</summary>
+
+The Last Stable Offset (LSO) is the offset before the earliest still-open (uncommitted) transaction on a partition; a `read_committed` consumer will not return records beyond it. This means a long-running open transaction can stall `read_committed` consumers, because they cannot advance past data whose commit or abort outcome is unknown. It is a common cause of a stuck `read_committed` consumer.
+
+</details>
+
+<details><summary><b>28.</b> What are transaction markers (control batches) in a Kafka transactional topic?</summary>
+
+They are special commit or abort records the transaction coordinator writes into each partition involved in a transaction to mark its outcome. A `read_committed` consumer uses these markers to decide whether to deliver or skip the preceding records. They are why transactional topics carry a small overhead even when payloads are small.
+
+</details>
+
+<details><summary><b>29.</b> What is the single most important limitation of Kafka EOS that an architect must state?</summary>
+
+Kafka EOS is within-Kafka only: it guarantees exactly-once for the consume-transform-produce loop where both the input and the transactionally-committed output (and the consumer offsets) live in Kafka. The moment the data leaves Kafka into an external store, EOS no longer covers it. Claiming end-to-end exactly-once on the strength of Kafka transactions alone is the classic mislabelled-edge defect.
+
+</details>
+
+<details><summary><b>30.</b> Why can Kafka transactions atomically commit consumer offsets together with produced records?</summary>
+
+Because consumer offsets are themselves stored in a Kafka topic (`__consumer_offsets`), the offset commit can be enrolled in the same transaction as the output records via `sendOffsetsToTransaction`. This makes the read these inputs and produced these outputs step atomic. It is the mechanism behind exactly-once stream processing inside Kafka Streams and the transactional consumer pattern.
+
+</details>
+
+<details><summary><b>31.</b> What does `sendOffsetsToTransaction` do and why is it essential for the consume-process-produce pattern?</summary>
+
+It includes the consumer's read offsets in the producer transaction so that the offsets advance if and only if the output records commit. This guarantees you never advance past inputs whose outputs were not committed, eliminating both duplicate and lost processing within Kafka. Committing offsets separately from the output would reopen the duplicate or loss window.
+
+</details>
+
+<details><summary><b>32.</b> A producer with a `transactional.id` set never calls `initTransactions`. What happens?</summary>
+
+The transactional producer is not usable until `initTransactions` runs; sending without it raises an error, because `initTransactions` is what registers the producer with the coordinator, fences prior instances by bumping the epoch, and recovers any pending transaction state. It must be called once at startup before `beginTransaction`. Skipping it is a common first-transaction bug.
+
+</details>
+
+<details><summary><b>33.</b> Define end-to-end exactly-once for a pipeline that ends in an external sink.</summary>
+
+It is at-least-once delivery through the pipeline combined with a sink that applies each record's effect only once — either an idempotent sink or a transactional sink. The delivery layer is allowed to duplicate; the sink absorbs the duplicates or commits atomically. This is the precise meaning of effectively-once across the whole chain, not just the broker.
+
+</details>
+
+<details><summary><b>34.</b> What two sink properties can each independently turn at-least-once delivery into effectively-once?</summary>
+
+Idempotency and transactionality. An idempotent sink produces the same final state no matter how many times a given record is applied (for example upsert by a stable key). A transactional sink commits a batch atomically and tied to the delivery layer's progress so a replay re-commits the same batch rather than adding to it. Either one closes the duplication window at the boundary.
+
+</details>
+
+<details><summary><b>35.</b> Give a concrete example of an idempotent sink write that survives duplicate delivery.</summary>
+
+An upsert keyed by the business key — for instance `INSERT ... ON CONFLICT (isin, valuation_date) DO UPDATE SET nav = excluded.nav` for a NAV table. Replaying the same record just rewrites the same row to the same value, so the end state is identical whether it is applied once or three times. Contrast this with a blind `INSERT` or an `UPDATE balance = balance + amount`, which compounds on every duplicate.
+
+</details>
+
+<details><summary><b>36.</b> Why is `UPDATE balance = balance + :amount` a dangerous sink for at-least-once delivery?</summary>
+
+Because it is not idempotent: each duplicate delivery adds the amount again, so a single replayed settlement double-credits the account. The effect is path-dependent on how many times the message arrives, which at-least-once explicitly does not bound. To make it safe you need a dedup key (for example the instruction reference) so a replayed instruction is recognised and ignored.
+
+</details>
+
+<details><summary><b>37.</b> How does a deduplication table make a non-idempotent sink effectively-once?</summary>
+
+You record each message's unique key (for example event ID or instruction reference) in a dedup table inside the same transaction as the effect, and skip any key already present. A replay finds the key and does nothing, so the effect happens once. The key must be stable and carried by the message, and the insert-and-check must be atomic with the side effect or the window reopens.
+
+</details>
+
+<details><summary><b>38.</b> What property must the message carry for downstream deduplication to be possible at all?</summary>
+
+A stable, unique idempotency key that is identical across retries of the same logical event — a business key like an instruction reference or a deterministic event ID. If the producer generates a fresh random ID on each retry, the duplicates look distinct and dedup fails. Designing this key into the event schema is an upstream decision the architect must mandate.
+
+</details>
+
+<details><summary><b>39.</b> Why is at-least-once plus an idempotent sink usually preferred over a full distributed transaction across systems?</summary>
+
+Because idempotency is simpler, cheaper, and more robust than coordinating a transaction across heterogeneous systems that may not share a transaction manager. It tolerates retries, redeliveries, and even at-least-once from multiple producers, as long as keys are stable. Distributed transactions add coordinator complexity, blocking, and failure modes that idempotency sidesteps.
+
+</details>
+
+<details><summary><b>40.</b> What is a two-phase-commit sink in stream processing?</summary>
+
+It is a sink that commits its output in two phases — a pre-commit (prepare) that durably stages the writes but does not make them visible, and a commit that atomically makes them visible — coordinated with the processing engine's checkpoints. If the prepare succeeds but the engine fails before commit, the staged data can be committed on recovery; if it fails before prepare, nothing is exposed. This ties the external sink's atomicity to the engine's fault-tolerance.
+
+</details>
+
+<details><summary><b>41.</b> How does Flink coordinate a transactional sink with its checkpoints to get end-to-end exactly-once?</summary>
+
+Flink uses checkpoints as the commit coordinator: between checkpoints the sink writes into an open transaction; when a checkpoint barrier arrives the sink pre-commits (flushes and prepares but does not expose the data); and when Flink notifies that the checkpoint is globally complete the sink commits, making the data visible. The checkpoint is the single point that decides the outcome, so a recovery restores from the last complete checkpoint and re-commits any pre-committed-but-not-committed transaction.
+
+</details>
+
+<details><summary><b>42.</b> In Flink's two-phase-commit sink, what happens at `beginTransaction`?</summary>
+
+It starts a fresh transaction that bundles all writes belonging to the current checkpoint interval — for example opening a database transaction, a Kafka transaction, or creating a temporary staging file. Every record processed until the next checkpoint barrier is written into this transaction. It is invoked at the start of each new checkpoint window.
+
+</details>
+
+<details><summary><b>43.</b> In Flink's two-phase-commit sink, what is the role of `preCommit`?</summary>
+
+`preCommit` runs when the checkpoint barrier reaches the sink: it flushes and durably stages the current transaction's data (for example closing the temp file or flushing the Kafka transaction) and stops writing to it, then begins a new transaction for the next window. The data is durable but not yet visible. Its durability is captured in the checkpoint so it can be re-committed after a failure.
+
+</details>
+
+<details><summary><b>44.</b> In Flink's two-phase-commit sink, when does the actual `commit` happen and why then?</summary>
+
+The actual `commit` happens in `notifyCheckpointComplete`, the callback fired after the checkpoint has been confirmed complete across the whole job. Committing only after global checkpoint completion guarantees every operator's state for that checkpoint is durable, so the visible output is consistent with the recorded position. Committing earlier could expose data the job cannot recover to.
+
+</details>
+
+<details><summary><b>45.</b> After a Flink restart from a checkpoint, why does the 2PC sink issue a preemptive commit, and what must that commit be?</summary>
+
+On recovery Flink may have pre-committed a transaction in the last checkpoint but crashed before the commit notification, so it re-issues the commit for that transaction to make the staged data visible exactly once. That commit must be idempotent or safely repeatable, because Flink cannot always know whether the original commit already succeeded. If it is not idempotent, recovery can duplicate the output.
+
+</details>
+
+<details><summary><b>46.</b> In Flink, what happens if a commit in the 2PC sink fails after a successful pre-commit?</summary>
+
+After a successful pre-commit the commit must eventually succeed, so a failed commit causes the Flink application to fail and restart per its restart strategy, and the commit is retried. The system never abandons a pre-committed transaction, because doing so would lose data that the checkpoint already accounts for. This is why commit must be guaranteed to eventually succeed is a design rule, not a hope.
+
+</details>
+
+<details><summary><b>47.</b> What is the modern Flink Sink API for two-phase committing, and how does it split responsibilities?</summary>
+
+The `sink2` API's `TwoPhaseCommittingSink`, which splits responsibilities into a `SinkWriter` that produces pre-commits and a `Committer` that performs the commits. It implements the two-phase-commit algorithm over the `CheckpointedFunction` and `CheckpointListener` semantics. The older `TwoPhaseCommitSinkFunction` is the legacy single-class base, so version-aware reading matters when reviewing connector code.
+
+</details>
+
+<details><summary><b>48.</b> Why does pre-commit have to be durable rather than just buffered in memory?</summary>
+
+Because the whole point of two-phase commit is that after a failure the engine can still commit a transaction it pre-committed; if the staged data lived only in memory it would be lost on crash, and the commit would have nothing to expose. Pre-commit therefore flushes to durable storage (file, broker transaction log, DB prepared transaction) and the checkpoint records that this transaction is pending. This is what makes recovery able to finish the commit.
+
+</details>
+
+<details><summary><b>49.</b> How does the Kafka sink in Flink achieve exactly-once, in terms of Kafka primitives?</summary>
+
+It uses Kafka transactions: each checkpoint interval's records go into a Kafka transaction that is pre-committed at the barrier and committed on `notifyCheckpointComplete`, with `transactional.id` values managed across operator restarts to avoid zombies. Downstream consumers must read with `isolation.level=read_committed` to skip uncommitted or aborted output. So the engine's checkpoints drive Kafka's own transaction commit.
+
+</details>
+
+<details><summary><b>50.</b> Why must downstream consumers of a Flink-to-Kafka exactly-once pipeline use `read_committed`?</summary>
+
+Because Flink stages output inside Kafka transactions that are only committed at checkpoint completion; a `read_uncommitted` consumer would see records from transactions that may later be aborted on recovery, reintroducing duplicates or phantom data. `read_committed` ensures the consumer only observes the committed, recovery-consistent output. The guarantee is only end-to-end if the final reader honours it.
+
+</details>
+
+<details><summary><b>51.</b> What is `transaction.timeout.ms` and why does it matter for a checkpointed transactional sink?</summary>
+
+It bounds how long a Kafka transaction may stay open before the broker aborts it; if a Flink checkpoint interval (plus recovery delay) exceeds this timeout, the broker aborts the pre-committed transaction and the sink cannot commit it, causing data loss or job failure. So the transaction timeout must be set larger than the maximum expected checkpoint interval plus recovery time. It is a classic misconfiguration in long-checkpoint pipelines.
+
+</details>
+
+<details><summary><b>52.</b> A consumer uses auto-commit (`enable.auto.commit=true`). Which guarantee does this most resemble and what is the risk?</summary>
+
+It gives weak, timing-dependent guarantees: offsets are committed on a timer (`auto.commit.interval.ms`) independent of whether processing finished. A crash can commit offsets for records not yet processed (loss) or fail to commit processed ones (duplicates). For any guarantee you actually care about, disable auto-commit and commit explicitly relative to processing.
+
+</details>
+
+<details><summary><b>53.</b> To get at-least-once with manual offset commits, do you commit before or after processing, and why?</summary>
+
+After processing — commit the offset only once the record's effect is durably applied. That way a crash before commit causes reprocessing (a duplicate), never a loss, which is the at-least-once contract. Committing before processing would convert it to at-most-once.
+
+</details>
+
+<details><summary><b>54.</b> In the lesson's exercise you run the same consumer in auto-commit, manual-commit-after-process, and transactional EOS, then kill it mid-batch. What do you predict for each?</summary>
+
+Auto-commit: a mix of losses or duplicates depending on where the timer fired relative to the crash. Manual commit-after-process: zero loss, some duplicates (at-least-once). Transactional EOS with a `read_committed` consumer and transactional output: zero loss and zero duplicates within Kafka. The exercise's value is that your observed duplicate and loss tabulation should match this prediction exactly.
+
+</details>
+
+<details><summary><b>55.</b> In that exercise, why does the manual-commit-after-process run show duplicates but no losses?</summary>
+
+Because the record's effect is applied first and the offset is committed only afterward; killing the consumer between those steps leaves the offset behind the record, so on restart it is reprocessed. Nothing is lost because the offset never advances past unprocessed records. The duplicates are exactly the records processed but not yet acknowledged at the moment of the kill.
+
+</details>
+
+<details><summary><b>56.</b> In that exercise, why can the transactional EOS run show neither duplicates nor losses?</summary>
+
+Because the output write and the consumer offset commit are enrolled in one Kafka transaction via `sendOffsetsToTransaction`, so a crash mid-batch aborts the open transaction — neither the partial output nor the offset advance becomes visible. On restart it reprocesses cleanly from the last committed offset, and the `read_committed` downstream never saw the aborted writes. The guarantee holds because delivery and commit move together.
+
+</details>
+
+<details><summary><b>57.</b> When you mark a diagram for the exercise, where exactly does the guarantee degrade if the downstream store is not idempotent?</summary>
+
+At the edge from the consumer to the external (non-Kafka) store: Kafka EOS covers up to and including the transactional Kafka write and offset commit, but the moment the effect is applied to a non-idempotent external sink, a reprocess after crash duplicates that effect. The degradation point is the write into the external store, and what restores the guarantee is making that write idempotent (upsert or dedup) or transactional with the engine. That edge is precisely where the honest label changes from exactly-once to at-least-once.
+
+</details>
+
+<details><summary><b>58.</b> A NAV publication pipeline claims exactly-once into a downstream reporting database. What is the first thing to audit?</summary>
+
+Whether the database write is idempotent or transactionally tied to the delivery layer, because Kafka EOS stops at Kafka. Check whether NAV rows are upserted by a stable key (for example ISIN plus valuation date) or whether a dedup key gates a plain insert; if neither, a consumer reprocess duplicates the NAV row. Without idempotency or two-phase commit at that edge, the exactly-once claim is false regardless of broker configuration.
+
+</details>
+
+<details><summary><b>59.</b> A transfer-agency order pipeline must never duplicate a subscription. Which design pattern do you mandate?</summary>
+
+At-least-once delivery plus an idempotent sink keyed by the order's unique reference, so a replayed order is recognised and not booked twice. Concretely, dedup on the transfer-agency order reference inside the same transaction that books the order, or upsert the order by reference. This is cheaper and more robust than a cross-system distributed transaction and directly closes the double-subscription risk.
+
+</details>
+
+<details><summary><b>60.</b> Why is a stable, source-assigned reference (rather than a broker offset) the right idempotency key for fund instructions?</summary>
+
+Because the business reference identifies the logical instruction across retries, reprocesses, and even reprocessing from a different topic or after a re-snapshot, whereas a broker offset can change when data is re-keyed, recompacted, or replayed from another source. Deduping on the instruction reference survives those events; deduping on offset does not. The architect should require this reference in the event schema.
+
+</details>
+
+<details><summary><b>61.</b> What is the danger of relying on Kafka offset as a dedup key across a CDC re-snapshot or topic rebuild?</summary>
+
+Offsets are positional and not stable identities: a re-snapshot, partition reassignment, or topic rebuild can present the same logical change at a different offset, so offset-based dedup would treat it as new and duplicate the effect, or skip a genuinely new record. A content-based business key is stable across these events. This is why guarantee diagrams should annotate which key actually deduplicates each edge.
+
+</details>
+
+<details><summary><b>62.</b> Why does increasing throughput by raising in-flight requests conflict with exactly-once on the idempotent producer?</summary>
+
+The idempotent producer caps `max.in.flight.requests.per.connection` at 5 so the broker can still deduplicate retries within its sequence-number window and preserve order; pushing it higher to chase throughput is rejected when idempotence is on. So you cannot trade the EOS guarantee away silently by tuning that knob — Kafka enforces the constraint. This is the throughput cost of exactly-once made concrete.
+
+</details>
+
+<details><summary><b>63.</b> How does latency increase when you move from at-least-once to Kafka EOS?</summary>
+
+Transactions add coordination round-trips: `beginTransaction`, the writes, optional `sendOffsetsToTransaction`, then `commitTransaction`, plus the broker writing transaction markers to every involved partition. The consumer side also waits for committed data (it cannot read past the Last Stable Offset). These per-batch overheads raise end-to-end latency, which is the latency cost of exactly-once.
+
+</details>
+
+<details><summary><b>64.</b> An auditor asks you to prove a settlement pipeline cannot double-pay. What evidence do you present?</summary>
+
+A guarantee diagram annotated edge by edge showing at-least-once delivery and an idempotent or transactional commit at the settlement endpoint, plus the dedup or upsert key used and proof it is stable across retries. You back it with the kill-and-restart test results showing zero duplicates at the sink, and the config (`enable.idempotence`, `transactional.id`, `isolation.level=read_committed`) where Kafka transactions are used. The claim must be demonstrated, not asserted.
+
+</details>
+
+<details><summary><b>65.</b> What is the difference between the broker received it once and the effect happened once?</summary>
+
+Broker-level uniqueness (idempotent producer, transactions) guarantees the record appears once inside Kafka, but the business effect happens wherever the record is consumed and applied. If a consumer reprocesses that single record into a non-idempotent external sink, the effect happens twice even though the broker stored it once. Exactly-once must be reasoned about at the effect, which is why the external edge is where claims usually break.
+
+</details>
+
+<details><summary><b>66.</b> Why can you not get end-to-end exactly-once for free just by turning on Kafka transactions?</summary>
+
+Because Kafka transactions only make the within-Kafka consume-process-produce loop atomic; the external sinks and sources at the ends of the pipeline are outside that transaction. End-to-end requires each external boundary to be idempotent or two-phase-commit-coordinated with the engine. Turning on transactions and declaring victory is exactly the mislabelled-edge mistake the lesson warns about.
+
+</details>
+
+<details><summary><b>67.</b> A `read_committed` consumer is stuck and not advancing while data is clearly being produced. What is the first thing to check?</summary>
+
+Whether there is a long-running or hung open transaction holding the Last Stable Offset back, because `read_committed` will not deliver records beyond the LSO until the open transaction commits or aborts. Check for a stuck transactional producer, an oversized checkpoint interval, or a transaction that exceeded `transaction.timeout.ms`. Resolving or aborting the open transaction lets the LSO and the consumer advance.
+
+</details>
+
+<details><summary><b>68.</b> A transactional producer dies and is replaced; the old one revives and tries to commit. What protects you?</summary>
+
+Epoch-based fencing: when the replacement called `initTransactions` with the same `transactional.id`, the coordinator bumped the epoch, so the revived old producer's writes and commits are rejected with a producer-fenced error. This prevents the zombie from committing stale data and corrupting the exactly-once guarantee. Fencing is the reason a fixed `transactional.id` is required, not a random one per instance.
+
+</details>
+
+<details><summary><b>69.</b> Why should the `transactional.id` be stable across restarts of the same logical task rather than randomly generated?</summary>
+
+Because the stable ID is how the coordinator recognises a restarted instance as the same logical producer, lets it recover or abort the prior pending transaction, and fences the dead instance via the epoch. A random ID per start would orphan the previous transaction (leaving it to time out and possibly stall `read_committed` readers) and lose the fencing protection. Stable IDs are central to correct EOS across failures.
+
+</details>
+
+<details><summary><b>70.</b> What is a zombie producer in Kafka EOS terms?</summary>
+
+A producer instance that was presumed dead and replaced but is still running — for example after a network partition or a stop-the-world pause — and might still attempt to write or commit. Without fencing it could commit stale data after the replacement has moved on, breaking exactly-once. The epoch bump on `initTransactions` fences it out, which is why zombie-fencing is a named feature of Kafka transactions.
+
+</details>
+
+<details><summary><b>71.</b> Why is exactly-once across two independent databases via application-level dual writes fundamentally unsafe?</summary>
+
+Because a crash between the two writes leaves them inconsistent — one applied, one not — and there is no shared transaction to roll both back; retrying re-applies the already-applied side unless it is idempotent. This is the dual-write problem. The fix is a single source of truth plus CDC or outbox or a two-phase-commit sink, not two best-effort writes.
+
+</details>
+
+<details><summary><b>72.</b> How does the transactional-outbox pattern relate to end-to-end exactly-once?</summary>
+
+The application writes its state change and an outbox event in one local database transaction, so the event is produced if and only if the state changed; a CDC relay then delivers the outbox event at least once to Kafka, and the downstream consumer dedups by the event ID. This avoids the dual-write race and yields effectively-once because the delivery is at-least-once over an idempotent boundary. It is the standard pattern for emitting events atomically with a state change.
+
+</details>
+
+<details><summary><b>73.</b> Why is idempotency at the sink generally more robust than a cross-system distributed transaction across heterogeneous stores?</summary>
+
+Because heterogeneous XA transactions need every participant to support the protocol, introduce a blocking coordinator and in-doubt states, and fail in hard-to-recover ways under partitions. Idempotent sinks tolerate retries and redeliveries without coordination and degrade gracefully. As an architect you reach for idempotency first and reserve engine-coordinated two-phase commit for cases where the sink genuinely cannot be made idempotent.
+
+</details>
+
+<details><summary><b>74.</b> What does the guarantee is restored mean on a diagram, with a concrete example?</summary>
+
+It means a downstream mechanism re-establishes exactly-once effect after an edge degraded it — for example, delivery is at-least-once (degraded) into a sink that upserts by ISIN plus date, so the duplicate is absorbed and the end state is exactly-once again (restored). You mark the degrade point (the edge) and the restore point (the idempotent write). A diagram with no restore mechanism after a degrade is a duplication waiting to happen.
+
+</details>
+
+<details><summary><b>75.</b> Can a pipeline be exactly-once at the start and end but at-least-once in the middle? What matters?</summary>
+
+Yes — what matters is the observable effect at the sink, not that every internal hop is exactly-once. Internal at-least-once is fine as long as the final commit is idempotent or transactional so duplicates do not change the end state. The architect audits the boundaries where effects become visible, not every wire.
+
+</details>
+
+<details><summary><b>76.</b> Why does at-most-once never appear in the design of a settlement or NAV pipeline?</summary>
+
+Because at-most-once permits silent loss, and losing a settlement instruction or a NAV correction is a regulatory and financial failure that auditors will surface. The acceptable trade in this domain is at-least-once (with idempotent sinks) — never loss. At-most-once belongs only to disposable, sampleable data.
+
+</details>
+
+<details><summary><b>77.</b> What is the relationship between idempotency and ordering for exactly-once?</summary>
+
+Idempotency removes duplicates but does not by itself guarantee order; for some effects (for example applying NAV corrections in sequence) order also matters. The idempotent producer preserves per-partition order, and partitioning by the business key keeps related events ordered on one partition. Exactly-once effect plus correct ordering usually requires keyed partitioning, not just dedup.
+
+</details>
+
+<details><summary><b>78.</b> How does keying messages by the business key support both ordering and idempotency in Kafka?</summary>
+
+Keying routes all records for one key (for example one ISIN or one account) to the same partition, so they are delivered and processed in produced order, and the idempotent producer preserves that order within the partition. Combined with a key-based upsert at the sink, you get ordered, deduplicated effects. Choosing the partition key is therefore a correctness decision, not just load balancing.
+
+</details>
+
+<details><summary><b>79.</b> What does `OutOfOrderSequenceException` from an idempotent producer indicate?</summary>
+
+It indicates the broker received a record with a sequence number that does not follow the expected next value for that producer and partition — for example because an earlier batch was lost or the producer's state diverged. It signals the idempotency invariant was violated and the producer typically must be reset. It is a sign of a deeper delivery problem, not something to ignore.
+
+</details>
+
+<details><summary><b>80.</b> Why is exactly-once a property of a closed loop rather than a single component?</summary>
+
+Because the guarantee depends on delivery, processing, and commit all agreeing on the same notion of progress; idempotence on the producer alone, or transactions without `read_committed` consumers, or a transactional engine with a non-idempotent sink each leaves a gap. Only the whole loop — consume, process, produce, commit offsets, expose to the sink — closed consistently yields exactly-once effect. Auditing one component in isolation cannot establish it.
+
+</details>
+
+<details><summary><b>81.</b> In Flink, why does committing at `notifyCheckpointComplete` rather than at the barrier matter for correctness?</summary>
+
+The barrier (`preCommit`) means this transaction's data is durable for this checkpoint, but the checkpoint is only globally valid once every operator confirms; committing at `notifyCheckpointComplete` ensures the visible output corresponds to a recoverable global state. If the sink committed at the barrier and the checkpoint later failed elsewhere, the job would recover to an earlier state while output for the failed checkpoint was already visible — a duplicate. The completion callback aligns visibility with recoverability.
+
+</details>
+
+<details><summary><b>82.</b> What is the recovery sequence for a Flink 2PC sink that crashed between pre-commit and commit?</summary>
+
+On restart Flink restores state from the last completed checkpoint, finds the pre-committed (pending) transaction recorded in that checkpoint, and preemptively re-issues its commit to make the staged data visible exactly once. Because it cannot be certain the original commit did not partially succeed, that commit must be idempotent. New processing then resumes from the restored position.
+
+</details>
+
+<details><summary><b>83.</b> Why must a Flink 2PC commit be idempotent specifically during recovery?</summary>
+
+Because after a crash Flink may not know whether the pre-committed transaction was already committed before the failure, so it re-commits; if the commit is not idempotent, the data could be exposed twice. Designing the commit so that re-committing the same transaction is a no-op (for example committing an already-named atomic rename, or a Kafka transaction the coordinator treats correctly) keeps recovery exactly-once. This is the single most important contract for implementing such a sink.
+
+</details>
+
+<details><summary><b>84.</b> How would you make a file-based sink exactly-once using the 2PC pattern?</summary>
+
+Write each checkpoint interval's data to a uniquely named temporary or staging file (begin), flush and close it on the barrier (pre-commit), and atomically rename or move it into the destination on checkpoint completion (commit). The atomic rename is idempotent — re-issuing it after recovery either completes the move or finds it already done. Readers only see fully renamed files, so partial files never become visible.
+
+</details>
+
+<details><summary><b>85.</b> How would you make a relational-database sink exactly-once with 2PC?</summary>
+
+Use the database's prepared (XA-style) transactions: open a transaction per checkpoint, write into it, issue `PREPARE` at the barrier (pre-commit), and `COMMIT` the prepared transaction on checkpoint completion, re-committing the recorded prepared transaction ID on recovery. Alternatively, drop two-phase commit entirely and make the writes idempotent upserts keyed by a business key, which is simpler if the schema allows. The choice is between engine-coordinated commit and a self-contained idempotent sink.
+
+</details>
+
+<details><summary><b>86.</b> When is an idempotent sink preferable to a 2PC sink, and vice versa?</summary>
+
+An idempotent sink is preferable when the data has a natural stable key and the operation can be expressed as an upsert or dedup, because it avoids coordinator complexity and tolerates redelivery from any source. A 2PC sink is needed when effects cannot be made idempotent (for example append-only outputs with no dedup key, or strict atomic visibility of a batch) and the engine can drive prepared commits. Architects default to idempotency and use two-phase commit where idempotency is genuinely impossible.
+
+</details>
+
+<details><summary><b>87.</b> Why does commit must eventually succeed make pre-commit a point of no return for the sink?</summary>
+
+Once data is pre-committed, the checkpoint has accounted for it, so abandoning it would lose data the system believes is safe; therefore the design forbids giving up — a failed commit forces a job restart and retry until it succeeds. This asymmetry (you can abort before pre-commit, but not after) is the heart of two-phase commit. It is why the prepare step must only succeed when the subsequent commit is genuinely guaranteed to be completable.
+
+</details>
+
+<details><summary><b>88.</b> A pipeline shows exactly-once into Kafka but feeds a downstream analytics warehouse via a sink connector. Where do you re-audit the guarantee?</summary>
+
+At the connector's write into the warehouse: Kafka EOS ends at Kafka, so you must check whether the sink connector does idempotent upserts (for example by primary key) or supports a two-phase-commit or exactly-once delivery mode, and how it tracks offsets on restart. If the connector is at-least-once into a non-idempotent table, duplicates land in the warehouse. The diagram's exactly-once label must stop at Kafka unless that connector edge restores it.
+
+</details>
+
+<details><summary><b>89.</b> Why can naive `INSERT`-based Kafka sink connectors duplicate rows on a connector restart?</summary>
+
+Because on restart a sink connector may reprocess records between its last committed offset and the crash point (at-least-once), and a plain `INSERT` applies each one again, producing duplicate rows. Restoring exactly-once requires upsert-on-key, a dedup key, or the connector's exactly-once delivery feature. This is the same external-edge degradation, now inside the connector.
+
+</details>
+
+<details><summary><b>90.</b> What is the difference between idempotent delivery and idempotent processing?</summary>
+
+Idempotent delivery means the transport does not duplicate the record (idempotent producer within Kafka), while idempotent processing means applying the same record any number of times yields the same effect at the sink. End-to-end exactly-once needs idempotent (or transactional) processing at the boundary, because delivery idempotency alone does not cover a consumer reprocessing into an external store. Conflating the two is a common reasoning error.
+
+</details>
+
+<details><summary><b>91.</b> Why is exactly-once harder for a process whose effect is sending an email or calling an external payment API?</summary>
+
+Because those side effects are external, not transactional, and often not idempotent or reversible — you cannot enroll send email or call settlement API in your checkpoint or transaction. You must add an idempotency key the external system honours (many payment APIs accept one) or a dedup ledger so a replay is a no-op. Without external idempotency support, exactly-once cannot be guaranteed for that effect, only minimised.
+
+</details>
+
+<details><summary><b>92.</b> How does an idempotency key passed to an external API restore exactly-once at that boundary?</summary>
+
+The API uses the key to recognise a retried request and return the original result instead of performing the action again, so a replayed call has no additional effect. You generate a stable key per logical operation (for example the instruction reference) and send it on every retry. This is how at-least-once delivery into an external action becomes effectively-once when the API cooperates.
+
+</details>
+
+<details><summary><b>93.</b> In a SWIFT message dispatch pipeline, why is exactly-once effect critical and how is it usually achieved?</summary>
+
+Because dispatching the same payment message twice can trigger a duplicate settlement, and losing one misses an obligation, so neither loss nor duplication is acceptable. It is usually achieved with at-least-once delivery plus a dedup ledger keyed by the message reference (and the receiving system's own duplicate detection), so a replay is recognised and not resent. The architect documents this boundary as the restore point on the diagram.
+
+</details>
+
+<details><summary><b>94.</b> For an EMT or EPT file generation pipeline, where might exactly-once degrade and what restores it?</summary>
+
+Degradation can occur if the file-writing step is triggered at-least-once and writes are not atomic, producing a partial or duplicated file the downstream picks up. Restoration uses atomic publish (write to a temp name, atomic rename on completion) or idempotent regeneration keyed by reporting period and fund, so re-running yields the same single file. The visible edge is the file becoming available to consumers, which must be atomic and idempotent.
+
+</details>
+
+<details><summary><b>95.</b> Why is atomic rename on completion a two-phase-commit-style idempotent restore for file outputs?</summary>
+
+Because writing to a staging name and then atomically renaming means consumers never see a partial file (no half-written EMT or EPT report), and re-running the rename either completes or finds the destination already present — a no-op. The rename is the commit; the staging write is the pre-commit. It restores exactly-once visibility at the file boundary without a distributed transaction.
+
+</details>
+
+<details><summary><b>96.</b> Under DORA's operational-resilience expectations, why does mislabelling a guarantee carry regulatory weight?</summary>
+
+Because DORA requires firms to understand and manage ICT risk to critical functions, and a guarantee diagram that claims exactly-once where it is really at-least-once into a non-idempotent settlement sink is an undocumented operational risk that can produce duplicated financial effects. An auditor finding the mislabel evidences inadequate control over a critical data flow. Accurate, provable guarantee diagrams are part of demonstrable resilience.
+
+</details>
+
+<details><summary><b>97.</b> Why must guarantee claims for a UCITS NAV-publication flow be auditable rather than asserted?</summary>
+
+Because the NAV drives investor transactions and regulatory reporting, so a duplicated or lost NAV has direct investor-protection consequences and must be controllable and evidenced. Exactly-once must be backed by the idempotency or transaction mechanism at each boundary and by reproducible kill-restart evidence. An asserted but unproven claim is exactly what an auditor will challenge.
+
+</details>
+
+<details><summary><b>98.</b> How does an LEI or ISIN serve as a useful component of an idempotency key in fund-data sinks?</summary>
+
+As stable, standardised identifiers, an ISIN (instrument) or LEI (legal entity) plus a period or event qualifier forms a deterministic business key on which to upsert or dedup, so replays of the same logical record collapse to one row. They are reliable because they do not change across retries or re-snapshots, unlike offsets or surrogate IDs. The architect mandates such keys in the event schema to make sinks idempotent.
+
+</details>
+
+<details><summary><b>99.</b> What is the danger of using a database auto-increment surrogate key as the dedup key for incoming events?</summary>
+
+A surrogate generated at insert time is new on every insert, so it cannot detect that an incoming event is a replay — it would happily insert the duplicate and assign it a fresh ID. Dedup must key on the event's own stable business identity (instruction reference, ISIN plus date), checked before insert. Relying on the surrogate gives the illusion of uniqueness while permitting duplicates.
+
+</details>
+
+<details><summary><b>100.</b> What single mislabelling error is the costliest in a settlement pipeline, and how do you prevent it?</summary>
+
+Labelling an edge exactly-once when it is at-least-once into a non-idempotent sink, which compliance discovers downstream as a duplicated settlement. Prevent it by always tracing the effect to its visible boundary, requiring a stable idempotency key or two-phase commit there, and proving with a kill-restart test that no duplicate reaches the sink. Honest, evidence-backed edge labelling is the whole point of the lesson.
+
+</details>
+
+
+## Phase 4 · 2.3.1 + 1.8.10 Log-based CDC (Debezium) — 100 self-test questions
+
+<details><summary><b>1.</b> What is change data capture (CDC) and why is log-based CDC preferred over query-based polling in a fund estate?</summary>
+
+CDC is the practice of capturing every row-level insert, update, and delete from a source database and emitting them as an ordered stream of change events. Log-based CDC reads the database transaction log (the Postgres WAL) directly, so it captures every change — including deletes and rapid updates a poll would miss — without adding load via repeated `SELECT` queries or needing `updated_at` columns. In a transfer-agency system this means you can mirror the source of record completely and without touching fragile core application code.
+
+</details>
+
+<details><summary><b>2.</b> What is the PostgreSQL write-ahead log (WAL) and why is it the foundation of Debezium's Postgres connector?</summary>
+
+The WAL is an append-only log to which Postgres writes every change before applying it to data files, guaranteeing durability and crash recovery. Because every committed change is recorded there in commit order, the WAL is the authoritative changelog Debezium reads to reconstruct row-level events. Logical decoding turns those low-level WAL records into a readable stream of logical changes the connector can consume.
+
+</details>
+
+<details><summary><b>3.</b> What is logical decoding in PostgreSQL?</summary>
+
+Logical decoding is the Postgres mechanism that extracts the WAL's physical change records and presents them as a stream of logical, row-level changes through an output plugin and a replication slot. Unlike physical (streaming) replication, which ships raw byte-level WAL, logical decoding gives you per-table inserts/updates/deletes that a consumer like Debezium can map to change events. It is the bridge between the internal WAL format and a usable change stream.
+
+</details>
+
+<details><summary><b>4.</b> What is the `pgoutput` logical decoding plugin and why does Debezium default to it?</summary>
+
+`pgoutput` is the logical decoding output plugin built into PostgreSQL 10 and later, maintained by the Postgres community and always present, so no extra extension needs to be compiled or installed. Debezium defaults to it because it requires zero extra installation on the database server, which matters when a regulated DBA team will not install third-party C extensions. The alternative `decoderbufs` plugin must be installed separately.
+
+</details>
+
+<details><summary><b>5.</b> What is a Postgres logical replication slot and why must Debezium keep one?</summary>
+
+A replication slot is a server-side object that tracks the last WAL position a logical consumer has confirmed, and it tells Postgres how far back WAL must be retained. Debezium creates and holds a slot (default name configurable via `slot.name`) so the database does not discard WAL the connector still needs after a restart. The gotcha: if the connector is stopped for a long time the retained WAL grows and can fill the disk, so an abandoned slot must be dropped deliberately.
+
+</details>
+
+<details><summary><b>6.</b> What configuration property names the Debezium replication slot, and why should you set it explicitly?</summary>
+
+The property is `slot.name`, defaulting to `debezium`. You should set it explicitly (and uniquely per connector) because each logical slot can be consumed by only one connector at a time, and two connectors sharing a slot name will conflict. A meaningful name like `dbz_ta_orders` also makes it obvious which connector a slot belongs to when an operator later has to drop an orphaned one.
+
+</details>
+
+<details><summary><b>7.</b> What is a Postgres publication and what does Debezium's `publication.autocreate.mode` control?</summary>
+
+A publication is a Postgres object that defines the set of tables whose changes are exposed through `pgoutput`. `publication.autocreate.mode` controls whether Debezium creates the publication for you and how: `all_tables` publishes every table, `filtered` (the typical choice) publishes only the tables matching the connector's include/exclude lists, and `disabled` requires a DBA to create it manually. In a locked-down fund database you usually pre-create a `filtered` publication so the connector account needs no `CREATE` rights.
+
+</details>
+
+<details><summary><b>8.</b> What does the `table.include.list` property do and how is a table named in it?</summary>
+
+`table.include.list` is a comma-separated allowlist of fully qualified table identifiers in `schemaName.tableName` form (regex-matched) that the connector should capture; everything else is ignored. For example `public.orders,public.nav` captures only those two tables. Restricting capture to exactly the tables you need keeps the publication small and avoids streaming sensitive tables you have no business mirroring.
+
+</details>
+
+<details><summary><b>9.</b> What is REPLICA IDENTITY in Postgres and why does it matter for CDC?</summary>
+
+REPLICA IDENTITY is a per-table setting that controls how much of the old row is written to the WAL for `UPDATE` and `DELETE` operations, which directly determines what Debezium can put in the event's `before` field. The default only logs the primary-key columns of the old row, so non-key old values are absent on updates/deletes. Getting this wrong means your downstream `before` image is incomplete, which can break audit reconstruction.
+
+</details>
+
+<details><summary><b>10.</b> What are the four REPLICA IDENTITY settings and when would you use `FULL`?</summary>
+
+They are `DEFAULT` (logs only primary-key columns of the old row), `FULL` (logs the entire old row), `NOTHING` (logs no old-row info), and `USING INDEX` (logs columns of a named unique index). You set `REPLICA IDENTITY FULL` with `ALTER TABLE ... REPLICA IDENTITY FULL` when downstream consumers need the complete `before` image — for example to compute which fields actually changed in a NAV record. The trade-off is more WAL volume per change.
+
+</details>
+
+<details><summary><b>11.</b> A table has `REPLICA IDENTITY DEFAULT` and you see `before` is null for an update — is that a bug?</summary>
+
+With `DEFAULT`, Postgres only logs the primary-key columns of the old row, so for an update the `before` field will contain just the key and null for unchanged non-key columns it could not log — and for tables with no primary key the `before` image can be entirely absent. It is not a Debezium bug; it is the source REPLICA IDENTITY limiting what reaches the WAL. The fix is `ALTER TABLE ... REPLICA IDENTITY FULL` if a full before-image is required.
+
+</details>
+
+<details><summary><b>12.</b> What is Kafka Connect and what role does it play in a Debezium deployment?</summary>
+
+Kafka Connect is Kafka's framework for running reusable connectors that move data into and out of Kafka, providing the worker runtime, REST API, configuration management, and offset storage. Debezium connectors are Kafka Connect source connectors, so Connect is the operational host that starts, restarts, and rebalances them. This means you never run Debezium as a standalone process; you submit a connector config to a Connect cluster.
+
+</details>
+
+<details><summary><b>13.</b> What is the difference between a Connect connector and a task?</summary>
+
+A connector is the logical unit you configure (one Debezium Postgres connector per database), while tasks are the units of parallel work the connector spawns to actually do the copying. The Debezium Postgres connector is constrained to a single task because logical decoding from one slot is inherently sequential, so `tasks.max` greater than one has no effect for it. Other connectors (like sinks) can split work across many tasks.
+
+</details>
+
+<details><summary><b>14.</b> Where does Kafka Connect store a Debezium connector's offsets in distributed mode?</summary>
+
+In distributed mode, Connect stores source offsets in an internal compacted Kafka topic, configured by `offset.storage.topic`, alongside `config.storage.topic` and `status.storage.topic`. For a Debezium Postgres source the stored offset is essentially the last confirmed WAL LSN plus snapshot position. Because the offset lives in Kafka, any worker in the cluster can resume the connector after a crash, not just the original host.
+
+</details>
+
+<details><summary><b>15.</b> Why does Debezium store offsets in Kafka rather than relying solely on the Postgres replication slot?</summary>
+
+The replication slot tracks the WAL retention boundary on the database, but Connect's offset topic records exactly which LSN the connector last committed to Kafka and whether a snapshot was in progress. Together they let the connector resume precisely: the slot guarantees the WAL is still there, and the offset says where to resume reading. Relying on the slot alone would not capture snapshot progress or the consumer's committed position.
+
+</details>
+
+<details><summary><b>16.</b> What is the change event envelope and what are its top-level fields?</summary>
+
+The change event envelope is the structured payload Debezium emits per change, with the key fields `before`, `after`, `source`, `op`, and `ts_ms`. `before` and `after` hold the row state pre- and post-change, `source` carries metadata, `op` is the operation code, and `ts_ms` is the connector's processing timestamp. This consistent shape lets one downstream consumer handle inserts, updates, and deletes uniformly.
+
+</details>
+
+<details><summary><b>17.</b> What does the `op` field contain and what does `op:"c"` mean?</summary>
+
+`op` is a single-character operation code identifying the kind of change. `c` means create (insert), `u` means update, `d` means delete, `r` means read (a row emitted during a snapshot), `t` means truncate, and `m` means a logical decoding message. So `op:"c"` is a freshly inserted row, with `before` null and `after` populated.
+
+</details>
+
+<details><summary><b>18.</b> For an insert, an update, and a delete, what do `before` and `after` contain?</summary>
+
+For an insert (`op:"c"`), `before` is null and `after` holds the new row. For an update (`op:"u"`), `before` holds the old row image (subject to REPLICA IDENTITY) and `after` holds the new row. For a delete (`op:"d"`), `before` holds the deleted row and `after` is null. Reading these two fields together tells a consumer exactly what changed.
+
+</details>
+
+<details><summary><b>19.</b> What does `op:"r"` signify and when do you see it?</summary>
+
+`op:"r"` (read) marks a row emitted during a snapshot rather than from the live transaction log, with `after` populated and `before` null. You see a burst of `r` events when the connector first starts and performs its initial snapshot of existing rows. Distinguishing `r` from `c` lets downstream logic know a row is historical backfill, not a new live insert.
+
+</details>
+
+<details><summary><b>20.</b> What is in the `source` block of a change event and why is it important for auditing?</summary>
+
+The `source` block carries provenance metadata: the Debezium version, connector name, database/schema/table, the WAL LSN, transaction id, commit timestamp, and a `snapshot` flag. This is what lets you prove to an auditor exactly which source table and WAL position a given lakehouse row came from. For fund data it ties each NAV or order event back to a precise point in the source of record.
+
+</details>
+
+<details><summary><b>21.</b> What is the difference between `ts_ms` in the envelope and the commit timestamp in `source`?</summary>
+
+The envelope `ts_ms` is when the Debezium connector processed the event, whereas `source.ts_ms` is when the change was committed in the source database. They differ by the connector's processing lag, so during a backlog catch-up `ts_ms` can be much later than the source commit time. For event-time analytics you should use the source commit time, not the connector processing time.
+
+</details>
+
+<details><summary><b>22.</b> What is a tombstone event and why does Debezium emit one after a delete?</summary>
+
+A tombstone is a record with a non-null key but a null value (null payload) emitted immediately after a delete event. It exists so Kafka log compaction can physically remove all records for that key, since compaction retains the latest value per key and a null tells it to drop the key entirely. Without the tombstone, a compacted topic would keep the last non-null value of a deleted row forever.
+
+</details>
+
+<details><summary><b>23.</b> What does the `tombstones.on.delete` property control and what is its default?</summary>
+
+`tombstones.on.delete` controls whether Debezium emits the extra null-value tombstone record after each delete; it defaults to `true`. You set it to `false` when your downstream consumer treats the `op:"d"` event itself as the delete signal and does not rely on compaction semantics. Leaving it `true` is correct when the topic is compacted and must garbage-collect deleted keys.
+
+</details>
+
+<details><summary><b>24.</b> A delete produces two records on the topic — is that expected?</summary>
+
+Yes, with `tombstones.on.delete` at its default `true`, a delete yields a normal delete change event (`op:"d"`, `before` populated, `after` null) followed immediately by a tombstone (same key, null value). The first conveys the delete and the old row image; the second enables compaction to purge the key. A downstream merge job must treat both correctly and not mistake the tombstone for a malformed record.
+
+</details>
+
+<details><summary><b>25.</b> What is an initial snapshot and why is it necessary?</summary>
+
+An initial snapshot is the connector's first-pass read of all existing rows in the captured tables, emitted as `op:"r"` events before streaming begins. It is necessary because the WAL only contains changes from a point in time forward, so without a snapshot the consumer would have no record of rows that existed before CDC started. The snapshot plus subsequent streaming gives a complete picture of the table.
+
+</details>
+
+<details><summary><b>26.</b> What does `snapshot.mode = initial` do, and what happens on a normal restart?</summary>
+
+`initial` (the default) performs a full snapshot only on the very first start when no offsets exist, then switches to streaming WAL changes. On a normal restart where offsets already exist, the snapshot is skipped entirely and the connector resumes streaming from the stored LSN. This is why a routine restart does not re-read the whole table.
+
+</details>
+
+<details><summary><b>27.</b> What is the difference between `snapshot.mode = initial` and `initial_only`?</summary>
+
+Both perform a full snapshot on first start, but `initial` then continues into streaming the ongoing WAL changes, whereas `initial_only` completes the snapshot and stops without streaming. You use `initial_only` for a one-time bulk migration or backfill where you do not want continuous replication. For live CDC you want `initial` so the stream keeps flowing after the snapshot.
+
+</details>
+
+<details><summary><b>28.</b> What does `snapshot.mode = no_data` (formerly `schema_only`) do?</summary>
+
+`no_data` captures the table schema and starts streaming from the current WAL position without emitting `op:"r"` read events for existing rows. It replaces the deprecated `schema_only` value. You choose it when you only care about changes from now on and already have the historical data loaded by other means, so you skip the cost of a full snapshot.
+
+</details>
+
+<details><summary><b>29.</b> What does `snapshot.mode = always` do and what is the downstream requirement?</summary>
+
+`always` performs a full snapshot on every connector start, re-emitting all rows as `op:"r"` regardless of stored offsets. Because the same rows are re-read on each restart, downstream consumers must be idempotent — typically an upsert keyed on the primary key — or they will duplicate data. It is rarely used in production except to forcibly re-baseline a target.
+
+</details>
+
+<details><summary><b>30.</b> What is `snapshot.mode = when_needed` and when does it re-snapshot?</summary>
+
+`when_needed` snapshots only when it determines one is required — for example when stored offsets are missing or point to a WAL/LSN position the server has already purged. In normal operation with valid offsets it just resumes streaming. It is a safety mode that self-heals after the connector falls behind far enough that the needed WAL is gone.
+
+</details>
+
+<details><summary><b>31.</b> What is an incremental snapshot and what problem does it solve over a blocking initial snapshot?</summary>
+
+An incremental snapshot reads existing rows in bounded chunks while the connector continues streaming live WAL changes concurrently, instead of blocking all streaming until a full snapshot finishes. This avoids long lock/latency windows on huge tables and lets you start capturing live changes immediately. It is the modern approach for re-snapshotting a large transfer-agency table without stalling the pipeline.
+
+</details>
+
+<details><summary><b>32.</b> How is an ad-hoc incremental snapshot triggered in Debezium?</summary>
+
+You send an `execute-snapshot` signal through Debezium's signaling mechanism, typically by inserting a row into a configured signaling table (named via `signal.data.collection`) or sending a signal over a Kafka signal topic. The signal names the data collections (tables) to snapshot. This lets an operator re-snapshot a specific table on demand without redeploying or restarting the connector.
+
+</details>
+
+<details><summary><b>33.</b> What is the signaling table and why does Debezium use it?</summary>
+
+The signaling table is a small auxiliary table the connector watches (configured by `signal.data.collection`) into which you insert command rows such as `execute-snapshot` or `pause`/`resume`. Because the connector already watches the database via CDC, signals delivered as table rows are processed in WAL order alongside data changes, giving deterministic, ordered control. It is how you trigger incremental snapshots and other runtime actions safely.
+
+</details>
+
+<details><summary><b>34.</b> Name two events that force a re-snapshot in a Debezium Postgres deployment.</summary>
+
+A re-snapshot is forced when the connector's stored offsets are lost or deleted (so it cannot resume from a known LSN), and when the replication slot is dropped or the required WAL has been purged so the prior position no longer exists. In `when_needed` mode the connector detects these and re-snapshots automatically; in `initial` mode a wiped offset topic on first-like start triggers a fresh full snapshot. Either way the consequence is re-reading existing rows as `op:"r"`.
+
+</details>
+
+<details><summary><b>35.</b> How does an incremental snapshot avoid conflicting with concurrent live changes to the same row?</summary>
+
+During an incremental snapshot Debezium reads a chunk of rows and buffers them, then deduplicates against any live change events for the same primary key that arrive in the same window, so the most recent state wins. This windowing/deduplication means a row updated by live traffic while being snapshotted is not overwritten by the older snapshot read. The result is a consistent merge of snapshot reads and streamed changes.
+
+</details>
+
+<details><summary><b>36.</b> What per-table ordering guarantee does Debezium provide and what is its mechanism?</summary>
+
+Debezium guarantees that change events for a single table arrive in commit order, achieved by keying each event by the table's primary key and routing all of a table's events to one topic partition (since the key hashes to the same partition). Kafka preserves order within a partition, so all changes to one row are strictly ordered. Cross-table or cross-partition global ordering is not guaranteed.
+
+</details>
+
+<details><summary><b>37.</b> Why is there no global total ordering across all tables in a Debezium stream, and how do you reconstruct transactions?</summary>
+
+Because each table typically goes to its own topic and events are partitioned by key for parallelism, there is no single ordered stream across all tables. To reconstruct a multi-table transaction you enable Debezium's transaction metadata, which emits begin/end markers and a per-event transaction id on a transaction topic. Consumers can then group events that share a transaction id to see a consistent commit boundary.
+
+</details>
+
+<details><summary><b>38.</b> What is a schema-change event and why does Debezium emit one?</summary>
+
+A schema-change event records a DDL change to a captured table — for example a new column added to the `nav` table — so downstream consumers know the structure of subsequent data events evolved. Debezium emits these in order relative to the data events, so a consumer sees the schema change before rows shaped by it. This keeps the consumer's understanding of the table layout synchronized with the source.
+
+</details>
+
+<details><summary><b>39.</b> Why does schema-change ordering relative to data events matter for a NAV pipeline?</summary>
+
+If a column is added to the `nav` table and you start receiving data events carrying that new field, a consumer that processed the data before learning of the schema change could mis-parse or drop the new field. Debezium orders the schema-change event ahead of the data events that depend on it, so the consumer updates its schema first. This prevents silent data loss when fund schemas evolve mid-stream.
+
+</details>
+
+<details><summary><b>40.</b> What is transaction metadata in Debezium and which fields identify a transaction?</summary>
+
+When transaction metadata is enabled, Debezium writes `BEGIN`/`END` marker events to a transaction topic and stamps each data event with a `transaction` block containing the transaction `id`, a total event count, and per-data-collection counts. The `id` lets consumers correlate every change that committed together. This is how you reassemble an atomic multi-row business operation, like a subscription that touches `orders` and `nav` together.
+
+</details>
+
+<details><summary><b>41.</b> What is the transactional outbox pattern and what problem does it solve?</summary>
+
+The outbox pattern has a service write its business state change and an "event" row into an outbox table within the same local database transaction, instead of trying to update the database and publish to a message broker in one distributed transaction. This solves the dual-write problem: because both writes are one atomic DB commit, you can never publish an event without the matching state change or vice versa. A separate process then relays the outbox rows to the broker.
+
+</details>
+
+<details><summary><b>42.</b> How does outbox-via-CDC relay the outbox table, and why is it reliable?</summary>
+
+Instead of polling the outbox, you point Debezium at the outbox table so every inserted outbox row becomes a CDC change event captured from the WAL. Because the outbox insert and the business change committed in the same transaction, CDC guarantees the event is published exactly when (and only when) the business state actually persisted. It turns the outbox into a guaranteed, ordered event source with no extra polling component.
+
+</details>
+
+<details><summary><b>43.</b> What is the Debezium Outbox Event Router and what is its transform class name?</summary>
+
+The Outbox Event Router is a single-message transform (SMT) that reshapes raw outbox-table change events into clean domain events on the right topics; its class is `io.debezium.transforms.outbox.EventRouter`. Rather than emitting the literal outbox row structure, it extracts the payload and routes by aggregate type. You add it to the connector config as a transform so consumers see business events, not the outbox table's schema.
+
+</details>
+
+<details><summary><b>44.</b> What columns does the Outbox Event Router expect by default in the outbox table?</summary>
+
+By default it expects `id` (a UUID, not null), `aggregatetype` (varchar, not null), `aggregateid` (varchar, not null), `type` (varchar, not null), and `payload` (typically `jsonb`). `aggregatetype` selects the destination topic, `aggregateid` becomes the event key, and `payload` becomes the message body. If your column names differ you remap them via the SMT's field-mapping options rather than renaming database columns.
+
+</details>
+
+<details><summary><b>45.</b> How does the Outbox Event Router decide which topic an event goes to?</summary>
+
+It routes by the value of the `aggregatetype` column (overridable via the route-by-field option), so all events sharing an aggregate type land on the same topic. By default the topic name is `outbox.event.<aggregatetype>`. This lets one outbox table feed many logically separate event topics — for example `outbox.event.order` and `outbox.event.nav` from a single table.
+
+</details>
+
+<details><summary><b>46.</b> Why does the outbox event's key matter, and what becomes the key by default?</summary>
+
+By default the `aggregateid` column becomes the Kafka message key, which means all events for the same aggregate (e.g. one order) hash to the same partition and stay ordered. Per-aggregate ordering is essential so that consumers see an aggregate's events in the sequence they were produced. Choosing the aggregate id as key is what gives you correct ordering without a global lock.
+
+</details>
+
+<details><summary><b>47.</b> Why use the outbox pattern instead of capturing the business tables directly with CDC?</summary>
+
+Direct CDC of business tables couples your event contract to internal table structure, leaks physical schema, and forces consumers to interpret raw row changes. The outbox lets the application emit a deliberately shaped domain event (the `payload`) with a stable contract, decoupled from how the data is physically stored. You get clean, versioned events while still inheriting CDC's transactional guarantees.
+
+</details>
+
+<details><summary><b>48.</b> What is the difference between merge (upsert) and append-plus-dedupe when landing change events into Iceberg?</summary>
+
+Merge (upsert) applies each change against the target Iceberg table by primary key — inserting new keys, overwriting updated ones, and deleting on tombstones — so the table always holds the current state mirroring the source. Append-plus-dedupe instead writes every change event as a new row and resolves the latest state at query time (or in a later compaction) by picking the highest version per key. Merge keeps a clean current-state table; append keeps full history and defers reconciliation.
+
+</details>
+
+<details><summary><b>49.</b> When landing CDC into Iceberg with an upsert, how do you handle a delete event and its tombstone?</summary>
+
+For an `op:"d"` event you issue a delete (or a soft-delete marker) against the Iceberg row matching that primary key, removing it from current state. The following tombstone record carries the same key with a null value and should be ignored by the merge logic since the delete was already applied — treating the tombstone as data would error or no-op. Mishandling this is a common cause of "deleted rows reappear" bugs.
+
+</details>
+
+<details><summary><b>50.</b> Why might append-plus-dedupe be safer than in-place merge for an auditable fund lakehouse?</summary>
+
+Append-plus-dedupe never loses prior versions, so you retain a complete, immutable history of every change with its source LSN and timestamp — exactly what an auditor wants to reconstruct point-in-time NAV. A pure upsert overwrites old values and keeps only current state. With append you can always derive current state via a dedupe view while still proving how a value changed over time.
+
+</details>
+
+<details><summary><b>51.</b> In an append-plus-dedupe model, how do you compute current state per primary key?</summary>
+
+You select, per primary key, the change event with the highest ordering value — typically the source WAL LSN or the source commit `ts_ms`, with the operation type so a delete wins over an earlier update. A window function like `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY lsn DESC)` keeping rank one yields current state. Ordering by the source LSN (not arrival time) is what guarantees correctness under out-of-order processing.
+
+</details>
+
+<details><summary><b>52.</b> Why must dedupe ordering use the source LSN/commit time rather than the Kafka arrival time?</summary>
+
+Arrival/processing time can be reordered by retries, rebalances, or parallel consumers, so two updates to the same row might be processed out of source order. The source WAL LSN (or `source.ts_ms`) reflects the true commit order in the database, so using it as the dedupe key guarantees the latest source change wins regardless of processing jitter. Using arrival time risks resurrecting a stale value.
+
+</details>
+
+<details><summary><b>53.</b> Why is Iceberg's snapshot/ACID model a good fit for landing CDC merges?</summary>
+
+Iceberg gives atomic table commits and snapshot isolation, so a batch merge of change events either fully applies or not at all, and readers never see a half-applied state. Its hidden partitioning and metadata also make per-key upserts and time-travel queries efficient. For CDC this means a crashed merge job leaves the table consistent and you can compare a specific Iceberg snapshot against the source.
+
+</details>
+
+<details><summary><b>54.</b> The Debezium Postgres connector ignores `tasks.max = 4` — why?</summary>
+
+The Postgres connector reads from a single logical replication slot, and logical decoding is inherently a single ordered stream, so it always runs exactly one task no matter what `tasks.max` is set to. Parallelism for Postgres CDC comes from partitioning downstream topics, not from multiple source tasks. Setting `tasks.max` higher simply has no effect for this connector.
+
+</details>
+
+<details><summary><b>55.</b> Postgres disk usage is climbing steadily after deploying Debezium — what is the first thing to check?</summary>
+
+Check the replication slot's retained WAL: query `pg_replication_slots` for the slot's `restart_lsn` and the lag, because an inactive or lagging slot forces Postgres to keep WAL it cannot recycle. If the connector is down or far behind, WAL accumulates until the disk fills. Resolve by restarting the connector to advance the slot, or drop the orphaned slot if the connector is gone for good.
+
+</details>
+
+<details><summary><b>56.</b> Why can a low-traffic captured table cause unbounded WAL growth, and how do heartbeats fix it?</summary>
+
+Debezium only advances its confirmed flush LSN when it processes events for the captured tables, but Postgres WAL is shared across all tables; if your captured table is quiet while other tables churn, the slot never confirms newer LSNs and WAL is retained. Heartbeat messages, enabled via `heartbeat.interval.ms`, are periodic events Debezium emits even when the captured tables are idle, periodically pushing the connector to flush a newer LSN. This unblocks WAL recycling without needing real changes to the captured table.
+
+</details>
+
+<details><summary><b>57.</b> After restarting the Debezium connector mid-stream, how does it know where to resume?</summary>
+
+On restart, Connect reads the connector's last committed offset from the `offset.storage.topic`, which records the last processed WAL LSN and whether a snapshot was in progress. The connector then asks Postgres to stream from that LSN via the still-present replication slot. Because the slot retained the WAL and the offset records the position, it resumes exactly where it left off with no gap.
+
+</details>
+
+<details><summary><b>58.</b> An auditor asks how you prove the lakehouse copy is complete after a connector crash. What is the argument?</summary>
+
+Completeness rests on three guarantees: the initial snapshot captured all pre-existing rows, the WAL plus a durable replication slot captured every subsequent change with no gaps, and the offset topic let the connector resume from the exact last-committed LSN after the crash so no change was skipped or required re-reading data lost from WAL. You then back it with a row-by-row reconciliation showing zero divergence. Together these prove no change between snapshot and now was missed.
+
+</details>
+
+<details><summary><b>59.</b> Why is at-least-once, not exactly-once, the realistic delivery model for Debezium, and how do you cope?</summary>
+
+Exactly-once would require atomic coordination between committing the read position and the Kafka write, which Debezium does not guarantee across a crash, so a replayed window after restart can duplicate recently emitted events. You cope by making the sink idempotent: upsert by primary key so reapplying a change is a no-op, or append and dedupe by source LSN. This turns at-least-once into effectively-once at the table level.
+
+</details>
+
+<details><summary><b>60.</b> Your row-by-row comparison after a restart shows the Iceberg table has rows Postgres deleted. What likely went wrong?</summary>
+
+The merge job probably failed to apply delete events: either it ignored `op:"d"` records, or it mistook the following null-value tombstone for a malformed message and dropped the actual delete, or REPLICA IDENTITY left it unable to identify the key to delete. The fix is to handle `op:"d"` as a delete keyed by `before`'s primary key and to skip (not error on) tombstones. Then re-reconcile to confirm zero divergence.
+
+</details>
+
+<details><summary><b>61.</b> How would you run a full row-by-row comparison to prove Iceberg equals Postgres?</summary>
+
+Quiesce or pick a consistent cutoff (e.g. a known source LSN), then compare the dedup'd current-state view of the Iceberg table against the Postgres tables key by key — for example by computing a per-row hash of all columns on both sides and full-outer-joining on the primary key to surface any mismatched, missing, or extra rows. Zero rows in the symmetric difference proves equivalence. Doing this after a deliberate restart is exactly the "Done when" check for this lesson.
+
+</details>
+
+<details><summary><b>62.</b> What does `op:"t"` represent and why does TRUNCATE need special handling?</summary>
+
+`op:"t"` is a truncate event, signalling that the whole table was emptied by a `TRUNCATE` rather than per-row deletes. It needs special handling because it carries no per-row `before` image, so a merge job must interpret it as "delete all current rows for this table," not as a single-row change. Ignoring truncate events leaves stale rows in the lakehouse that no longer exist in the source.
+
+</details>
+
+<details><summary><b>63.</b> What is `op:"m"` and when does it appear?</summary>
+
+`op:"m"` is a message event produced from a Postgres logical decoding message — for example one emitted via `pg_logical_emit_message()` — rather than from a normal row change. It lets applications inject out-of-band markers into the change stream. Most pipelines never see these unless the application deliberately emits logical messages.
+
+</details>
+
+<details><summary><b>64.</b> Why does dropping and recreating the replication slot risk data loss?</summary>
+
+A logical replication slot only retains WAL from its current position forward; when you drop it, Postgres can recycle the WAL it was holding, and a freshly created slot starts from the current LSN. Any changes that occurred while no slot existed are gone from the WAL and will not be streamed. The safe recovery is a re-snapshot, because streaming alone cannot recover the lost window.
+
+</details>
+
+<details><summary><b>65.</b> A consumer renames a column in Postgres and downstream parsing breaks. How does Debezium's schema handling help?</summary>
+
+Debezium emits a schema-change event capturing the DDL before the affected data events, and each change event carries its own schema (or a schema-registry reference), so consumers can adapt to the new structure in order. The break usually means the consumer is not honoring the evolved schema or the schema registry compatibility was bypassed. Properly consuming schema-change events keeps the consumer's view synchronized with the source.
+
+</details>
+
+<details><summary><b>66.</b> Why does Debezium key change events by primary key, and what breaks if a table has no primary key?</summary>
+
+Keying by primary key routes all changes for a row to one partition (preserving order) and lets compaction and upserts target the right record. A table with no primary key and `REPLICA IDENTITY DEFAULT` produces events with null/empty keys, so ordering per logical row is lost and upserts have nothing to merge on. The fix is to add a primary key or set `REPLICA IDENTITY FULL` and configure a message key explicitly.
+
+</details>
+
+<details><summary><b>67.</b> What is the practical difference between `pgoutput` and `decoderbufs` as logical decoding plugins?</summary>
+
+`pgoutput` is built into Postgres 10+ and needs nothing installed on the server, while `decoderbufs` is a Protobuf-based plugin that must be compiled and installed as a Postgres extension. Functionally both feed Debezium, but in a regulated database where DBAs will not add third-party C extensions, `pgoutput` is the pragmatic default. Debezium selects the plugin via `plugin.name`.
+
+</details>
+
+<details><summary><b>68.</b> What does the connector property `plugin.name` configure and what value do you typically use on modern Postgres?</summary>
+
+`plugin.name` selects the logical decoding output plugin the connector uses, with `pgoutput` being the typical value on Postgres 10 and later because it ships with the server. The alternatives are `decoderbufs` and the older `wal2json`. Choosing `pgoutput` avoids any extension-installation step on the database host.
+
+</details>
+
+<details><summary><b>69.</b> What permissions does the Postgres role used by Debezium need at minimum?</summary>
+
+The role needs `REPLICATION` (or be a superuser) to create and read logical replication slots, `LOGIN`, and at least `SELECT` on the captured tables for the snapshot. If Debezium must create the publication it also needs `CREATE` on the database; pre-creating a `filtered` publication lets you avoid granting that. Scoping these tightly is part of least-privilege design for a regulated source.
+
+</details>
+
+<details><summary><b>70.</b> How would you capture both the Phase-1 `orders` and `nav` tables and route each to its own topic?</summary>
+
+Set `table.include.list = public.orders,public.nav` so only those two tables are captured, and rely on Debezium's default topic naming `<topic.prefix>.public.orders` and `<topic.prefix>.public.nav` to land each table on its own topic. You configure `topic.prefix` to namespace the connector. Each table then streams to a dedicated, primary-key-keyed topic that downstream merge jobs consume independently.
+
+</details>
+
+<details><summary><b>71.</b> What does `topic.prefix` do and why must it be unique per connector?</summary>
+
+`topic.prefix` is a mandatory logical name prepended to every topic the connector produces and embedded in the `source` metadata, identifying the source system. It must be unique across connectors because two connectors sharing a prefix would collide on topic names and offsets, corrupting the streams. A clear prefix like `ta_prod` makes the topic namespace self-describing.
+
+</details>
+
+<details><summary><b>72.</b> Why does Debezium include the WAL LSN in the `source` metadata, and how do you use it downstream?</summary>
+
+The LSN is the exact byte offset of the change in the WAL, giving a monotonically increasing, source-authoritative ordering key for every event. Downstream you use it as the tiebreaker for dedupe (latest LSN wins per key) and as the proof-of-position when reconciling against Postgres. It is the most reliable ordering field because it reflects true commit sequence, unlike processing timestamps.
+
+</details>
+
+<details><summary><b>73.</b> A NAV correction updates the same fund's row three times in one second. How do you ensure the lakehouse reflects the final value?</summary>
+
+Because all three updates share the fund's primary key, they go to the same partition in commit order, and your merge keyed on that primary key applies them in LSN order so the last update wins. In append-plus-dedupe you keep all three but resolve current state by the highest LSN. Either way ordering by source LSN — not arrival time — guarantees the final corrected NAV is what the lakehouse shows.
+
+</details>
+
+<details><summary><b>74.</b> What is the risk of running multiple Debezium connectors against the same publication or slot, and how do you avoid it?</summary>
+
+A logical replication slot can be read by only one consumer at a time, so two connectors on the same `slot.name` will conflict and one will fail or stall. The fix is a distinct `slot.name` (and usually a distinct publication) per connector. This is a common production trap when someone clones a connector config without changing the slot name.
+
+</details>
+
+<details><summary><b>75.</b> How does Debezium behave when the database is unreachable for a while, and what recovers it?</summary>
+
+The connector retries the database connection (with backoff) and its task may transition to a failed state if retries are exhausted; meanwhile the replication slot keeps the WAL on the server. When the database returns, restarting the connector via the Connect REST API resumes streaming from the stored offset and retained WAL. The slot plus offset are what make the gap-free recovery possible.
+
+</details>
+
+<details><summary><b>76.</b> Why might you enable transaction metadata even though it adds a topic and overhead?</summary>
+
+Transaction metadata is what lets you reconstruct atomic commit boundaries across multiple tables, which matters when a single business operation (say a subscription) writes to `orders` and `nav` together and consumers must see them as one unit. Without it you only have per-table ordering and cannot tell which cross-table changes committed together. The extra transaction topic is the price of cross-table consistency.
+
+</details>
+
+<details><summary><b>77.</b> What does a `before` image being entirely null on an update tell you about the source table configuration?</summary>
+
+It indicates the table likely has no primary key and `REPLICA IDENTITY DEFAULT`, so Postgres logs no old-row identity to the WAL, leaving Debezium with nothing to populate `before`. To get a usable old image you must set `REPLICA IDENTITY FULL` (or add a primary key / `USING INDEX`). Until then, change-detection logic that diffs `before` against `after` cannot work for that table.
+
+</details>
+
+<details><summary><b>78.</b> How does keying by primary key plus single-partition routing give per-row ordering even with multiple partitions on the topic?</summary>
+
+Because Debezium keys each event by the row's primary key, Kafka's default partitioner sends all events for one key to the same partition, and Kafka guarantees order within a partition. So even on a many-partition topic, every change to a given row stays strictly ordered relative to itself. Different rows may interleave across partitions, but no single row's history is ever reordered.
+
+</details>
+
+<details><summary><b>79.</b> Why must the merge job into Iceberg be idempotent, and how is that achieved?</summary>
+
+Because Debezium is at-least-once and restarts can replay events, the merge job will sometimes see the same change twice, so it must produce the same result whether a change is applied once or many times. Idempotence is achieved by upserting on the primary key (re-applying overwrites with the identical value) or by appending and deduping on source LSN. This is what lets duplicates after a restart cause zero divergence.
+
+</details>
+
+<details><summary><b>80.</b> How do you decide between landing CDC as a current-state Iceberg table versus a full-history one for fund data?</summary>
+
+Choose current-state (merge/upsert) when consumers only need the latest mirror of the source — fast and compact. Choose full-history (append-plus-dedupe) when regulation or audit demands reconstructing point-in-time values, such as showing what a fund's NAV was on a past date. Often you keep the append table as the system of record and materialize a current-state view from it.
+
+</details>
+
+<details><summary><b>81.</b> What is the consequence of setting `snapshot.mode = never` (where supported), and why is it not offered for Postgres?</summary>
+
+`never` skips the snapshot and streams only from the current log position, so pre-existing rows are never captured — useful only when you already have the historical data loaded elsewhere. Debezium documents it as available for MySQL and MariaDB, not the Postgres connector. On Postgres you instead use `no_data` to start streaming without read events while still capturing schema.
+
+</details>
+
+<details><summary><b>82.</b> During an initial snapshot the connector restarts. Does it start the snapshot over?</summary>
+
+With a non-incremental (blocking) snapshot, a restart before the snapshot completed generally re-runs it, because the snapshot is not resumable and the offset only marks streaming progress, not partial snapshot rows. Incremental snapshots, by contrast, track chunk progress and can resume mid-snapshot. This is one reason incremental snapshots are preferred for very large tables.
+
+</details>
+
+<details><summary><b>83.</b> What is the difference between a Connect `pause` and `restart` for a Debezium connector's tasks?</summary>
+
+`pause` stops the connector's tasks from processing while keeping them assigned and their state intact, so they resume from the same offset on `resume`. `restart` stops and re-starts the task(s), re-reading configuration and resuming from the stored offset. Pause is for temporarily halting flow (e.g. during downstream maintenance); restart is for recovering a failed task or applying certain changes.
+
+</details>
+
+<details><summary><b>84.</b> Why does pausing a Debezium Postgres connector risk WAL growth, and what mitigates it?</summary>
+
+While paused, the connector stops confirming new LSNs, so the replication slot's `restart_lsn` does not advance and Postgres retains all WAL produced during the pause. On a busy database that can grow quickly. Mitigate by keeping pauses short, monitoring slot lag, and not pausing a CDC connector against a high-write database for long without watching disk.
+
+</details>
+
+<details><summary><b>85.</b> How does the outbox approach preserve event ordering for a single aggregate across a restart?</summary>
+
+Outbox rows are captured from the WAL in commit order and keyed by `aggregateid`, so all events for one aggregate go to the same partition and stay ordered; after a restart the connector resumes from its offset and continues emitting in the same order. At-least-once may replay the tail, but the per-key ordering and idempotent consumers keep the aggregate's event sequence correct. The transactional write of the outbox row is what anchors the ordering to the business commit.
+
+</details>
+
+<details><summary><b>86.</b> What goes wrong if the application updates the outbox row instead of inserting a new one per event?</summary>
+
+The outbox pattern relies on each event being a distinct insert so CDC emits one change event per event; updating a single row in place would emit updates that overwrite the prior event, and consumers would lose intermediate events. The outbox is meant to be append-only — insert one row per domain event, optionally deleting old rows later. In-place updates defeat the guaranteed-publish semantics.
+
+</details>
+
+<details><summary><b>87.</b> Can you delete rows from the outbox table after they are captured, and does that affect consumers?</summary>
+
+Yes — once Debezium has captured an outbox insert from the WAL, the source row can be deleted to keep the table small, and the delete itself is just another (ignorable) change you typically filter out. The captured event already lives on the Kafka topic, so downstream consumers are unaffected by the source cleanup. Many teams run a periodic purge of already-relayed outbox rows.
+
+</details>
+
+<details><summary><b>88.</b> Why is the EMT/EPT file flow a poor candidate for direct table CDC but a good fit for the outbox pattern?</summary>
+
+EMT/EPT (European MiFID/PRIIPs Template) outputs are produced business artifacts whose meaningful unit is a generated file/record set, not raw table mutations, so direct CDC of the underlying tables would leak storage structure and miss the "a template was produced" semantics. An outbox row written in the same transaction that finalizes a template gives a clean, contract-stable "EMT produced" event. CDC then reliably publishes that domain event without polling.
+
+</details>
+
+<details><summary><b>89.</b> How does CDC help reconcile a transfer-agency subledger against a lakehouse copy for ISIN-level positions?</summary>
+
+CDC streams every insert/update/delete on the subledger position tables in commit order, so the lakehouse can maintain an exact mirror keyed by ISIN (and account), and the per-table ordering guarantee plus LSN-based dedupe ensure the latest position per key is correct. A row-by-row hash comparison keyed on ISIN then proves zero divergence. This gives auditors a continuously reconciled, point-in-time-capable copy without batch extracts.
+
+</details>
+
+<details><summary><b>90.</b> Why is capturing deletes correctly especially important for regulatory positions like LEI or holdings records?</summary>
+
+If a holding or counterparty record is deleted in the source but the delete is dropped by the pipeline, the lakehouse retains a position that no longer exists, overstating exposure or misreporting a counterparty's LEI status. Log-based CDC captures deletes from the WAL (which query-based polling cannot), and the merge must apply `op:"d"` as a real removal. Correct delete handling is what keeps regulatory reporting from diverging from the source of record.
+
+</details>
+
+<details><summary><b>91.</b> What is the danger of using `updated_at`-based polling instead of log-based CDC for a SWIFT message store?</summary>
+
+Polling on `updated_at` misses hard deletes entirely, can miss rapid intra-poll updates (only the last state survives), and can miss rows whose timestamp was not bumped, so a message store mirrored this way silently diverges. It also adds query load to the source. Log-based CDC reads every committed change from the WAL in order, capturing deletes and every intermediate state, which is why it is the correct pattern here.
+
+</details>
+
+<details><summary><b>92.</b> How do schema-change events plus a schema registry together prevent silent corruption of a NAV pipeline?</summary>
+
+Debezium orders schema-change events ahead of dependent data events so consumers learn of structural changes first, and a schema registry enforces compatibility so an incompatible change (like dropping a required NAV field) is rejected at registration rather than silently breaking consumers. Together they make the schema contract a hard gate. Without both, a producer-side change can corrupt downstream parsing before anyone notices.
+
+</details>
+
+<details><summary><b>93.</b> Why does an incremental snapshot of a large `nav_history` table not block the live NAV change stream?</summary>
+
+Incremental snapshots read existing rows in bounded chunks interleaved with live WAL streaming, so new NAV changes keep flowing to the topic while the backfill proceeds in the background. The connector deduplicates any overlap between a snapshotted chunk and concurrent live changes by source ordering. This means you can re-baseline a huge history table without a maintenance window or a streaming stall.
+
+</details>
+
+<details><summary><b>94.</b> What single artifact lets a Debezium Postgres connector resume after both the worker and database restart, and why?</summary>
+
+The combination of the Kafka offset (last committed LSN in `offset.storage.topic`) and the durable replication slot on Postgres. The offset tells the connector exactly where to resume, and the slot guarantees the WAL from that LSN onward was retained on the database despite the outage. Neither alone is sufficient: the slot without the offset loses consumer position, and the offset without the slot may point to purged WAL.
+
+</details>
+
+<details><summary><b>95.</b> How would you size a Connect cluster to run several Debezium Postgres connectors plus their sinks?</summary>
+
+Each Debezium Postgres source runs one task, so source throughput is bounded by single-stream decoding; you scale by spreading connectors across workers and giving sink connectors multiple tasks matched to topic partitions. Size workers for peak event rate, serialization cost, and headroom for rebalance, and ensure enough memory for buffering. The sources do not parallelize, so the cluster's parallelism budget mostly goes to sinks and topic partitioning.
+
+</details>
+
+<details><summary><b>96.</b> What happens to Connect's in-flight work when a worker dies in distributed mode?</summary>
+
+Connect detects the worker loss and rebalances the failed worker's connectors and tasks onto the surviving workers, which resume each from its last committed offset in the offset topic. For a Debezium Postgres source that means the single task restarts on another worker and continues from the stored LSN against the same replication slot. Distributed mode plus durable offsets are what make this failover gap-free.
+
+</details>
+
+<details><summary><b>97.</b> A change event's `after` shows a column missing that exists in Postgres. What should you check first?</summary>
+
+First check the connector's column-level filters (`column.include.list`/`column.exclude.list`) and any masking/truncation transforms, since an excluded or masked column simply will not appear in `after`. Also confirm the schema-change event for that column was processed if it was added recently. The missing column is almost always a deliberate filter or a schema-evolution lag, not a decoding failure.
+
+</details>
+
+<details><summary><b>98.</b> What is the purpose of the `decimal.handling.mode` setting for fund data, and what is the risk of the default?</summary>
+
+`decimal.handling.mode` controls how Postgres numeric/decimal values are represented in change events — as `precise` (default, encoded as byte-backed exact decimals), `double`, or `string`. The risk with `double` is silent loss of precision on monetary values like NAV per share, which is unacceptable for financial figures. Keep `precise` (or `string`) so exact decimal amounts survive into the lakehouse.
+
+</details>
+
+<details><summary><b>99.</b> Why does landing CDC into Iceberg via append require periodic compaction or dedupe maintenance?</summary>
+
+Append writes one row per change event, so the table accumulates many versions per key and many small files, which slows queries and inflates storage over time. Periodic compaction merges small files and an optional dedupe/expire pass collapses or ages out superseded versions while preserving the history you must keep. Without maintenance, the append table degrades in query performance even though it stays correct.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the end-to-end restart-correctness story you would present to a regulator for a Debezium-to-Iceberg pipeline.</summary>
+
+The initial snapshot captures all pre-existing rows as `op:"r"`, then logical decoding streams every committed change from the WAL in commit order, held safe by a durable replication slot; on any connector or worker restart, Connect resumes from the last LSN in the offset topic with no gap, and at-least-once replays are absorbed by an idempotent Iceberg upsert (or LSN dedupe). Finally a row-by-row hash reconciliation keyed on the primary key demonstrates zero divergence between Postgres and the lakehouse after a deliberate mid-stream restart. That chain — snapshot completeness, ordered durable streaming, exact-position resume, idempotent landing, and a clean reconciliation — is the proof of completeness and ordering.
+
+</details>
+
+
+## Phase 4 · 2.2.2 Stream connectors (Kafka Connect) — 100 self-test questions
+
+<details><summary><b>1.</b> What is Kafka Connect, in one sentence?</summary>
+
+Kafka Connect is a framework and runtime for streaming data between Apache Kafka and external systems using reusable, declarative connectors instead of bespoke producer/consumer code. It runs as its own cluster of worker processes that you configure via REST, so integrations like a CDC source or an object-store sink become configuration rather than application code. This makes it the operational workhorse for most CDC and sink plumbing in a fund estate.
+
+</details>
+
+<details><summary><b>2.</b> What is a Connect "worker" and what role does it play?</summary>
+
+A worker is a single JVM process running the Kafka Connect runtime; it is the unit of scaling and fault tolerance. Workers host connectors and tasks, coordinate via Kafka's group protocol in distributed mode, and expose the REST API. You add throughput and resilience by adding workers, and a worker dying triggers a rebalance that reassigns its tasks elsewhere.
+
+</details>
+
+<details><summary><b>3.</b> What is a "task" in Kafka Connect and how does it relate to a connector?</summary>
+
+A connector is the logical integration (configuration plus a plan for splitting work), while a task is the actual unit that copies data and runs on a worker. One connector produces one `Connector` instance plus N `Task` instances; the tasks are what consume or produce records in parallel. Tasks are the thing that gets spread across workers, so they are the real parallelism knob.
+
+</details>
+
+<details><summary><b>4.</b> What is the difference between standalone mode and distributed mode?</summary>
+
+Standalone mode runs a single worker process storing offsets in a local file, suitable for development or a single-machine source like log tailing. Distributed mode runs multiple coordinating workers that store config, offsets, and status in Kafka topics, giving you scaling, automatic rebalancing, and fault tolerance. The Phase 4 lab and any production fund pipeline should use distributed mode.
+
+</details>
+
+<details><summary><b>5.</b> Why must a production Connect deployment use distributed mode rather than standalone?</summary>
+
+Distributed mode survives worker failure by rebalancing tasks onto surviving workers and persists all state in replicated Kafka topics, so no single machine is a point of failure. Standalone keeps offsets in a local file that is lost if the host dies, and it cannot scale horizontally. For a regulated NAV or transfer-agency feed you need the recovery and scale that only distributed mode provides.
+
+</details>
+
+<details><summary><b>6.</b> Which three internal Kafka topics does a distributed Connect cluster use, and what does each store?</summary>
+
+`config.storage.topic` stores connector and task configurations, `offset.storage.topic` stores source-connector progress offsets, and `status.storage.topic` stores connector and task status. All three are created in Kafka, are compacted, and are replicated. They are what let a restarted or rebalanced worker recover exactly where the cluster left off.
+
+</details>
+
+<details><summary><b>7.</b> Why is `config.storage.topic` configured with a single partition while the others have many?</summary>
+
+Configuration is a small, totally-ordered log where order matters for the whole cluster, so it uses one partition to guarantee a single consistent sequence of config updates. `offset.storage.topic` and `status.storage.topic` carry far more, key-partitionable traffic, so they get multiple partitions for throughput. All three are log-compacted so only the latest value per key is retained.
+
+</details>
+
+<details><summary><b>8.</b> What does the worker `group.id` setting do in distributed mode, and what must you avoid?</summary>
+
+`group.id` names the Connect cluster; all workers sharing it form one coordinated cluster that shares connectors, tasks, and internal topics. You must not reuse the same `group.id` for two clusters that should be independent, and it must not collide with a consumer `group.id`, or the group coordinator will mix unrelated members. Each separate Connect cluster gets its own unique `group.id`.
+
+</details>
+
+<details><summary><b>9.</b> How does Connect parallelise the work of a single connector?</summary>
+
+The connector reports a desired number of tasks and a way to split its work (for a source, dividing input partitions; for a sink, the topic partitions it consumes). The framework instantiates up to `tasks.max` task instances and distributes them across the available workers. Throughput scales with task count, bounded by how finely the source or topic can actually be partitioned.
+
+</details>
+
+<details><summary><b>10.</b> What is `tasks.max` and why can setting it high not always help?</summary>
+
+`tasks.max` is the upper bound on how many tasks a connector may create. The connector will only create as many tasks as it has independent work units, so for a sink the effective parallelism is capped at the number of partitions in the consumed topics. Setting `tasks.max=20` on a 4-partition topic still yields only 4 active sink tasks.
+
+</details>
+
+<details><summary><b>11.</b> What triggers a rebalance in a distributed Connect cluster?</summary>
+
+A rebalance is triggered by membership or assignment changes: a worker joining or leaving, a connector being created, deleted, paused, resumed, or reconfigured, or a task count change. During a rebalance the cluster recomputes which worker owns each connector and task. Frequent rebalances are a smell that workers are flapping or connectors are being reconfigured too often.
+
+</details>
+
+<details><summary><b>12.</b> What problem does the incremental cooperative rebalancing protocol solve compared with eager rebalancing?</summary>
+
+Eager rebalancing stopped all connectors and tasks across the cluster on every membership change, causing a global stop-the-world pause. Incremental cooperative rebalancing only revokes and reassigns the specific tasks that must move, leaving the rest running. This dramatically reduces downtime when, for example, one worker is added to a busy fund-data ingest cluster.
+
+</details>
+
+<details><summary><b>13.</b> What is a source connector?</summary>
+
+A source connector pulls data from an external system into Kafka, for example reading database change events, files, or an API and producing them to Kafka topics. It is the ingestion direction of Connect. A JDBC or Debezium CDC connector feeding fund transactions into a topic is a typical source.
+
+</details>
+
+<details><summary><b>14.</b> What is a sink connector?</summary>
+
+A sink connector consumes records from Kafka topics and writes them to an external system such as an object store, database, or search index. It is the egress direction of Connect. The Phase 4 lab uses an S3/MinIO sink connector to land Kafka records as objects in a bucket.
+
+</details>
+
+<details><summary><b>15.</b> For a source connector, where are offsets tracked, and what do they represent?</summary>
+
+Source offsets are tracked by Connect itself in the `offset.storage.topic`, and they represent the connector's position in the external source (for example a database log sequence number or file byte position), not a Kafka consumer offset. Connect periodically commits these source offsets so that on restart the connector resumes from the last committed source position. This is distinct from how sinks track progress.
+
+</details>
+
+<details><summary><b>16.</b> For a sink connector, where are offsets tracked, and why is that different from a source?</summary>
+
+A sink connector reads from Kafka, so its progress is an ordinary Kafka consumer-group offset stored in the `__consumer_offsets` topic, committed via the consumer group whose id is derived from the connector name. Because it is just a Kafka consumer, the sink's position is managed by Kafka's normal offset machinery rather than by Connect's `offset.storage.topic`. So sources use `offset.storage.topic` and sinks use consumer offsets.
+
+</details>
+
+<details><summary><b>17.</b> A teammate says "Connect stores all offsets in `offset.storage.topic`." Where are they wrong?</summary>
+
+Only source-connector offsets live in `offset.storage.topic`; sink-connector progress is stored as standard Kafka consumer-group offsets in `__consumer_offsets`. Conflating the two leads people to look in the wrong place when diagnosing a stuck sink or trying to reset its position. The direction of the connector determines where to look.
+
+</details>
+
+<details><summary><b>18.</b> What is a converter in Kafka Connect?</summary>
+
+A converter handles serialization and deserialization between Connect's internal in-memory record representation and the bytes on the Kafka topic. Source connectors use the converter to serialize records onto Kafka; sink connectors use it to deserialize topic bytes into Connect records. Common converters are `JsonConverter`, `AvroConverter`, and `ProtobufConverter`.
+
+</details>
+
+<details><summary><b>19.</b> Which two settings name the converters, and what do they control?</summary>
+
+`key.converter` and `value.converter` name the classes used to serialize/deserialize the record key and value respectively. They control the on-the-wire format, for example `org.apache.kafka.connect.json.JsonConverter` or Confluent's Avro converter. They can be set globally on the worker and overridden per connector.
+
+</details>
+
+<details><summary><b>20.</b> What does `value.converter.schemas.enable=true` do for the `JsonConverter`?</summary>
+
+With `schemas.enable=true`, `JsonConverter` wraps each record in an envelope containing both a `schema` and a `payload`, so the message carries its structure. Setting it to `false` produces plain schemaless JSON with just the data. Mismatching this between producer and a Connect sink is a classic cause of deserialization failures.
+
+</details>
+
+<details><summary><b>21.</b> What is an SMT (Single Message Transform)?</summary>
+
+An SMT is a lightweight, per-record transformation applied in the Connect pipeline between the connector and the converter, configured declaratively in the connector config. Examples include masking a field, renaming a field, routing to a different topic, or inserting a timestamp. SMTs let you reshape data without writing a stream-processing job.
+
+</details>
+
+<details><summary><b>22.</b> What is the fundamental difference between a converter and an SMT?</summary>
+
+A converter handles serialization format (turning structured records into bytes and back, e.g. Avro vs JSON), while an SMT transforms the structured record itself (e.g. dropping a field) before serialization. Converters operate at the boundary with Kafka; SMTs operate on the in-memory `SinkRecord`/`SourceRecord`. They solve different problems and are configured separately.
+
+</details>
+
+<details><summary><b>23.</b> In what order do an SMT chain and a converter execute for a source connector?</summary>
+
+For a source, the connector produces a record, the SMT chain transforms it, and then the configured `value.converter`/`key.converter` serialize it onto the topic. SMTs run on the structured record before serialization. For a sink the order is reversed: the converter deserializes, then the SMTs transform the structured record before it reaches the sink.
+
+</details>
+
+<details><summary><b>24.</b> How do you chain multiple SMTs in a connector configuration?</summary>
+
+You list aliases under the `transforms` config, then configure each by alias, for example `transforms=route,mask` plus `transforms.route.type=...` and `transforms.mask.type=...`. The transforms execute left to right in the order listed. Each transform's class and its parameters are namespaced under `transforms.<alias>.`.
+
+</details>
+
+<details><summary><b>25.</b> Give a fund-data example where an SMT is the right tool.</summary>
+
+Masking or dropping a sensitive field like an investor's national ID before a transfer-agency feed lands in an analytics topic is a natural SMT job using `MaskField` or `ReplaceField`. Another is routing records to topic names by fund code with `RegexRouter`. These are per-record reshapings that do not need a full stream processor.
+
+</details>
+
+<details><summary><b>26.</b> Why are SMTs not a substitute for a stream-processing job like Kafka Streams?</summary>
+
+SMTs are stateless, operate on one record at a time, and cannot join, aggregate, or window across records. They are designed for cheap per-message tweaks in the Connect pipeline, not for enrichment that needs other streams or accumulated state. For NAV aggregation or joining orders to positions you need Kafka Streams or ksqlDB, not an SMT.
+
+</details>
+
+<details><summary><b>27.</b> Where does a converter deserialization failure get reported, and why does converter choice matter for reliability?</summary>
+
+A converter failure (bad bytes, schema mismatch) is a record-level error that, depending on `errors.tolerance`, either fails the task or routes the record to the DLQ. Because the converter is the first thing a sink applies, a single malformed message can stall an entire connector if tolerance and a DLQ are not configured. Choosing and configuring the converter correctly is therefore central to keeping the pipeline alive at 2am.
+
+</details>
+
+<details><summary><b>28.</b> For a source connector, what does an "offset" actually mean?</summary>
+
+It is a connector-defined position in the upstream source, expressed as a key/value pair the connector understands, such as `{filename, position}` for a file source or a log sequence number for a CDC source. Connect persists this so the connector can resume from where it stopped. It is opaque to Connect itself and meaningful only to that connector.
+
+</details>
+
+<details><summary><b>29.</b> How and when does Connect commit source offsets?</summary>
+
+Connect periodically flushes a source task's produced records and then commits the corresponding source offsets to `offset.storage.topic`, on an interval governed by `offset.flush.interval.ms`. Offsets are committed only after the matching records are safely written to Kafka, preserving at-least-once semantics. On restart the task reads the last committed offset and resumes from there.
+
+</details>
+
+<details><summary><b>30.</b> What does `offset.flush.interval.ms` control and what is the risk of setting it too high?</summary>
+
+It controls how often source-connector offsets are flushed and committed to the offset topic. Setting it very high means more records may be reprocessed (replayed) after a crash, because the committed position lags further behind the actual produced position. Setting it very low increases commit overhead; you tune it to balance duplicate reprocessing against throughput.
+
+</details>
+
+<details><summary><b>31.</b> What does "resetting a source connector's offsets" do?</summary>
+
+Resetting source offsets clears or rewrites the connector's stored position so it re-reads from the beginning (or a chosen point) of the source on next start. This can cause the source to re-emit data into Kafka, producing duplicates downstream. It is a deliberate, sometimes destructive operation used for reprocessing or recovery.
+
+</details>
+
+<details><summary><b>32.</b> Which REST endpoints manage a connector's offsets, and what is the precondition for changing them?</summary>
+
+`GET /connectors/{name}/offsets` lists offsets, `PATCH /connectors/{name}/offsets` alters them, and `DELETE /connectors/{name}/offsets` resets them. The connector must be in the `STOPPED` state for `PATCH` or `DELETE` to be allowed. This guards against altering offsets while tasks are actively committing.
+
+</details>
+
+<details><summary><b>33.</b> Why can offsets only be altered when a connector is in the `STOPPED` state?</summary>
+
+When stopped, the connector's tasks are shut down and no longer committing offsets, so there is no race between an external offset edit and a running task's own commits. If tasks were live, a `PATCH` could be immediately overwritten or produce inconsistent state. Requiring `STOPPED` makes offset surgery deterministic and safe.
+
+</details>
+
+<details><summary><b>34.</b> How does resetting a sink connector's offsets differ in mechanism from a source?</summary>
+
+A sink's progress is a Kafka consumer-group offset, so resetting it means rewinding that consumer group's committed positions on the topics it reads. This is conceptually like resetting any consumer group, exposed through the same `/offsets` endpoints in modern Connect. Rewinding a sink causes it to re-consume and re-write already-delivered records to the external system, so downstream idempotency matters.
+
+</details>
+
+<details><summary><b>35.</b> A CDC source connector was rebuilt with new config and is now re-reading the entire database. What likely happened to its offsets?</summary>
+
+Its stored source offset was probably lost or its offset key changed, so Connect found no committed position and the connector started from the snapshot/beginning. This commonly happens when a connector is deleted and recreated with a different name, since the offset key includes the connector name. Preserving the name and the `offset.storage.topic` is essential to avoid a full re-snapshot.
+
+</details>
+
+<details><summary><b>36.</b> What is `errors.tolerance` and what are its two values?</summary>
+
+`errors.tolerance` controls whether per-record processing errors fail the task or are tolerated. The default `none` fails the task on the first error; `all` reports the error (log and/or DLQ) and continues processing subsequent records. Production fund pipelines typically set it to `all` so one poison message does not halt the connector.
+
+</details>
+
+<details><summary><b>37.</b> With `errors.tolerance=none`, what happens when a single malformed record arrives?</summary>
+
+The task fails immediately and moves to the `FAILED` state, stopping all processing for that task until it is restarted. The bad record blocks progress because the default is to treat any error as fatal. This is why a single malformed market-data message can stall an entire connector at 2am if tolerance is left at the default.
+
+</details>
+
+<details><summary><b>38.</b> Which config keys enable a dead-letter queue and what does each do?</summary>
+
+`errors.deadletterqueue.topic.name` names the DLQ topic to which failed records are routed, and it only takes effect when `errors.tolerance=all`. `errors.deadletterqueue.context.headers.enable=true` adds diagnostic headers to each dead-lettered record. `errors.deadletterqueue.topic.replication.factor` sets the DLQ topic's replication factor, defaulting to `3`.
+
+</details>
+
+<details><summary><b>39.</b> Does a DLQ work for both source and sink connectors?</summary>
+
+No — the dead-letter queue feature applies only to sink connectors. It captures records that fail in the sink's converter, transforms, or the sink task itself. Source-connector errors are handled by tolerance, logging, and retries, but not by a Connect DLQ.
+
+</details>
+
+<details><summary><b>40.</b> What must `errors.tolerance` be set to for the DLQ to receive records, and why?</summary>
+
+It must be `all`; with the default `none`, the task fails on the first error and never gets the chance to route the record to the DLQ. The DLQ is the "tolerated error" destination, so tolerance must permit the connector to keep running past the failure. Setting a DLQ topic name without `errors.tolerance=all` produces no dead-lettered records.
+
+</details>
+
+<details><summary><b>41.</b> What diagnostic headers does Connect add when `errors.deadletterqueue.context.headers.enable=true`?</summary>
+
+It adds headers prefixed `__connect.errors.`, including `__connect.errors.topic`, `__connect.errors.partition`, `__connect.errors.offset`, `__connect.errors.connector.name`, `__connect.errors.task.id`, `__connect.errors.stage`, `__connect.errors.class.name`, and `__connect.errors.exception.message`. These let you trace a dead-lettered record back to its exact source position and failing stage. Without them the DLQ record is just opaque failed bytes.
+
+</details>
+
+<details><summary><b>42.</b> You open a DLQ record and read the `__connect.errors.exception.message` and `__connect.errors.stage` headers. What do they tell you?</summary>
+
+`__connect.errors.exception.message` gives the exception text explaining why the record failed (for example a schema or deserialization error), and `__connect.errors.stage` identifies which pipeline stage failed, such as the value converter, a transformation, or the sink put. Together they pinpoint both the cause and the location of the failure. That is usually enough to decide whether the fix is a converter change, an SMT bug, or upstream bad data.
+
+</details>
+
+<details><summary><b>43.</b> In the Phase 4 lab you send a wrong-schema "poison" message through the source topic. Where should it end up and how do you prove it?</summary>
+
+With `errors.tolerance=all` and a DLQ configured, the bad record should be parked in the dead-letter topic rather than crashing the sink. You prove it by consuming the DLQ topic and inspecting the record plus its `__connect.errors.*` headers, which name the original topic/partition/offset and the failing stage. The connector should remain `RUNNING` throughout.
+
+</details>
+
+<details><summary><b>44.</b> What is the default replication factor for a DLQ topic, and why might you change it?</summary>
+
+The default `errors.deadletterqueue.topic.replication.factor` is `3`. In a small lab cluster with only one broker you must lower it to `1`, or DLQ topic creation fails because there are not enough brokers to satisfy the factor. In production you keep it at three for durability of the failed records.
+
+</details>
+
+<details><summary><b>45.</b> A DLQ topic fails to auto-create in your single-broker MinIO lab. What is the first thing to check?</summary>
+
+Check `errors.deadletterqueue.topic.replication.factor`; its default of `3` cannot be satisfied by one broker, so creation fails with a replication-factor error. Setting it to `1` for the lab resolves it. More generally, verify the worker has permission to create topics and that auto-create is allowed.
+
+</details>
+
+<details><summary><b>46.</b> What do `errors.log.enable` and `errors.log.include.messages` control?</summary>
+
+`errors.log.enable=true` makes Connect write failed-record errors to the worker log, and `errors.log.include.messages=true` additionally logs the record's contents and metadata for diagnosis. Both default to `false`. The message flag is powerful for debugging but can leak sensitive payloads, so be cautious with it on investor-data pipelines.
+
+</details>
+
+<details><summary><b>47.</b> Why might `errors.log.include.messages=true` be risky in a fund-administration context?</summary>
+
+It writes the actual record contents into the worker logs, which can expose PII or confidential trade data (investor IDs, holdings, NAV figures) to anyone with log access. Under data-protection and DORA-style controls that may be a compliance breach. Prefer the DLQ with restricted access, or scrub fields with an SMT before logging.
+
+</details>
+
+<details><summary><b>48.</b> What do `errors.retry.timeout` and `errors.retry.delay.max.ms` do?</summary>
+
+`errors.retry.timeout` is the total time Connect will spend retrying a failed operation before giving up, with `0` (the default) meaning no retries. `errors.retry.delay.max.ms` caps the exponential backoff between those retries. They are useful for transient failures like a brief network blip to the sink system, distinct from poison-record handling.
+
+</details>
+
+<details><summary><b>49.</b> How does Connect's error handling distinguish a transient error from a poison record?</summary>
+
+Retries (`errors.retry.timeout`/`errors.retry.delay.max.ms`) address transient, retryable failures such as a temporary connection drop to the sink. Tolerance plus DLQ (`errors.tolerance=all` with a DLQ topic) address deterministic per-record failures that will never succeed on retry, like a malformed schema. A robust connector configures both layers.
+
+</details>
+
+<details><summary><b>50.</b> Why is a DLQ preferable to simply setting `errors.tolerance=all` with logging only?</summary>
+
+With logging only, the bad records are silently dropped from the pipeline and exist solely as log lines, so they cannot be reprocessed and are easy to lose. A DLQ preserves the actual failed records on a durable Kafka topic where they can be inspected, alerted on, and replayed after a fix. For regulated data you generally must not silently discard records, making a DLQ the correct pattern.
+
+</details>
+
+<details><summary><b>51.</b> After fixing a schema bug, how do you reprocess records sitting in a DLQ?</summary>
+
+You consume the DLQ topic and re-publish the now-valid records back onto the source topic (or feed them through a corrected pipeline), since the DLQ retains the original payloads. The `__connect.errors.*` headers help you understand and, if needed, target specific failures. Reprocessing must account for idempotency so replays do not duplicate downstream effects.
+
+</details>
+
+<details><summary><b>52.</b> What does pausing a connector do?</summary>
+
+`PUT /connectors/{name}/pause` stops the connector's tasks from processing records but keeps the tasks and their assignments allocated on the workers. It is a quick, lightweight halt intended for short interruptions, after which `resume` restarts processing almost immediately. Offsets and assignments are retained.
+
+</details>
+
+<details><summary><b>53.</b> What does resuming a paused connector do?</summary>
+
+`PUT /connectors/{name}/resume` returns a paused connector to the `RUNNING` state so its already-allocated tasks begin processing records again from their committed offsets. Because the tasks were never deallocated, resumption is fast. It is the natural counterpart to `pause`.
+
+</details>
+
+<details><summary><b>54.</b> What does the newer `STOPPED` state do that `PAUSED` does not?</summary>
+
+`PUT /connectors/{name}/stop` shuts the tasks down entirely and deallocates their resources, rather than just halting processing as `pause` does. This frees worker capacity, allows offset modification via the `/offsets` endpoints, and is the intended state for longer outages or maintenance. Restarting from `STOPPED` takes longer because tasks must be recreated.
+
+</details>
+
+<details><summary><b>55.</b> When would you choose `pause` over `stop`, and vice versa?</summary>
+
+Choose `pause` for a brief, planned interruption where you want instant resumption and to keep tasks warm, such as a short downstream maintenance window. Choose `stop` for longer outages, to free worker resources, or when you need to edit offsets, since offset changes require the `STOPPED` state. The trade-off is resume speed versus resource release and offset access.
+
+</details>
+
+<details><summary><b>56.</b> What does the connector restart endpoint do and what is its URL?</summary>
+
+`POST /connectors/{name}/restart` restarts the connector instance and, optionally, its tasks. By default it restarts only the `Connector` object, not the tasks, unless you pass query parameters. It is used to recover from a `FAILED` connector without recreating it.
+
+</details>
+
+<details><summary><b>57.</b> What do the `includeTasks` and `onlyFailed` query parameters on the restart endpoint do?</summary>
+
+`includeTasks=true` restarts the task instances as well as the connector (default `false` restarts only the connector); `onlyFailed=true` restarts only the instances currently in `FAILED` state (default `false` restarts all). You typically use `POST /connectors/{name}/restart?includeTasks=true&onlyFailed=true` to surgically restart just the broken tasks. This avoids needlessly disrupting healthy tasks.
+
+</details>
+
+<details><summary><b>58.</b> A single task is in `FAILED` state but the connector and other tasks are `RUNNING`. What is the least disruptive recovery?</summary>
+
+Restart only that task with `POST /connectors/{name}/restart?includeTasks=true&onlyFailed=true`, which targets the failed instances and leaves healthy tasks untouched. This is far less disruptive than deleting and recreating the connector or restarting all tasks. First, though, read the task's status/trace to understand why it failed, so you do not just loop on the same poison condition.
+
+</details>
+
+<details><summary><b>59.</b> Why is restarting a failed task not always enough to fix it?</summary>
+
+If the failure is deterministic — a poison record, a persistent schema mismatch, or a permanent downstream outage — restarting just replays the same record and fails again. Restart fixes transient failures; deterministic failures need a config change, a DLQ to route the bad record past, or fixing the upstream data. Always inspect the failure trace before restarting in a loop.
+
+</details>
+
+<details><summary><b>60.</b> How do you check the current status of a connector and its tasks?</summary>
+
+Call `GET /connectors/{name}/status`, which returns the connector's state, the worker hosting it, and a list of each task's state and, for failures, the error trace. States include `RUNNING`, `PAUSED`, `STOPPED`, `FAILED`, and `UNASSIGNED`. This is the first call when triaging a stalled or failed connector.
+
+</details>
+
+<details><summary><b>61.</b> What does a task in `UNASSIGNED` state mean?</summary>
+
+`UNASSIGNED` means the task exists in the cluster's plan but is not currently assigned to any worker, typically during or just after a rebalance, or when there is insufficient worker capacity. It usually resolves once the rebalance settles. If it persists, check whether workers are flapping or whether the cluster is overloaded.
+
+</details>
+
+<details><summary><b>62.</b> What is the difference between deleting and recreating a connector versus restarting it?</summary>
+
+Restarting reuses the existing connector config and, for sources, its stored offsets, so it resumes where it left off. Deleting and recreating wipes the in-memory connector and, if the name or offset key changes, may lose offset continuity and trigger a full re-read. Prefer restart for recovery; reserve delete/recreate for genuine config rebuilds, and preserve the connector name to keep source offsets.
+
+</details>
+
+<details><summary><b>63.</b> When you pause a connector, what happens to its committed offsets?</summary>
+
+Nothing — committed offsets are retained exactly as they were, because pausing only halts processing without deallocating tasks or rewinding position. On resume, tasks continue from those same committed offsets. Pause is offset-neutral, which is precisely why it is safe for short interruptions.
+
+</details>
+
+<details><summary><b>64.</b> How is the consumer group for a sink connector named, and why does that matter for offset operations?</summary>
+
+A sink connector's consumer group id is derived from the connector name (conventionally `connect-<connector-name>`). This matters because the sink's progress lives in that group's committed offsets, so renaming the connector changes the group and loses progress continuity. It is also how you locate the right group when inspecting or resetting sink offsets directly.
+
+</details>
+
+<details><summary><b>65.</b> How would you size a Connect cluster's worker count for a stated connector load?</summary>
+
+Estimate total task count across all connectors (bounded by source/topic partitioning), the per-task throughput and resource footprint (CPU, memory, network), then provision enough workers so peak load fits with headroom and at least one worker can fail without overload. A common heuristic is to ensure N-1 workers can carry the full task set. You also account for converter cost (Avro deserialization is heavier than JSON) and SMT overhead.
+
+</details>
+
+<details><summary><b>66.</b> For a sink connector consuming a 12-partition topic, what is the maximum useful number of tasks?</summary>
+
+Twelve — a sink task is a Kafka consumer, and consumer parallelism is capped at the partition count, so at most 12 tasks can each own a distinct partition. Setting `tasks.max` above 12 leaves the extra tasks idle. To exceed 12-way parallelism you must repartition the topic with more partitions.
+
+</details>
+
+<details><summary><b>67.</b> When sizing, why does converter choice affect worker resourcing?</summary>
+
+Heavier serialization formats consume more CPU per record: Avro/Protobuf converters do schema lookups and binary encode/decode, while a schemaless JSON converter is cheaper. A high-throughput connector using Avro therefore needs more CPU headroom per task than the same load on JSON. Sizing must factor the chosen converter, not just record count.
+
+</details>
+
+<details><summary><b>68.</b> If a worker dies in a 3-worker distributed cluster, what is the failure-recovery behaviour?</summary>
+
+The remaining two workers detect the membership change and a rebalance reassigns the dead worker's connectors and tasks across the survivors, resuming from committed offsets. With cooperative rebalancing only the affected tasks move, so unaffected tasks keep running. Provided you sized so N-1 workers can carry the load, throughput continues, possibly degraded until the worker is replaced.
+
+</details>
+
+<details><summary><b>69.</b> What is the risk of running a Connect cluster with no spare worker capacity?</summary>
+
+If every worker is at capacity and one fails, the survivors cannot absorb the reassigned tasks, so tasks may lag, fail, or stay `UNASSIGNED`, and a cascading overload can take down the cluster. Sizing for N-1 survivability is the standard guard. For a NAV feed that must not stall, you provision headroom deliberately.
+
+</details>
+
+<details><summary><b>70.</b> How do you create or update a connector via REST?</summary>
+
+`POST /connectors` with a JSON body containing `name` and a `config` object creates it, while `PUT /connectors/{name}/config` with just the config object creates-or-updates it idempotently. The `PUT` form is convenient for declarative deployments since it applies the desired config regardless of current state. Both trigger a rebalance to (re)assign tasks.
+
+</details>
+
+<details><summary><b>71.</b> What does `GET /connector-plugins` return and why is it useful?</summary>
+
+It lists the connector and transform plugin classes installed on the worker, which is how you confirm a sink or source connector class is actually on the classpath before referencing it. If your `connector.class` is missing here, deployment will fail with a class-not-found-style error. It is the first check when a connector config is rejected as an unknown class.
+
+</details>
+
+<details><summary><b>72.</b> A `POST /connectors` request is rejected because the connector class cannot be found. What is the first thing to check?</summary>
+
+Verify the connector plugin JARs are installed in the worker's `plugin.path` and that the class appears in `GET /connector-plugins`. Connect only loads plugins from configured plugin directories, so a missing or misplaced JAR yields a class-not-found rejection. Confirm the exact `connector.class` string matches the installed plugin's class name.
+
+</details>
+
+<details><summary><b>73.</b> What is `plugin.path` and why does it matter for isolation?</summary>
+
+`plugin.path` is the worker config listing directories where connector, converter, and transform plugins live, each in its own isolated classloader. This isolation prevents dependency conflicts between plugins (for example two connectors needing different versions of a library). Misconfiguring it is a common reason connectors fail to load.
+
+</details>
+
+<details><summary><b>74.</b> In the Phase 4 lab, what is the role of MinIO, and what does the S3 sink connector do with it?</summary>
+
+MinIO is an S3-compatible object store standing in for Azure Blob/ADLS or AWS S3, serving as the sink target. The S3/MinIO sink connector consumes records from a Kafka topic and writes them as objects (files) into a MinIO bucket, exercising the egress half of Connect. It lets you practise object-store landing without a cloud account.
+
+</details>
+
+<details><summary><b>75.</b> Why does an object-store sink connector typically buffer records before writing?</summary>
+
+Object stores favour fewer, larger objects over many tiny ones, so the sink batches records and flushes a file when a size, record-count, or time threshold is met (a `flush.size`-style setting). This reduces object count and request overhead and improves read efficiency downstream. The trade-off is added latency before data appears as an object.
+
+</details>
+
+<details><summary><b>76.</b> How does an object-store sink connector usually achieve exactly-once-style output despite at-least-once delivery?</summary>
+
+It names output files deterministically from the topic, partition, and Kafka offset range, so a replay after failure overwrites the same files rather than creating duplicates. This makes re-delivery idempotent at the object level. Understanding this is key when you rewind a sink's offsets and worry about duplicate landing.
+
+</details>
+
+<details><summary><b>77.</b> What does it mean that source-connector delivery is "at-least-once" by default?</summary>
+
+Because offsets are committed after records are produced to Kafka, a crash between producing and committing causes those records to be re-produced on restart, yielding possible duplicates but no loss. Consumers must therefore tolerate duplicates unless exactly-once support is explicitly enabled and supported by the connector. This is the standard guarantee you design around.
+
+</details>
+
+<details><summary><b>78.</b> How does a sink connector commit offsets relative to writing to the external system?</summary>
+
+A well-behaved sink writes (or durably stages) records to the external system first and only then commits the corresponding Kafka consumer offsets, preserving at-least-once delivery. If it crashes after writing but before committing, those records are re-delivered and re-written on restart. This ordering is why idempotent or deterministic writes matter for sinks.
+
+</details>
+
+<details><summary><b>79.</b> A connector shows `RUNNING` but no data is landing in the sink. What are the first things to check?</summary>
+
+Confirm the source topic actually has new records and the consumer group is not already at the log end, check for buffering thresholds that have not yet flushed (`flush.size`/rotation interval), and inspect task-level status/logs for silent errors or a stuck task. Also verify the topic name and any `RegexRouter` SMT are routing as expected. A `RUNNING` connector with empty input or an unmet flush threshold looks identical to a broken one at the topic level.
+
+</details>
+
+<details><summary><b>80.</b> A sink task fails with a deserialization error on every record. What configuration mismatch is most likely?</summary>
+
+The `value.converter` (or `key.converter`) on the sink does not match how the data was serialized — for example using `JsonConverter` against Avro-encoded bytes, or `schemas.enable` set inconsistently. The converter is the first thing the sink applies, so a format mismatch fails every record. Align the sink's converter and schema settings with the producer's, then route any stragglers to a DLQ.
+
+</details>
+
+<details><summary><b>81.</b> Why can a single malformed market-data message stall an entire connector, and how do you prevent it?</summary>
+
+With the default `errors.tolerance=none`, the first malformed record throws, the task goes `FAILED`, and processing stops for that task until manual intervention. You prevent it by setting `errors.tolerance=all` and configuring a DLQ so the bad record is parked with diagnostic headers while good records keep flowing. This is exactly the 2am scenario the lesson warns about.
+
+</details>
+
+<details><summary><b>82.</b> How would you design failure handling for a CDC source feeding fund transactions into Kafka?</summary>
+
+Configure retries for transient database/network issues (`errors.retry.timeout` greater than `0` with bounded backoff), keep the connector name and `offset.storage.topic` stable so restarts resume from the log position rather than re-snapshotting, and monitor connector/task status for `FAILED` states. Since sources lack a DLQ, you rely on tolerance, logging, and alerting plus upstream data quality. Document that recovery resumes from the last committed source offset.
+
+</details>
+
+<details><summary><b>83.</b> How would you design failure handling for the sink half of that same pipeline (writing to an object store)?</summary>
+
+Set `errors.tolerance=all`, configure a DLQ with `errors.deadletterqueue.context.headers.enable=true` for poison records, set the DLQ replication factor appropriately, and ensure deterministic file naming so replays are idempotent. Add retries for transient store outages and monitor consumer lag and task status. This pairs converter/SMT failures into the DLQ while keeping the sink running.
+
+</details>
+
+<details><summary><b>84.</b> Why is preserving the connector name important when migrating or rebuilding a connector?</summary>
+
+Source offsets are keyed partly by connector name in `offset.storage.topic`, and a sink's consumer group is derived from the name, so changing the name severs offset continuity. The result is a full re-read for a source or re-consumption for a sink, causing duplicate processing. Keeping the name (and internal topics) intact preserves exactly-where-it-was recovery.
+
+</details>
+
+<details><summary><b>85.</b> What is the operational consequence of frequent connector reconfiguration in a busy cluster?</summary>
+
+Each config change triggers a rebalance; with cooperative rebalancing only affected tasks move, but very frequent changes still churn assignments and can disrupt throughput. Batching config changes and avoiding needless redeploys keeps the cluster stable. Frequent unexplained rebalances in logs are a signal to investigate flapping workers or automation re-applying configs.
+
+</details>
+
+<details><summary><b>86.</b> How do you monitor a Connect cluster's health beyond the REST status endpoint?</summary>
+
+Scrape JMX/metrics for connector and task state counts, source-record and sink-record rates, error/DLQ rates, rebalance frequency, and consumer lag for sink connectors. Alert on any task entering `FAILED`, on rising DLQ throughput, and on growing sink lag. Combining metrics with `GET /connectors/{name}/status` gives both the aggregate and the per-connector picture.
+
+</details>
+
+<details><summary><b>87.</b> Why is rising consumer lag a key signal for a sink connector specifically?</summary>
+
+Because a sink is a Kafka consumer, growing lag means it is falling behind the topic's produce rate, indicating under-provisioned tasks, a slow downstream system, or backpressure. For a source there is no consumer lag in the same sense, so lag is the sink-side throughput alarm. Persistent lag on a NAV-publishing sink is a direct delivery-SLA risk.
+
+</details>
+
+<details><summary><b>88.</b> What does it mean that the internal Connect topics are log-compacted?</summary>
+
+Compaction retains only the latest value per key and removes superseded entries, which is correct for config, offset, and status topics where you only ever need the current state per key. It keeps these topics bounded in size despite continuous updates. If compaction were disabled, these topics would grow unbounded with stale history.
+
+</details>
+
+<details><summary><b>89.</b> Can two independent Connect clusters share the same internal topics, and what happens if they do by accident?</summary>
+
+No — sharing `config.storage.topic`, `offset.storage.topic`, or `status.storage.topic` (typically via a shared `group.id` or topic names) makes them read each other's config and offsets, corrupting both clusters' state. Each cluster must have unique internal topic names and `group.id`. Accidental sharing manifests as connectors mysteriously appearing or vanishing across clusters.
+
+</details>
+
+<details><summary><b>90.</b> What replication factor should the Connect internal topics have in production and why?</summary>
+
+They should be replicated across at least three brokers (replication factor `3`) because losing the only copy of config or offsets would lose the cluster's entire operational state and committed positions. These topics are the cluster's durable brain, so durability is non-negotiable. In a single-broker lab you drop the factor to `1` only because no alternative exists.
+
+</details>
+
+<details><summary><b>91.</b> What is the difference between a converter set on the worker versus on a connector?</summary>
+
+A converter set in the worker config is the cluster-wide default applied to every connector that does not override it; a converter set in a connector's config overrides the default for just that connector. This lets a mostly-Avro cluster host one JSON connector by overriding `value.converter` on that connector alone. Per-connector overrides are how you mix formats in one cluster.
+
+</details>
+
+<details><summary><b>92.</b> Why might you set `key.converter` differently from `value.converter`?</summary>
+
+Keys are often simple strings or primitives while values are rich structured records, so a common pattern is `StringConverter` for keys and `AvroConverter` (or JSON) for values. Decoupling them avoids forcing a schema onto a trivial key. Mismatching the key converter with the actual key bytes is, like the value case, a source of deserialization failures.
+
+</details>
+
+<details><summary><b>93.</b> How does an SMT like `RegexRouter` interact with a sink connector's topic-to-destination mapping?</summary>
+
+`RegexRouter` rewrites the record's topic name in the pipeline, which a sink connector then uses to decide the destination (for example the object-store path or table). So routing fund records into per-fund destinations can be done by transforming the topic name rather than running multiple connectors. Misjudging the regex can silently send records to the wrong destination, so test the routing on sample data.
+
+</details>
+
+<details><summary><b>94.</b> Why are SMTs evaluated per record and what performance implication does that carry?</summary>
+
+Each SMT runs synchronously on every record passing through the task, so a chain of transforms adds CPU cost proportional to throughput. Heavy or many SMTs can become the task's bottleneck and reduce maximum records-per-second. When sizing, factor SMT cost into per-task throughput, especially for high-volume tick or order streams.
+
+</details>
+
+<details><summary><b>95.</b> What is the difference between `errors.tolerance` and a connector simply not having a DLQ?</summary>
+
+`errors.tolerance` decides whether the task fails or continues on a record error; the DLQ decides where tolerated failures go. With `tolerance=all` but no DLQ, failed records are skipped (and optionally logged) but not preserved; with a DLQ they are durably captured. Tolerance is the gate, the DLQ is the catch-net — you usually want both.
+
+</details>
+
+<details><summary><b>96.</b> In a regulated fund context, why is silently skipping bad records (tolerance=all, no DLQ, no logging) usually unacceptable?</summary>
+
+Dropping records without trace breaks data lineage and auditability, both of which regulators and frameworks like DORA expect for financial data flows. A skipped NAV or order record could go unnoticed and unrecoverable. The compliant pattern routes failures to a DLQ where they are retained, alertable, and replayable, preserving an audit trail.
+
+</details>
+
+<details><summary><b>97.</b> What information does the connector-level status (versus task-level) in `GET /connectors/{name}/status` give you?</summary>
+
+The connector-level entry reports the overall connector state and which worker owns the `Connector` instance, while the `tasks` array reports each task's individual state, worker, and any error trace. A connector can be `RUNNING` while individual tasks are `FAILED`, so you must read both levels. The task entries are where you find the actual failure stack traces.
+
+</details>
+
+<details><summary><b>98.</b> A connector is `RUNNING` but all its tasks are `FAILED`. What does that combination mean and what do you do?</summary>
+
+It means the connector object is healthy but every task hit a fatal error, so no data is moving despite the top-level `RUNNING`. Read each task's trace in the status output, fix the root cause (often a converter mismatch, missing dependency, or downstream outage), then restart the failed tasks with `restart?includeTasks=true&onlyFailed=true`. Never judge health from the connector state alone.
+
+</details>
+
+<details><summary><b>99.</b> How does Connect's distributed mode decide which worker handles REST requests and connector coordination?</summary>
+
+Workers form a group and elect a leader that performs assignment and config coordination, but any worker's REST endpoint can accept requests and will forward to the leader as needed. So clients can hit any worker URL. This is why a load balancer in front of the workers is a common deployment pattern.
+
+</details>
+
+<details><summary><b>100.</b> Why should the architect treat Connect cluster sizing and failure design as a first-class deliverable, not a one-time wiring task?</summary>
+
+Because connectors, converters, transforms, and error handling are where streaming integrations live or die operationally — a misconfigured converter or absent DLQ stalls a whole pipeline, and an under-sized cluster cannot survive a worker loss. The architect owns the capacity model (workers/tasks), the failure-recovery behaviour, and the error/DLQ policy across the fund estate. Getting these right is what keeps NAV, EMT/EPT, and transfer-agency feeds flowing under failure.
+
+</details>
+
+
+## Phase 4 · 8.3.1 + 8.3.2 + 1.11.2 Schema registry, schema languages & serialization — 100 self-test questions
+
+<details><summary><b>1.</b> What is a schema registry and why is it the contract-enforcement point of a streaming estate?</summary>
+
+A schema registry is a centralized service that stores the schemas used to serialize and deserialize Kafka messages and assigns each a unique schema ID. It is the contract-enforcement point because producers must register (or look up) a schema before writing, and the registry can reject incompatible schemas, so a renamed or retyped field is caught at registration rather than silently corrupting downstream consumers like a NAV pipeline.
+
+</details>
+
+<details><summary><b>2.</b> Define a `subject` in the Confluent Schema Registry data model.</summary>
+
+A `subject` is a named scope under which a sequence of schema versions evolves, and it is the unit against which compatibility checks run. For example with the default strategy a topic `fund-orders` produces subjects `fund-orders-key` and `fund-orders-value`, and each new schema registered under a subject becomes a new version checked against the prior ones.
+
+</details>
+
+<details><summary><b>3.</b> What is a schema `version` and how does it relate to a subject?</summary>
+
+A version is a monotonically increasing integer assigned to each successfully registered schema within a subject, starting at 1. Versions let you reference a specific historical schema, and the compatibility level decides whether a candidate schema may be added as the next version; transitive modes check against every prior version while non-transitive modes check only the latest.
+
+</details>
+
+<details><summary><b>4.</b> What is the difference between a schema ID and a schema version?</summary>
+
+A schema ID is a registry-wide unique integer identifying a specific schema document, and it is what gets embedded in the message wire format; a version is local to one subject and only meaningful within that subject. The same schema registered under two subjects can share one global ID but have version 1 in each subject.
+
+</details>
+
+<details><summary><b>5.</b> What does the per-subject compatibility level control?</summary>
+
+The per-subject compatibility level governs which schema changes the registry will accept as the next version of that subject, by comparing the candidate against existing versions. Setting it per subject means reference-data topics can run stricter rules than transactional-event topics, so the architect can tune the gate to each topic class rather than imposing one global rule.
+
+</details>
+
+<details><summary><b>6.</b> What is the default compatibility level in Confluent Schema Registry?</summary>
+
+The default compatibility level is `BACKWARD`. This means a new schema must be able to read data written with the immediately prior schema, which protects consumers that have already upgraded; it is a safe default because it lets you upgrade consumers first and then producers.
+
+</details>
+
+<details><summary><b>7.</b> Under `BACKWARD` compatibility, which client should you upgrade first and why?</summary>
+
+Under `BACKWARD` you upgrade all consumers first, then producers. The new (consumer) schema is required to read data produced by the old schema, so once consumers understand both old and new data you can safely roll producers forward; doing it the other way risks consumers seeing data they cannot decode.
+
+</details>
+
+<details><summary><b>8.</b> Under `FORWARD` compatibility, which client should you upgrade first?</summary>
+
+Under `FORWARD` you upgrade producers first, then consumers. Forward compatibility means data written with the new schema can be read by the old schema, so old consumers keep working while producers move ahead, and consumers can catch up on their own schedule.
+
+</details>
+
+<details><summary><b>9.</b> Under `FULL` compatibility, in what order must you upgrade producers and consumers?</summary>
+
+Under `FULL` the schema is both backward and forward compatible, so producers and consumers can be upgraded independently in any order. This is the safest mode operationally because there is no coordination requirement, at the cost of only allowing the most conservative changes.
+
+</details>
+
+<details><summary><b>10.</b> What change does `BACKWARD` allow when adding a field, and what is required?</summary>
+
+`BACKWARD` allows adding an optional field — one with a default value. The default lets the new schema fill in a value when reading old data that lacks the field, which is exactly what makes the addition backward compatible; adding a mandatory field without a default would be rejected.
+
+</details>
+
+<details><summary><b>11.</b> What does `BACKWARD` require when deleting a field?</summary>
+
+`BACKWARD` only allows deleting a field that has a default value (an optional field). When the new schema reads old data containing the now-removed field, it ignores it; when the field would otherwise be missing on read the default covers it, so removing a no-default field is rejected.
+
+</details>
+
+<details><summary><b>12.</b> Under `FORWARD`, can you add a field with no default value?</summary>
+
+Yes — `FORWARD` allows adding any field, including one without a default. The old (reader) schema simply ignores fields it does not know about, so forward compatibility tolerates new fields; what `FORWARD` restricts is field deletion, which is only safe for optional fields.
+
+</details>
+
+<details><summary><b>13.</b> What is the difference between `BACKWARD` and `BACKWARD_TRANSITIVE`?</summary>
+
+`BACKWARD` checks the candidate schema only against the latest registered version of the subject, while `BACKWARD_TRANSITIVE` checks it against all previous versions. Transitive is stricter and protects you when consumers might still hold any historical schema, not just the immediately prior one.
+
+</details>
+
+<details><summary><b>14.</b> When would you choose `NONE` as a compatibility level, and what is the risk?</summary>
+
+`NONE` disables all checks, allowing any change including removing mandatory fields or changing types. You might use it temporarily during a coordinated migration where you control both sides, but the risk is total — the registry stops being a gate and a bad schema can break every consumer, so it should be a rare, deliberate exception.
+
+</details>
+
+<details><summary><b>15.</b> A producer renames a field under `BACKWARD` compatibility. Will the registry accept it, and why?</summary>
+
+It is treated as dropping the old-named field and adding a new-named one. Under `BACKWARD`, dropping a field is only allowed if it had a default and adding a field is only allowed if it has a default, so a rename of a no-default field is rejected; even when allowed, consumers see the value disappear because Avro matches fields by name.
+
+</details>
+
+<details><summary><b>16.</b> Why is the Avro wire format prefixed with a magic byte plus schema ID rather than the full schema?</summary>
+
+Embedding the full schema in every message would bloat payloads enormously, so the registry assigns each schema a compact integer ID and the serializer prefixes only that ID. Consumers fetch and cache the schema by ID once, then decode all subsequent messages cheaply; this keeps records small while preserving exact schema identity.
+
+</details>
+
+<details><summary><b>17.</b> What is the exact byte at offset 0 of a Confluent-serialized message?</summary>
+
+Offset 0 holds the magic byte with value `0x00` (decimal zero). It signals that the message uses the Confluent wire format; a deserializer that reads a different first byte should treat the payload as not registry-encoded rather than trying to look up a schema ID.
+
+</details>
+
+<details><summary><b>18.</b> How many bytes encode the schema ID in the wire format and in what byte order?</summary>
+
+The schema ID occupies 4 bytes (a 32-bit integer) immediately after the magic byte, encoded big-endian (network byte order). So bytes 1 through 4 are the ID and the serialized data begins at byte offset 5 for Avro and JSON Schema payloads.
+
+</details>
+
+<details><summary><b>19.</b> Given the raw bytes `00 00 00 00 2A ...`, what schema ID is encoded?</summary>
+
+The first byte `00` is the magic byte, and the next four bytes `00 00 00 2A` are the big-endian schema ID, which is hex `0x2A` = decimal 42. Everything after byte 5 is the Avro-encoded payload that schema 42 describes.
+
+</details>
+
+<details><summary><b>20.</b> How does the Protobuf wire format differ from the Avro wire format in Schema Registry?</summary>
+
+Protobuf inserts an extra message-index between the 4-byte schema ID and the payload, encoded as a varint (or a length-prefixed array of varints) identifying which message type within the `.proto` file was used. Avro and JSON Schema have no such index because a registered schema maps to a single type, so for Protobuf the data does not start immediately at byte 5.
+
+</details>
+
+<details><summary><b>21.</b> Why must a consumer reach the schema registry to deserialize a Confluent-encoded message?</summary>
+
+The message carries only the 4-byte schema ID, not the schema itself, so the deserializer must call the registry's `GET /schemas/ids/{id}` endpoint (typically cached) to retrieve the writer schema and decode the bytes. If the registry is unreachable and the ID is not cached, deserialization fails — a real availability dependency to design around.
+
+</details>
+
+<details><summary><b>22.</b> What does the `TopicNameStrategy` produce as subject names and when is it the right choice?</summary>
+
+`TopicNameStrategy`, the default, derives subjects from the topic as `<topic>-key` and `<topic>-value`. It is right when every message on a topic shares one schema, which is the common case; it enforces topic-wide schema consistency and keeps the model simple.
+
+</details>
+
+<details><summary><b>23.</b> What subject name does `RecordNameStrategy` produce and what does it enable?</summary>
+
+`RecordNameStrategy` uses the fully-qualified record name as the subject, e.g. `com.fund.OrderPlaced`. It enables a single topic to carry multiple record types because compatibility is scoped to the record name rather than the topic, which suits an event stream where order-placed, order-amended, and order-cancelled must stay in one ordered partition.
+
+</details>
+
+<details><summary><b>24.</b> What subject name does `TopicRecordNameStrategy` produce and what does it add over `RecordNameStrategy`?</summary>
+
+`TopicRecordNameStrategy` produces `<topic>-<fully-qualified-record-name>`, combining both. Over `RecordNameStrategy` it adds topic scoping, so the same record name can evolve incompatibly on different topics without colliding, giving multi-type topics with per-topic isolation.
+
+</details>
+
+<details><summary><b>25.</b> How does the choice of subject naming strategy change the blast radius of a schema change?</summary>
+
+With `TopicNameStrategy` a change affects only that one topic's consumers, with `RecordNameStrategy` it affects every topic carrying that record name (wider blast radius, shared globally), and `TopicRecordNameStrategy` confines it to that record name on that topic. The architect picks the strategy partly to control how far an evolution can ripple.
+
+</details>
+
+<details><summary><b>26.</b> Why might a single Kafka topic need multiple schemas, justifying `RecordNameStrategy`?</summary>
+
+When events of different shapes must preserve a strict per-key order — for example a transfer-agency stream where subscription, redemption, and switch events for one investor must stay sequenced — splitting them across topics would lose ordering. `RecordNameStrategy` lets all three coexist on one partition while each keeps its own compatibility lineage.
+
+</details>
+
+<details><summary><b>27.</b> What Avro construct lets you safely add a field for backward compatibility?</summary>
+
+A field with a `default` value. The Avro Schema Resolution rule states that if the reader schema has a field the writer lacks, the reader uses that field's default; without a default the resolver has no value to supply and the read fails, which is why defaults are the mechanism behind safe field addition.
+
+</details>
+
+<details><summary><b>28.</b> According to Avro Schema Resolution, what happens when the writer's record has a field the reader's schema lacks?</summary>
+
+The reader ignores the writer's value for that unknown field. This is why removing a field on the reader side is forward-tolerant — old data still decodes, the extra field is simply dropped during resolution rather than causing an error.
+
+</details>
+
+<details><summary><b>29.</b> According to Avro Schema Resolution, what happens when the reader's schema has a field the writer's data lacks?</summary>
+
+The reader must supply that field's `default` value; if the field has no default, schema resolution fails. This rule is the precise reason a registry rejects adding a no-default field under backward-compatible modes — a future reader of old data would have nothing to fill in.
+
+</details>
+
+<details><summary><b>30.</b> How does Avro match fields between reader and writer schemas?</summary>
+
+Avro matches fields by name (and resolves same-named fields recursively), not by position. This is why renaming a field is a breaking change even if the type is unchanged — the new name no longer matches the old, so the reader treats it as a missing field plus an unknown field.
+
+</details>
+
+<details><summary><b>31.</b> What are Avro aliases and how do they help schema evolution?</summary>
+
+Aliases provide alternate accepted names for a field or record, so when resolving, a reader can match a writer field whose current name equals one of the reader field's aliases. They let you effectively rename a field without breaking resolution, by listing the old name as an alias on the renamed field in the reader schema.
+
+</details>
+
+<details><summary><b>32.</b> Describe the Avro `decimal` logical type and what backs it.</summary>
+
+`decimal` is a logical type annotating either an Avro `bytes` or `fixed` type, representing an arbitrary-precision signed decimal with a required `precision` and an optional `scale` (default 0). The underlying bytes hold the two's-complement big-endian representation of the unscaled integer, so a NAV of `12.3456` with scale 4 is stored as the integer `123456` plus the scale metadata.
+
+</details>
+
+<details><summary><b>33.</b> Why is the Avro `decimal` logical type the right choice for a NAV or monetary amount rather than `double`?</summary>
+
+`decimal` preserves exact base-10 precision because it stores an unscaled integer with a fixed scale, whereas `double` is binary floating point and cannot represent many decimal fractions exactly. For regulated values like NAV per share or a subscription amount, that exactness avoids rounding drift that would be unacceptable in fund accounting.
+
+</details>
+
+<details><summary><b>34.</b> What does the Avro `date` logical type store and on what base type?</summary>
+
+The `date` logical type annotates an Avro `int`, and the int holds the number of days since the Unix epoch, 1 January 1970, in the ISO calendar. It carries no time-of-day or timezone, which suits a dealing date or valuation date where only the calendar day matters.
+
+</details>
+
+<details><summary><b>35.</b> What is the precision limit of an Avro `decimal` backed by a `fixed` of size n?</summary>
+
+For a `fixed` of size n bytes the maximum precision is `floor(log10(2^(8*n-1) - 1))` digits, because one bit is reserved for sign in two's-complement. So a `fixed(16)` supports up to 38 digits, which comfortably covers monetary precision; if you need more digits you must size the `fixed` larger or use `bytes`.
+
+</details>
+
+<details><summary><b>36.</b> How do Protobuf field numbers underpin its compatibility model?</summary>
+
+In Protobuf each field is identified on the wire by its integer field number, not its name, so renaming a field is harmless as long as the number is unchanged. This is the opposite of Avro's name-based matching, and it means the cardinal rule is to never reuse or change a field number once it is in production.
+
+</details>
+
+<details><summary><b>37.</b> What is unknown-field preservation in Protobuf and why does it matter for compatibility?</summary>
+
+When a Protobuf parser encounters a field number it does not recognize, modern implementations retain those bytes as unknown fields and re-emit them on serialization rather than discarding them. This matters because an intermediate service that round-trips a message without dropping new fields preserves data added by newer producers, supporting forward compatibility through pipelines.
+
+</details>
+
+<details><summary><b>38.</b> Why is Protobuf described as forward-compatible by design?</summary>
+
+Because parsers ignore (or preserve) unknown field numbers and all fields in proto3 are effectively optional with type defaults, an old consumer can read messages from a newer producer that added fields, simply skipping the unfamiliar ones. The field-number-based wire format makes additions non-breaking by default.
+
+</details>
+
+<details><summary><b>39.</b> In proto3, what happens to a field that the producer did not set when the consumer reads it?</summary>
+
+The consumer sees the field's type default (for example 0 for numbers, empty string for strings, false for bool) because proto3 scalar fields are not distinguishable from defaults unless declared `optional`. This affects evolution because you cannot natively tell absent from zero without using `optional` or wrapper types, which can matter for a nullable fund metric.
+
+</details>
+
+<details><summary><b>40.</b> Why does JSON Schema have a weaker evolution story than Avro or Protobuf?</summary>
+
+JSON Schema was designed for validation, not for typed serialization with a formal resolution algorithm, so it lacks Avro's precise reader/writer resolution and Protobuf's field-number identity. Compatibility for JSON Schema in the registry depends on validation-rule comparisons (such as `additionalProperties` and `required`) whose semantics are looser, making safe evolution riskier and more nuanced.
+
+</details>
+
+<details><summary><b>41.</b> How does the `additionalProperties` keyword in JSON Schema affect compatibility checking?</summary>
+
+Setting `additionalProperties: false` forbids unknown fields, which makes adding a property a breaking change for strict validators because new fields would fail validation against the old schema; leaving it open (the default `true`) lets consumers tolerate extra fields. The registry's JSON Schema compatibility rules hinge on such keywords, so their semantics directly determine whether an evolution is allowed.
+
+</details>
+
+<details><summary><b>42.</b> Why does changing a field from `required` to optional behave differently across JSON Schema, Avro, and Protobuf?</summary>
+
+In JSON Schema requiredness is a list keyword whose change the validator-based compatibility rules interpret directly; in Avro optionality is encoded as a union with `null` plus a default; in Protobuf proto3 fields are inherently optional on the wire. The same intent is expressed by three different mechanisms, so an architect cannot assume one mental model transfers verbatim between the formats.
+
+</details>
+
+<details><summary><b>43.</b> Compare Avro, Protobuf, and JSON Schema on payload size on the wire.</summary>
+
+Avro and Protobuf both produce compact binary payloads — Avro because the schema is external so field names are not on the wire, Protobuf because it uses field numbers and varint encoding — while JSON Schema validates plain JSON text, which is the largest because field names and structure are spelled out as characters. For high-volume NAV or market-data streams the binary formats save substantial bandwidth and storage.
+
+</details>
+
+<details><summary><b>44.</b> For a use case needing strong cross-language code generation and stable field identity, which serialization format fits best?</summary>
+
+Protobuf fits best because its `.proto` definitions generate typed classes across many languages and its field-number identity gives stable, rename-safe contracts. Avro is strong for data-at-rest and dynamic schemas; JSON Schema suits human-readable web payloads where validation rather than compactness is the priority.
+
+</details>
+
+<details><summary><b>45.</b> What is the practical difference between Apicurio Registry and Confluent Schema Registry at a build-vs-buy level?</summary>
+
+Apicurio Registry is a fully open-source (Apache-2.0) registry that exposes a Confluent-compatible API, so you can self-host without licensing cost; Confluent Schema Registry ships in a Community edition plus licensed/enterprise features and a managed cloud offering. The architect weighs self-hosting effort and feature gaps against the support, governance, and managed-service benefits of the licensed path.
+
+</details>
+
+<details><summary><b>46.</b> What does it mean that Apicurio exposes a Confluent-compatible API?</summary>
+
+It means Apicurio implements the same REST endpoints and the same serializer/deserializer wire format as Confluent Schema Registry, so existing Kafka clients configured with the Confluent serdes can point at Apicurio with only a URL change. This reduces lock-in and lets you swap registries — Apicurio, Confluent Cloud SR, AWS Glue Schema Registry, or Azure Schema Registry — without rewriting producers.
+
+</details>
+
+<details><summary><b>47.</b> Why is licensing a genuine architectural decision and not just a procurement detail for a schema registry?</summary>
+
+Licensing shapes which features you can rely on (some are gated behind enterprise tiers), your operational model (self-host vs managed), and your exit cost if you need to migrate. Choosing an open registry like Apicurio versus a licensed Confluent path affects long-term governance, vendor leverage, and the support you have when a registry incident threatens the NAV pipeline.
+
+</details>
+
+<details><summary><b>48.</b> What is the first thing to check when a producer fails with a schema-registry compatibility error on registration?</summary>
+
+First read the exact error and identify which compatibility rule was violated and against which version — for example whether you added a no-default field under `BACKWARD` or removed a mandatory one. The registry names the offending field and rule, so confirm the subject's current compatibility level and diff your candidate schema against the latest version before changing anything.
+
+</details>
+
+<details><summary><b>49.</b> A consumer throws an error fetching a schema by ID at startup. What are the first things to check?</summary>
+
+Check connectivity and credentials to the registry URL, then confirm the schema ID actually exists in that registry (you may be pointed at the wrong environment), and that the consumer's serdes cache is not masking a stale entry. A common cause is the message being produced against a different registry instance than the consumer reads from, so the embedded ID is unknown there.
+
+</details>
+
+<details><summary><b>50.</b> A deserializer reports a bad magic byte. What does that indicate?</summary>
+
+It indicates the first byte was not `0x00`, so the payload is not in Confluent wire format — often because the topic carries plain JSON or string-serialized messages, or a producer used a non-registry serializer. Verify the producer's serializer configuration; mixing registry-encoded and raw messages on one topic is a frequent root cause.
+
+</details>
+
+<details><summary><b>51.</b> How would you set a subject's compatibility level to `FULL` via the registry REST API?</summary>
+
+Issue `PUT /config/{subject}` with a JSON body `{"compatibility": "FULL"}`. You can read it back with `GET /config/{subject}`, and omitting the subject targets the global default; setting it per subject is how you give reference-data topics stricter rules than event topics.
+
+</details>
+
+<details><summary><b>52.</b> How do you register a new schema version for a subject through the REST API?</summary>
+
+Send `POST /subjects/{subject}/versions` with the schema in the request body (the schema text under a `schema` field, with `schemaType` for Protobuf or JSON Schema). The registry validates it against the subject's compatibility level and either returns the assigned `id` or a 409 conflict if the change is incompatible.
+
+</details>
+
+<details><summary><b>53.</b> What does an HTTP 409 from the schema registry on registration mean?</summary>
+
+A 409 Conflict means the candidate schema is incompatible with existing versions under the subject's current compatibility level. The fix is to make the change compatible (e.g. add a default), relax the level deliberately, or follow the breaking-change playbook with a new subject — never to blindly force it.
+
+</details>
+
+<details><summary><b>54.</b> What does an HTTP 422 from the schema registry typically indicate?</summary>
+
+A 422 Unprocessable Entity typically indicates an invalid schema — malformed Avro/Protobuf/JSON Schema syntax or an unsupported construct — rather than a compatibility violation. So 422 is your schema text is wrong, while 409 is your schema is valid but breaks the contract.
+
+</details>
+
+<details><summary><b>55.</b> How would you test, before producing, whether a candidate schema is compatible with a subject?</summary>
+
+Call `POST /compatibility/subjects/{subject}/versions/{version}` with the candidate schema; the registry returns `{"is_compatible": true}` or `false` without registering anything. Using `versions/latest` checks against the latest, and this dry-run lets you predict the allow/deny outcome ahead of deployment.
+
+</details>
+
+<details><summary><b>56.</b> In the lesson's Do step, you register a fund-order Avro schema under a `BACKWARD` subject, then add an optional field. Will it be accepted?</summary>
+
+Yes, adding an optional field (one with a default) is accepted under `BACKWARD`. The default lets the new schema read old fund-order records that lack the field, satisfying backward compatibility; this is the safe, common evolution for enriching order events.
+
+</details>
+
+<details><summary><b>57.</b> Under `BACKWARD`, you try to rename a field on the fund-order schema. What outcome do you predict and why?</summary>
+
+Predict rejection if either side has no default. Avro models the rename as removing the old-named field and adding the new-named field; `BACKWARD` requires both the removed and added fields to have defaults, and even when allowed the data does not carry over because matching is by name — so a rename is effectively a breaking change.
+
+</details>
+
+<details><summary><b>58.</b> Under `BACKWARD`, you change a field's type from `int` to `string`. What happens?</summary>
+
+It is rejected. There is no Avro resolution promotion from `int` to `string`, so a new reader could not interpret old `int`-encoded values, violating backward compatibility. Allowed numeric promotions exist (e.g. `int` to `long`, `float` to `double`), but `int` to `string` is not among them.
+
+</details>
+
+<details><summary><b>59.</b> Which Avro type promotions are permitted by Schema Resolution?</summary>
+
+Avro permits widening promotions: `int` to `long`, `float`, or `double`; `long` to `float` or `double`; `float` to `double`; and `string` to `bytes` and vice versa. These are safe because the reader can losslessly (or near-losslessly) interpret the writer's value, so a registry allows them where a narrowing change would be rejected.
+
+</details>
+
+<details><summary><b>60.</b> Repeating the rename and type-change tests under `FULL`, do you expect them to pass or fail?</summary>
+
+Both fail under `FULL`, and at least as readily as under `BACKWARD`, because `FULL` requires both backward and forward compatibility simultaneously. A rename and an incompatible type change each break at least one direction, so `FULL` — being the stricter intersection — rejects them; only the optional-field addition (with default) passes.
+
+</details>
+
+<details><summary><b>61.</b> Why might an evolution pass under `BACKWARD` but fail under `FORWARD`?</summary>
+
+Because the two modes protect opposite directions: `BACKWARD` requires new readers to read old data, `FORWARD` requires old readers to read new data. Adding an optional field with a default passes both, but some changes — like adding a field with no default — pass `FORWARD` (old readers ignore it) yet fail `BACKWARD` (new reader of old data has no value), and vice versa for certain deletions.
+
+</details>
+
+<details><summary><b>62.</b> After serializing a fund-order record, how do you point to the schema ID in the raw bytes?</summary>
+
+Skip the first byte (`0x00` magic byte), then read the next four bytes as a big-endian 32-bit integer — that is the schema ID. For example a `hexdump` showing `00 00 00 01 86 a0 ...` means magic byte then ID `0x000186A0` = 100000, after which the Avro payload begins.
+
+</details>
+
+<details><summary><b>63.</b> Why does an architect need to predict registry acceptance before submitting a schema?</summary>
+
+Because in a regulated estate you cannot safely discover compatibility breaks by trial in production — a rejected or, worse, an accepted-but-semantically-wrong change near a NAV cut-off is costly. Being able to reason from the rule (defaults, name matching, allowed promotions) to the verdict in advance turns the registry from a surprise into a known gate.
+
+</details>
+
+<details><summary><b>64.</b> What is the relationship between Avro's union-with-null pattern and optional fields?</summary>
+
+An Avro optional field is conventionally a union like `["null", "string"]` with a default of `null`. The `null` branch plus the default is what lets readers supply a value when the field is absent in old data, which is exactly the mechanism that makes the field addable and removable under backward/forward modes.
+
+</details>
+
+<details><summary><b>65.</b> Why must the `null` branch usually come first in an Avro union with a `null` default?</summary>
+
+Avro requires a field's default value to match the first branch of its union type, so to default a nullable field to `null` you list `"null"` first, as in `["null","string"]`. Ordering it the other way with a `null` default is invalid, a common gotcha that produces a schema-parse error (a 422-class failure) rather than a compatibility error.
+
+</details>
+
+<details><summary><b>66.</b> How does the registry treat the message key versus the message value?</summary>
+
+They are independent subjects and can use different schemas and even different compatibility levels — with `TopicNameStrategy` they are `<topic>-key` and `<topic>-value`. This lets a fund-order topic key on a stable ISIN string schema while the value schema evolves freely, since key and value contracts are governed separately.
+
+</details>
+
+<details><summary><b>67.</b> How could you write an org-wide schema-evolution policy that differentiates topic classes?</summary>
+
+Classify topics (e.g. slow-moving reference data such as instrument/ISIN tables vs high-rate transactional events such as orders and trades), then assign a compatibility level per class with a stated justification. Reference data might use `FULL_TRANSITIVE` for maximum safety while event topics use `BACKWARD` to allow additive enrichment, and the policy records the rationale and the exception process.
+
+</details>
+
+<details><summary><b>68.</b> Why might reference-data topics warrant stricter compatibility than transactional-event topics?</summary>
+
+Reference data (instruments, counterparties, LEIs) is long-lived and read by many heterogeneous consumers that upgrade on independent schedules, so a transitive, both-directions rule like `FULL_TRANSITIVE` limits risk. Transactional events are often additively enriched and consumed by a smaller, more controlled set of services, so `BACKWARD` gives needed flexibility without the same blast radius.
+
+</details>
+
+<details><summary><b>69.</b> For an ISIN-keyed reference-data stream, why is the key schema usually a simple string and rarely evolved?</summary>
+
+An ISIN is a stable 12-character identifier, so the key schema is typically a plain string (or `StringSerializer`) and treated as immutable because changing the key contract would repartition data and break joins. The architect deliberately freezes key schemas and concentrates evolution on the value schema where enrichment naturally happens.
+
+</details>
+
+<details><summary><b>70.</b> How would Avro represent an ISIN field, and what validation can it carry?</summary>
+
+An ISIN is naturally an Avro `string`, optionally with a `default`. Avro itself does not enforce a 12-character pattern, so format validation (the country prefix, the check digit) belongs in application logic or a JSON Schema `pattern` if that format is used; the registry guarantees structure, not domain validity.
+
+</details>
+
+<details><summary><b>71.</b> Why does serialization format choice matter for an EMT or EPT regulatory file feed?</summary>
+
+EMT/EPT are structured European MiFID/PRIIPs templates with many typed, often decimal-precise fields, so a format with exact decimal handling and strong evolution control (Avro with `decimal` logical types under a registry) prevents precision loss and silent field drift across template versions. Choosing a loose format risks a field rename or rounding error propagating into a regulatory submission.
+
+</details>
+
+<details><summary><b>72.</b> How does a schema registry help when an EMT template version changes annually?</summary>
+
+Each template version is a new schema version under the EMT subject, and the compatibility level lets the registry enforce a policy on what may change between annual releases. Consumers can request a specific version by ID, so older and newer template producers and readers coexist during the transition window with the registry as the documented contract of record.
+
+</details>
+
+<details><summary><b>73.</b> Why is exact-decimal serialization important for a SWIFT-driven settlement amount?</summary>
+
+Settlement amounts must reconcile to the cent across systems and counterparties, so a binary-float type can introduce rounding that fails reconciliation. Avro `decimal` (unscaled integer plus scale) preserves the exact figure end to end, which is essential when the value originates from or feeds a SWIFT message and must match to the minor currency unit.
+
+</details>
+
+<details><summary><b>74.</b> How would you model a nullable settlement-date field in Avro for a trade event?</summary>
+
+Use a union `["null", {"type": "int", "logicalType": "date"}]` with a `default` of `null`. The `date` logical type stores days since epoch for the dealing or settlement date, and the nullable union with default makes the field safely addable under backward/forward compatibility while distinguishing not-yet-settled (null) from a real date.
+
+</details>
+
+<details><summary><b>75.</b> What is the schema-registry consequence of a transfer-agency system emitting subscription and redemption events on one topic?</summary>
+
+If those events have different shapes you cannot use the default `TopicNameStrategy` (one schema per topic); you would use `RecordNameStrategy` or `TopicRecordNameStrategy` so each record type has its own subject and compatibility lineage on the shared, order-preserving topic. This keeps investor events sequenced while letting each type evolve independently.
+
+</details>
+
+<details><summary><b>76.</b> Why does ordering of investor events sometimes force multiple schemas onto one Kafka topic?</summary>
+
+Kafka guarantees order only within a partition, and to keep all events for one investor (or one ISIN) strictly ordered they must share a partition and therefore a topic. When those events differ in structure, single-schema topic strategy is impossible, so multi-type subject strategies become the correct architecture rather than splitting into per-type topics.
+
+</details>
+
+<details><summary><b>77.</b> What is the risk of a producer silently renaming a field with the registry disabled or set to `NONE`?</summary>
+
+With no gate, the renamed field appears as a new field to consumers and the old field vanishes, so Avro readers get the default (or fail if none) for the gone field and ignore the new one — meaning a NAV or position value can quietly go missing or default to zero. The corruption is silent until a downstream number is wrong, which is exactly the failure the registry exists to prevent.
+
+</details>
+
+<details><summary><b>78.</b> Distinguish schema from schema ID from subject in one mental model.</summary>
+
+A schema is the document describing record structure; a schema ID is the registry-wide unique number for that document and what travels in the wire format; a subject is the named, versioned lineage under which compatibility is enforced. One schema (one ID) can live in multiple subjects, and one subject accumulates many versions over time.
+
+</details>
+
+<details><summary><b>79.</b> What does `GET /schemas/ids/{id}` return and when does a consumer call it?</summary>
+
+It returns the schema document for that global ID. A consumer (its deserializer) calls it the first time it sees a given ID in the wire format, then caches the result so subsequent messages with the same ID decode without another network call; this lookup is the runtime dependency on registry availability.
+
+</details>
+
+<details><summary><b>80.</b> Why can two different subjects share the same schema ID?</summary>
+
+Schema IDs are global and assigned per unique schema document, so if the identical schema is registered under subject A and subject B, the registry deduplicates and both reference the same ID. Versions, by contrast, are per subject, so that shared schema may be version 3 in A and version 1 in B.
+
+</details>
+
+<details><summary><b>81.</b> What is schema normalization and why does it matter for ID assignment?</summary>
+
+Normalization canonicalizes a schema (ordering, whitespace, defaults) before comparison so that semantically identical schemas are recognized as the same and reuse one ID. Without it, trivially different text (e.g. reordered fields) could register as a new schema and consume a new ID, causing needless version churn and cache misses.
+
+</details>
+
+<details><summary><b>82.</b> What does the `default` keyword on an Avro field actually serialize on the wire?</summary>
+
+Nothing — the `default` is metadata used only during schema resolution and code generation, not written into each record. The default is applied at read time when a reader's field is absent in the writer's data, which is precisely why it costs no bytes yet enables safe field addition.
+
+</details>
+
+<details><summary><b>83.</b> Why is rename the canonical example of why default discipline alone is not enough?</summary>
+
+Even when a rename passes the compatibility check (because both old and new fields have defaults), the data does not carry across because Avro matches by name, so the new field reads as its default and the value is lost. Defaults make the schema legal but cannot migrate data, which is why renames need aliases or a deliberate migration, not just defaults.
+
+</details>
+
+<details><summary><b>84.</b> How does Protobuf's treatment of a removed field compare to Avro's?</summary>
+
+In Protobuf you should mark a removed field's number as `reserved` so it is never reused; old data carrying that number is simply skipped as an unknown field. Avro instead relies on defaults — removing a field is only backward-safe if it had a default — so the two formats prevent the same hazard (field-number reuse vs default discipline) by different means.
+
+</details>
+
+<details><summary><b>85.</b> Why is reusing a Protobuf field number after deletion dangerous?</summary>
+
+Because the wire format identifies fields by number, reusing a number means old serialized data tagged with that number will be misinterpreted as the new field, silently corrupting reads. The fix is to `reserved` the number (and optionally the name), permanently retiring it so no future field can collide with historical data.
+
+</details>
+
+<details><summary><b>86.</b> What is the difference between checking compatibility against `latest` versus a transitive check across all versions?</summary>
+
+A non-transitive check compares the candidate only to the latest version, so a change can be compatible with the latest yet incompatible with an older version still in use; a transitive check compares against every prior version, closing that gap. Choose transitive when consumers may hold any historical schema, at the cost of stricter evolution.
+
+</details>
+
+<details><summary><b>87.</b> When is `NONE` plus a new subject the correct breaking-change strategy?</summary>
+
+When a change is genuinely incompatible and cannot be made additive — for instance a fundamental restructuring of an order event — you route producers to a new subject/topic (e.g. v2) and migrate consumers, rather than forcing the break onto the existing lineage. The old contract stays valid for in-flight consumers while the new one starts clean.
+
+</details>
+
+<details><summary><b>88.</b> How does the same evolution mindset apply to an Iceberg table, not just Kafka?</summary>
+
+Iceberg supports in-place schema evolution (add, drop, rename, reorder columns) tracked by stable column IDs, so the architect applies one policy across surfaces: additive, default-friendly changes are safe, and incompatible changes need migration. Recognizing that Kafka subjects, Iceberg tables, and REST payloads obey the same compatibility logic lets you write one governing rule rather than three.
+
+</details>
+
+<details><summary><b>89.</b> What is the architectural payoff of treating the registry as a hard gate rather than a suggestion?</summary>
+
+A hard gate means no producer can publish a schema that breaks the agreed contract, so compatibility violations are impossible by construction rather than caught later in production. In a fund-administration estate this converts schema risk from an operational incident into a registration-time error that the producer must resolve before any NAV-feeding data moves.
+
+</details>
+
+<details><summary><b>90.</b> Why can a JSON Schema change that looks additive still break compatibility?</summary>
+
+Because JSON Schema compatibility depends on validation keywords, adding a property when `additionalProperties: false` is set is breaking for the old validator, and tightening `required` or narrowing a `type` or `enum` can reject previously valid data. The looseness is that the same intent (add a field) can be safe or breaking depending on subtle keyword settings, which is why its evolution story is riskier.
+
+</details>
+
+<details><summary><b>91.</b> What practical gotcha arises from Avro's requirement that a field default match its type?</summary>
+
+If you add a non-nullable field, its `default` must be a valid value of that type (e.g. an empty string or 0), and for a union it must match the first branch; a mismatch causes a schema-parse error, not a compatibility error. The gotcha is registering a field with `default: null` on a non-nullable type, which fails validation outright.
+
+</details>
+
+<details><summary><b>92.</b> Why is the schema ID, not the schema version, embedded in the message?</summary>
+
+Because a consumer may pull a message produced under any subject and version, the only globally unambiguous reference is the registry-wide schema ID. Embedding a per-subject version would be ambiguous across subjects and would force the consumer to also know the subject; the global ID resolves the exact schema directly via `GET /schemas/ids/{id}`.
+
+</details>
+
+<details><summary><b>93.</b> How would you justify `BACKWARD` for a fund-order event topic in a written policy?</summary>
+
+`BACKWARD` lets producers additively enrich order events (new optional fields with defaults) while guaranteeing already-upgraded consumers can read both old and new records, and it dictates the simple upgrade order of consumers-first. For a frequently enriched, internally consumed event stream this balances evolution speed with safety, which is the justification you record per topic class.
+
+</details>
+
+<details><summary><b>94.</b> How would you justify `FULL_TRANSITIVE` for a shared LEI/counterparty reference subject?</summary>
+
+`FULL_TRANSITIVE` forbids any change that breaks reading in either direction against every historical version, so the many independent consumers of counterparty/LEI data can upgrade in any order at any time without coordination. The strictness is warranted because the blast radius of a reference-data break spans the whole estate, making conservative evolution worth the reduced flexibility.
+
+</details>
+
+<details><summary><b>95.</b> Why does a Protobuf message read with an Avro deserializer misalign even with a correct schema ID?</summary>
+
+Because Protobuf inserts a message-index varint after the schema ID, the actual payload does not begin at byte 5 as the Avro deserializer assumes, so it reads the index bytes as data and misaligns the rest. The fix is to use the matching Protobuf deserializer, which knows to consume the message-index before the payload.
+
+</details>
+
+<details><summary><b>96.</b> How does a registry support an audit/lineage requirement in a regulated fund context?</summary>
+
+Every schema version is retained and addressable by ID, giving an immutable record of how a data contract changed over time and which schema could read what, which supports regulatory audit and reproducibility of historical NAV computations. Combined with compatibility policy, the registry is both the enforcement point and the documented history of the data contracts.
+
+</details>
+
+<details><summary><b>97.</b> Summarize, for a one-minute ruling, how to decide allow/deny on a proposed field addition.</summary>
+
+Ask whether the field has a default: with a default it is allowed under `BACKWARD`, `FORWARD`, and `FULL`; without a default it is allowed under `FORWARD`/`NONE` but denied under `BACKWARD`/`FULL`. Then confirm the subject's level and whether it is transitive, and cite the specific rule (default-discipline plus the direction the level protects) as the justification.
+
+</details>
+
+<details><summary><b>98.</b> Summarize how to decide allow/deny on a proposed field removal.</summary>
+
+A removal is allowed under `BACKWARD`/`FULL` only if the field had a default (optional), is allowed under `FORWARD` similarly for optional fields, and `NONE` allows removing anything. The mechanism is that a future reader must either ignore the gone field or have a default, so deny any no-default mandatory-field removal under compatible modes and route genuine breaks through a new subject.
+
+</details>
+
+<details><summary><b>99.</b> How would you verify the magic byte and schema ID of a real serialized record on an Ubuntu laptop?</summary>
+
+Capture the raw value bytes (for example via `kafka-console-consumer` with a `ByteArrayDeserializer` piped to a file) and inspect them with `xxd` or `hexdump -C`; the first byte should read `00` and the next four are the big-endian schema ID. This is exactly the lesson's Done-when check of pointing to the schema ID inside a raw record.
+
+</details>
+
+<details><summary><b>100.</b> Why is JSON Schema sometimes still chosen despite its weaker evolution semantics?</summary>
+
+It is chosen for human-readable, browser-facing, or partner-facing REST payloads where the data is already JSON and tooling/readability matter more than compactness or rigorous resolution. The architect accepts the looser evolution story in exchange for transparency and ubiquity, while reserving Avro/Protobuf for high-throughput internal streams where strict, compact contracts are essential.
+
+</details>
+
+
+## Phase 4 · 1.9.7 Schema evolution compatibility (the policy) — 100 self-test questions
+
+<details><summary><b>1.</b> What problem does a schema-evolution compatibility policy solve, and why is it an architect-level concern rather than a per-team one?</summary>
+
+It defines, org-wide, which schema changes are allowed without breaking producers or consumers, and in what order clients must upgrade. It is architect-level because the blast radius spans Kafka topics, Iceberg tables, and REST payloads — a wrong upgrade order on a shared topic can break the EMT feed or a transfer-agency integration in production. The payoff is being able to rule allow/deny/migrate on any proposed change in under a minute with the rule cited.
+
+</details>
+
+<details><summary><b>2.</b> Name the four compatibility semantics this lesson centres on.</summary>
+
+Backward, forward, full, and the transitive variants of each. Backward means new schema can read data written by old schema; forward means old schema can read data written by new schema; full means both directions hold; transitive extends the check across all prior versions rather than just the immediately preceding one.
+
+</details>
+
+<details><summary><b>3.</b> What exactly does `BACKWARD` compatibility guarantee?</summary>
+
+A consumer using the new schema can read data produced with the previous schema. Concretely, you may delete fields and add optional fields (fields with defaults). It is the default in Confluent Schema Registry because most teams roll out new consumers before new producers.
+
+</details>
+
+<details><summary><b>4.</b> What exactly does `FORWARD` compatibility guarantee?</summary>
+
+A consumer using the old schema can read data produced with the new schema. You may add fields and delete optional fields. It supports the scenario where producers are upgraded first and old consumers must keep working against the new data.
+
+</details>
+
+<details><summary><b>5.</b> What does `FULL` compatibility guarantee, and what is the practical cost?</summary>
+
+Full means both backward and forward hold simultaneously between adjacent versions: new schema reads old data and old schema reads new data. The cost is that you are limited to adding and removing only optional fields (fields with defaults), which is the most restrictive of the non-transitive modes but lets you upgrade producers and consumers independently.
+
+</details>
+
+<details><summary><b>6.</b> What is the difference between `BACKWARD` and `BACKWARD_TRANSITIVE`?</summary>
+
+`BACKWARD` checks the new schema only against the immediately previous registered version, so a chain of small changes can drift such that the new schema cannot read very old data. `BACKWARD_TRANSITIVE` checks the new schema against every previously registered version, guaranteeing it can read data from all earlier producers, not just the last one.
+
+</details>
+
+<details><summary><b>7.</b> When is the transitive variant worth the extra strictness?</summary>
+
+When old data lingers — replayable Kafka topics with long retention, Iceberg tables holding years of partitions, or audit stores you must re-read. In regulated fund administration, where restatements force you to re-read historical NAV or order events, transitive compatibility prevents a consumer from choking on a schema version three releases back.
+
+</details>
+
+<details><summary><b>8.</b> Under `BACKWARD` compatibility, who upgrades first — producers or consumers?</summary>
+
+Consumers first. The Confluent rule is "upgrade all consumers before you start producing new events." Because new consumers must be able to read old data, you deploy them while old producers are still running, then cut producers over.
+
+</details>
+
+<details><summary><b>9.</b> Under `FORWARD` compatibility, who upgrades first?</summary>
+
+Producers first. The Confluent rule is "first upgrade all producers ... then upgrade the consumers." Old consumers must tolerate new data, so producers can move ahead while consumers catch up later.
+
+</details>
+
+<details><summary><b>10.</b> Under `FULL` compatibility, what is the upgrade order?</summary>
+
+There is no required order — you can upgrade producers and consumers independently, in any sequence. That freedom is the whole point of `FULL`: it is the mode you pick when you cannot coordinate the two sides, at the price of only allowing optional-field add/remove.
+
+</details>
+
+<details><summary><b>11.</b> What does `NONE` compatibility mean and when is it ever defensible?</summary>
+
+`NONE` disables compatibility checks entirely — any change is permitted, so the registry validates nothing. It is defensible only for throwaway dev topics or a deliberate clean break where you have explicitly coordinated all clients, and even then you should prefer a new subject so the old contract stays intact.
+
+</details>
+
+<details><summary><b>12.</b> Which compatibility type is the Confluent Schema Registry default?</summary>
+
+`BACKWARD`. This reflects the common operational pattern of upgrading consumers before producers, and it is why a topic created without an explicit compatibility setting will reject adding a required field.
+
+</details>
+
+<details><summary><b>13.</b> Why is adding a field with a default value safe under backward compatibility but adding a required field is not?</summary>
+
+With backward compatibility a new consumer reads old data; for a newly added field there is no value in the old records, so the consumer must fall back to the field's default. A required field (no default) leaves the consumer with nothing to fill in, so the read fails — that is precisely the change `BACKWARD` rejects.
+
+</details>
+
+<details><summary><b>14.</b> Why is deleting a field safe under backward compatibility?</summary>
+
+A new consumer that no longer knows about a deleted field simply ignores the extra value present in old records. Avro's resolution rule is that a writer field absent from the reader's schema is discarded, so dropping a field never breaks a backward read.
+
+</details>
+
+<details><summary><b>15.</b> In Avro schema resolution, what happens when the reader's schema has a field the writer's schema lacks?</summary>
+
+If the reader's field has a default value, the reader uses that default. If the reader's field has no default value, an error is signalled. This is the mechanism that makes default-value discipline the foundation of safe field addition.
+
+</details>
+
+<details><summary><b>16.</b> In Avro schema resolution, what happens when the writer's record has a field the reader's schema lacks?</summary>
+
+The writer's value for that field is simply ignored — it is read past and discarded. This is why removing a field from the reader (consumer) side is safe: the surplus data in old records does no harm.
+
+</details>
+
+<details><summary><b>17.</b> Why does the lesson call default-value discipline "what makes adding/removing fields safe"?</summary>
+
+Because every safe evolution reduces to a default. Adding a field is safe only if readers can supply a default when older writers omit it; removing a field is safe only if the field had a default so older readers do not error on the missing value. Without defaults, the same structural change becomes a breaking change.
+
+</details>
+
+<details><summary><b>18.</b> For an Avro union field, how is a default value interpreted?</summary>
+
+The default value for a union corresponds to the first schema that matches in the union. So for a nullable field declared `["null", "string"]`, a default of `null` is valid and must be listed with `null` first; ordering the union as `["string", "null"]` would make `null` an invalid default.
+
+</details>
+
+<details><summary><b>19.</b> How do you make a new Avro field nullable-with-default correctly?</summary>
+
+Declare its type as a union with `null` first, for example `{"name": "lei", "type": ["null", "string"], "default": null}`. Putting `null` first satisfies the rule that a union default matches the first branch, and the explicit `"default": null` is what lets older writers omit the field without breaking new readers.
+
+</details>
+
+<details><summary><b>20.</b> A teammate adds a field of type `["string", "null"]` with `"default": null` and the registry rejects it. Why?</summary>
+
+An Avro union default must match the first branch of the union, and here the first branch is `string`, not `null`. Either reorder to `["null", "string"]` with `"default": null`, or supply a string default — the registry is enforcing the union-default rule, not being arbitrary.
+
+</details>
+
+<details><summary><b>21.</b> What is the breaking-change playbook this policy must define?</summary>
+
+When a change is genuinely incompatible you have three sanctioned moves: register a new subject (a clean v2 contract consumers migrate to deliberately), dual-write (produce both old and new shapes during a transition window), or an upcaster (transform old records into the new shape on read). The policy states which one applies and how exceptions are approved.
+
+</details>
+
+<details><summary><b>22.</b> When is "new subject" the right breaking-change move?</summary>
+
+When the contract change is large or semantic — a renamed entity, a restructured payload, or a different meaning for the same field — and you can coordinate a deliberate consumer migration. A new subject leaves the old contract fully intact for existing consumers while new ones adopt v2, avoiding any in-place compatibility violation.
+
+</details>
+
+<details><summary><b>23.</b> When is dual-write the right breaking-change move?</summary>
+
+When you need both old and new consumers to keep working simultaneously through a transition window and cannot force a synchronous cutover. The producer emits both representations (often to two topics or two fields) until every consumer has migrated, after which you retire the old write. The cost is duplicated data and the discipline of eventually decommissioning the old path.
+
+</details>
+
+<details><summary><b>24.</b> When is an upcaster the right breaking-change move?</summary>
+
+When old data must remain readable but you do not want to carry the old shape forever in producers. An upcaster is code that transforms a record from an old schema version into the new one at read time, so consumers always see the latest shape. It centralises the migration logic but adds a maintained transformation that must cover every historical version.
+
+</details>
+
+<details><summary><b>25.</b> How does the policy "rule allow/deny/migrate" on a proposed change?</summary>
+
+Allow if the change is compatible under the topic's declared compatibility level (e.g., adding an optional field under `BACKWARD`). Deny outright only if it is both incompatible and unnecessary. Otherwise migrate: route it through the breaking-change playbook (new subject, dual-write, or upcaster) — citing the exact rule that made it incompatible.
+
+</details>
+
+<details><summary><b>26.</b> Why should a schema-evolution policy cover Iceberg tables and REST payloads, not just Kafka?</summary>
+
+Because the same compatibility logic governs every contract surface: an Iceberg consumer reading old files is forward/backward exposed exactly like a Kafka consumer, and a REST client parsing a JSON payload faces the same add/remove-field hazards. One mental model across surfaces prevents teams from re-deriving inconsistent rules per technology.
+
+</details>
+
+<details><summary><b>27.</b> What schema-evolution operations does Apache Iceberg support?</summary>
+
+Iceberg supports adding, dropping, renaming, updating (widening) the type of, and reordering columns, including within nested structs. These are metadata-only changes that do not rewrite existing data files, so they complete in milliseconds regardless of table size.
+
+</details>
+
+<details><summary><b>28.</b> How does Iceberg avoid "zombie data" during schema evolution?</summary>
+
+Iceberg tracks every column by a unique, immutable ID rather than by name or position. When a column is added it gets a new ID, so an old data file written before that column existed is never mistakenly read as containing it — and a dropped-then-re-added name cannot resurrect old values, because the re-added column carries a different ID.
+
+</details>
+
+<details><summary><b>29.</b> Why is column-by-ID tracking superior to column-by-name or column-by-position for evolution?</summary>
+
+Name-based mapping breaks on rename and can collide if a dropped name is reused; position-based mapping breaks when columns are added, dropped, or reordered. Iceberg's stable IDs decouple the logical column from both its name and its physical position, so a rename is metadata-only and reordering never corrupts reads.
+
+</details>
+
+<details><summary><b>30.</b> What correctness guarantees does Iceberg give about side-effects of a schema change?</summary>
+
+Added columns never read existing values from another column; dropping a column or field does not change any other column's values; and updating a column does not change other columns. These independence guarantees mean a schema change cannot silently alter unrelated data.
+
+</details>
+
+<details><summary><b>31.</b> What is partition evolution in Iceberg and why is it safe?</summary>
+
+Partition evolution changes a table's partition spec — e.g., from daily to hourly partitioning — as a metadata-only operation; it does not rewrite existing files. Old data keeps its original layout while new data uses the new spec, and queries are planned against each file's recorded spec, so correctness is preserved across the change.
+
+</details>
+
+<details><summary><b>32.</b> How does Iceberg's "hidden partitioning" relate to schema evolution policy?</summary>
+
+Iceberg derives partition values from column values via partition transforms recorded in metadata, so queries do not reference physical partition columns. This means you can evolve the partition spec without changing user queries or rewriting data, decoupling physical layout evolution from the logical schema contract.
+
+</details>
+
+<details><summary><b>33.</b> How does a REST/JSON payload contract map onto backward vs forward compatibility?</summary>
+
+Backward: a new server/consumer accepts payloads produced by old clients (it tolerates missing new fields by defaulting them). Forward: an old consumer tolerates extra fields a new producer adds (it ignores unknown fields). A robust REST policy mandates "ignore unknown fields on read and default missing fields," which mirrors Avro's resolution rules.
+
+</details>
+
+<details><summary><b>34.</b> What is the JSON analogue of Avro's "ignore unknown writer field" rule?</summary>
+
+Tolerant readers — parsers configured to ignore unknown properties rather than fail on them. For example, Jackson's `FAIL_ON_UNKNOWN_PROPERTIES` set to false. This is what lets a new producer add a JSON field without breaking old REST consumers, giving you forward compatibility on the payload surface.
+
+</details>
+
+<details><summary><b>35.</b> Why is "adding a field is backward-compatible, removing a field is forward-compatible" a useful mnemonic, and where does it mislead?</summary>
+
+It captures the common case: new consumers tolerate added fields (backward), old consumers tolerate removed-then-absent fields (forward). It misleads because the guarantee hinges on defaults and on whether the field was optional — adding a required field is not backward-compatible, and removing a field with no default breaks forward reads. Always check the default, not just the direction.
+
+</details>
+
+<details><summary><b>36.</b> A topic is set to `BACKWARD` and a producer team wants to add a mandatory `settlement_currency` field. What is your ruling and the cited rule?</summary>
+
+Deny as written. Under `BACKWARD` you may add only optional fields (with defaults), because a new consumer reading old data has no value to fill in for a required field — Confluent's backward rule. Migrate by either giving the field a default or routing the change through the breaking-change playbook (new subject or dual-write).
+
+</details>
+
+<details><summary><b>37.</b> Why might reference-data topics and transactional-event topics warrant different compatibility levels?</summary>
+
+Reference data (instruments, ISINs, share classes) is long-lived and re-read often, so it favours stricter transitive compatibility to keep all historical versions readable. Transactional events (orders, subscriptions) are higher-volume and shorter-horizon, where a non-transitive level may suffice. The policy states the level per topic class and justifies each.
+
+</details>
+
+<details><summary><b>38.</b> For an instrument reference-data topic feeding multiple downstream systems, which compatibility level is the safer default and why?</summary>
+
+`FULL_TRANSITIVE`. Reference data is consumed by many independently-upgraded systems and is re-read across its full history, so you want every version mutually compatible with every other and old producers/consumers to keep working in any order — exactly what full-transitive provides, accepting the restriction to optional-field changes.
+
+</details>
+
+<details><summary><b>39.</b> What does the EMT (European MiFID Template) feed have to do with schema-evolution policy?</summary>
+
+The EMT is a standardised file of product/cost data exchanged between manufacturers and distributors; when its fields evolve across template versions, downstream parsers must handle added or changed columns without breaking. Treating the EMT as a schema-evolution surface — defaulting new fields, ignoring unknown ones — is the same discipline you apply to Kafka and Iceberg.
+
+</details>
+
+<details><summary><b>40.</b> How would you apply backward-compatibility thinking when an EMT/EPT template version adds new fields?</summary>
+
+Configure consumers to ignore unknown fields and supply defaults for fields absent in older files, so a v4 parser still reads v3 files and a v3 parser tolerates v4's extra columns. This mirrors Avro resolution: missing reader field uses a default, surplus writer field is ignored — preventing a template upgrade from breaking the distributor's pipeline.
+
+</details>
+
+<details><summary><b>41.</b> Why is upgrade order, not just the allowed change set, the part teams get wrong?</summary>
+
+Because a change can be perfectly compatible yet still break production if clients deploy in the wrong sequence. Under `BACKWARD` you must deploy consumers first; deploying the new producer first means old consumers receive data they cannot interpret. The policy must state the order per level, not only the allowed changes.
+
+</details>
+
+<details><summary><b>42.</b> An ops team upgraded the producer first on a `BACKWARD` topic and consumers started failing. What rule was violated and what is the fix?</summary>
+
+They violated the backward upgrade order — consumers must be upgraded before producers. The fix is to roll consumers to the new schema first (they read both old and new data), then cut the producer over. If they need the reverse order, the topic should have been set to `FORWARD`, not `BACKWARD`.
+
+</details>
+
+<details><summary><b>43.</b> How do you decide between `FORWARD` and `BACKWARD` for a new topic?</summary>
+
+Decide by which side you can upgrade first. If consumers are easier to roll out ahead (many producers, few consumers, or you control consumers), pick `BACKWARD` and add optional fields freely. If producers must move first and old consumers must keep working (you cannot touch all consumers), pick `FORWARD`. Pick `FULL` only if you need order-independence.
+
+</details>
+
+<details><summary><b>44.</b> What is the registry-level command to set a subject's compatibility, and why set it per subject rather than globally?</summary>
+
+You set it via the Schema Registry REST API, e.g. `PUT /config/{subject}` with body `{"compatibility": "FULL_TRANSITIVE"}`. Per-subject configuration lets reference-data subjects be strict and transactional subjects looser, overriding the global default so one policy can express different rules per topic class.
+
+</details>
+
+<details><summary><b>45.</b> How do you check a subject's effective compatibility setting via the registry API?</summary>
+
+Issue `GET /config/{subject}` to the Schema Registry; it returns the subject-level compatibility, or you query `GET /config` for the global default. If a subject has no override, the global setting (default `BACKWARD`) applies — useful to confirm before approving a change.
+
+</details>
+
+<details><summary><b>46.</b> What is a "subject" in Schema Registry and how does the subject naming strategy affect evolution?</summary>
+
+A subject is the named scope under which schema versions are registered and compatibility is checked, typically `<topic>-value` or `<topic>-key` under the default `TopicNameStrategy`. The strategy determines what counts as "the same evolving contract"; `RecordNameStrategy` or `TopicRecordNameStrategy` change which schemas are grouped together for compatibility, so choosing it deliberately is part of the policy.
+
+</details>
+
+<details><summary><b>47.</b> Why can changing the subject naming strategy mid-stream itself be a breaking change?</summary>
+
+Because it changes which past versions a new schema is checked against. Switching from `TopicNameStrategy` to `RecordNameStrategy` regroups subjects, so the registry may no longer enforce compatibility against the versions you expect, and consumers resolving schemas by the old strategy may fail to find them. Treat the strategy as part of the contract, not a tunable.
+
+</details>
+
+<details><summary><b>48.</b> What does it mean that compatibility is checked "against the latest version" versus "against all versions"?</summary>
+
+Non-transitive modes (`BACKWARD`, `FORWARD`, `FULL`) check a candidate schema only against the most recent registered version. Transitive modes check it against every registered version. The difference matters when old data still exists: non-transitive lets incompatibility with old-but-not-latest versions slip through.
+
+</details>
+
+<details><summary><b>49.</b> Give a concrete drift scenario where `BACKWARD` passes but `BACKWARD_TRANSITIVE` would have caught a bug.</summary>
+
+v1 has field `a` with a default; v2 removes `a`; v3 re-adds `a` with a different type. Each adjacent step can pass `BACKWARD`, but a v3 consumer replaying v1 data may mis-resolve `a`. `BACKWARD_TRANSITIVE` checks v3 against v1 directly and flags the inconsistency that the pairwise checks missed.
+
+</details>
+
+<details><summary><b>50.</b> Why does renaming a field count as a breaking change in Avro even though it "feels" cosmetic?</summary>
+
+Avro resolves fields by name (with aliases as the only escape), so a rename looks like deleting the old field and adding a new one. Under backward compatibility the new (required) field has no default for old data and the old field's data is dropped, so unless you use an alias the rename violates compatibility.
+
+</details>
+
+<details><summary><b>51.</b> How do Avro aliases let you rename a field without breaking compatibility?</summary>
+
+An `aliases` entry on the new field name tells the reader that records written with the old name should map to the new field during resolution. This makes a rename a metadata mapping rather than a delete-plus-add, preserving backward compatibility — the alias is the sanctioned tool for renames in the playbook.
+
+</details>
+
+<details><summary><b>52.</b> Why is changing a field's type (e.g., `int` to `string`) generally a breaking change?</summary>
+
+Avro only resolves between types via a small set of promotion rules (e.g., `int` to `long`, `float` to `double`); arbitrary type changes like `int` to `string` are not promotable, so neither direction can read the other's data. Such a change must go through the playbook — typically a new field or a new subject, not an in-place edit.
+
+</details>
+
+<details><summary><b>53.</b> Which Avro numeric type promotions are safe, and how does that inform "widening" rules?</summary>
+
+Avro permits widening promotions: `int` to `long`, `int`/`long` to `float`, and `float` to `double` (and `string` to/from `bytes`). These let a reader with the wider type consume data written with the narrower one, which is why "widen only, never narrow" is the standard type-change rule across Avro, Iceberg, and REST.
+
+</details>
+
+<details><summary><b>54.</b> Iceberg allows updating a column's type — which direction is permitted?</summary>
+
+Iceberg permits widening only: `int` to `long`, `float` to `double`, and increasing decimal precision. Narrowing is disallowed because existing files may hold values that do not fit the smaller type. This matches the Avro promotion philosophy and keeps type updates metadata-only and lossless.
+
+</details>
+
+<details><summary><b>55.</b> A column needs to change from `decimal(10,2)` to `decimal(12,2)` in Iceberg. Allow or deny?</summary>
+
+Allow — increasing decimal precision while keeping scale is a permitted widening update in Iceberg, done as a metadata change with no file rewrite. Reducing precision or changing scale would be denied, because existing values might not fit, which is the narrowing case Iceberg refuses.
+
+</details>
+
+<details><summary><b>56.</b> How does the "default discipline" rule translate to Iceberg added columns?</summary>
+
+A column newly added to an Iceberg table reads as `null` (or its declared default in spec v3) for all pre-existing data files, because those files have no value for the new column ID. So adding a column is always safe and metadata-only, the table-side equivalent of adding a defaulted Avro field.
+
+</details>
+
+<details><summary><b>57.</b> Why does the policy treat "new subject" and "Iceberg new table" as the same move on different surfaces?</summary>
+
+Both create a fresh, intact v2 contract while leaving v1 untouched for existing readers. On Kafka it is a new subject; in the lakehouse it is a new table (or a v2 view). The decision logic is identical — when a change is genuinely incompatible and a clean migration is preferable to in-place evolution, you fork the contract.
+
+</details>
+
+<details><summary><b>58.</b> What is the role of a "compatibility group" or shared mental model across surfaces in the architect's policy?</summary>
+
+It is the single rule set — allowed changes, required defaults, upgrade order, breaking-change playbook — applied uniformly to Kafka subjects, Iceberg tables, and REST payloads. One model means a reviewer cites the same rule whatever the surface, and teams cannot exploit per-technology gaps to ship an unsafe change.
+
+</details>
+
+<details><summary><b>59.</b> How would you justify `FORWARD` compatibility for an event topic whose producers ship faster than consumers?</summary>
+
+If the producing service deploys frequently and adds fields ahead of consumer teams that lag, `FORWARD` lets producers move first while old consumers ignore the new fields. You accept that you can only add fields and remove optional ones, which fits an additive-event model where consumers opt into new fields over time.
+
+</details>
+
+<details><summary><b>60.</b> What does the "Done when" criterion "rule allow/deny/migrate in under a minute, with the rule cited" really require of you?</summary>
+
+It requires internalising the allowed-change table per compatibility level, the default-value rules, and the upgrade order, so that for any proposed field change you can immediately state the verdict and the specific rule — e.g., "deny: adding a required field under `BACKWARD` violates the backward rule; migrate via default or new subject."
+
+</details>
+
+<details><summary><b>61.</b> Why is `FULL` often the wrong default despite sounding "safest"?</summary>
+
+`FULL` is the most restrictive on changes — only optional add/remove between adjacent versions — so it slows legitimate evolution and tempts teams to bypass the registry. It is right when you genuinely cannot control upgrade order, but for most topics where you do control one side, `BACKWARD` or `FORWARD` allows more change while staying safe.
+
+</details>
+
+<details><summary><b>62.</b> What is the danger of leaving every topic on the global default without thinking?</summary>
+
+The global default is `BACKWARD`, which silently forbids adding required fields and assumes consumer-first upgrades. Topics that actually need producer-first rollout (`FORWARD`) or full history compatibility (transitive) will either reject valid changes or, worse, pass changes that break in production because the default's assumptions do not match the topic's reality.
+
+</details>
+
+<details><summary><b>63.</b> How does long Kafka retention interact with your choice of transitive vs non-transitive?</summary>
+
+With long or infinite retention, consumers can replay very old records, so a new consumer must be compatible with schema versions far back in time — pushing you toward transitive modes. With short retention, only recent versions are ever re-read, so non-transitive compatibility against the latest version is usually sufficient.
+
+</details>
+
+<details><summary><b>64.</b> When a NAV-calculation consumer replays a week of order events after a fix, what compatibility property protects it?</summary>
+
+Backward-transitive compatibility on the order-event subject guarantees the current consumer schema can read every order-event version produced during that week, not just the latest. Without transitive, an intermediate schema version in the replay window could fail resolution and corrupt or halt the restated NAV computation.
+
+</details>
+
+<details><summary><b>65.</b> How do you handle a field that must be removed but old consumers still read it?</summary>
+
+You cannot remove it under forward-sensitive constraints while old consumers depend on it. Either deprecate it first (stop populating, keep the field with a default) until all consumers stop reading it, or run a dual-write/transition window. Removal is only safe once no live reader requires the field and the field had a default.
+
+</details>
+
+<details><summary><b>66.</b> What is "deprecate-then-remove" and why is it the gentle path?</summary>
+
+It is a two-phase removal: first mark the field optional/deprecated and stop writing meaningful values (relying on its default), wait until no consumer reads it, then drop it. It is gentle because each phase is individually compatible — no single deploy crosses a breaking boundary — so you never need a coordinated big-bang cutover.
+
+</details>
+
+<details><summary><b>67.</b> Why should the policy define an explicit exception process rather than allow ad-hoc overrides?</summary>
+
+Because schema changes have org-wide blast radius, an undocumented override on a shared subject can break unrelated teams. An exception process — who approves, what evidence (compatibility report, migration plan) is required, and how the change is communicated — makes the rare breaking change deliberate and auditable rather than a silent risk.
+
+</details>
+
+<details><summary><b>68.</b> What evidence should accompany a request to set a subject to `NONE` or to push an incompatible schema?</summary>
+
+A migration plan naming every producer and consumer, the chosen playbook move (new subject, dual-write, or upcaster), the transition window, and confirmation that affected teams have signed off. In a regulated context you also record the approval for audit, because a NAV or transfer-agency feed breaking is a reportable operational incident.
+
+</details>
+
+<details><summary><b>69.</b> How does the policy connect to DORA-style operational-resilience expectations?</summary>
+
+DORA requires firms to manage ICT change risk and avoid disruptions to critical functions; an uncontrolled schema change that breaks a NAV or transfer-agency feed is exactly such a disruption. A documented, enforced schema-evolution policy with an exception process is part of demonstrating change-management discipline over critical data pipelines.
+
+</details>
+
+<details><summary><b>70.</b> Why is "test the policy against five proposed field changes" part of the Do list?</summary>
+
+Because a policy is only real if it produces consistent rulings under pressure. Running concrete changes through it — recording allow/deny/migrate and the cited rule for each — exposes ambiguities, calibrates your speed toward the under-a-minute target, and gives the team worked examples to follow.
+
+</details>
+
+<details><summary><b>71.</b> Walk through ruling on "add optional `lei` field with default null to a `BACKWARD` reference topic."</summary>
+
+Allow. Under `BACKWARD` you may add a field that has a default; declaring `lei` as `["null","string"]` with `"default": null` satisfies both the backward rule and the Avro union-default rule (null first). New consumers default it for old records; nothing breaks; no migration needed.
+
+</details>
+
+<details><summary><b>72.</b> Walk through ruling on "rename `fund_id` to `subfund_id` on a `FULL_TRANSITIVE` topic."</summary>
+
+Migrate, not a plain allow. A rename is a delete-plus-add to Avro and breaks compatibility unless you add an alias. The ruling: allow only with an `aliases: ["fund_id"]` mapping on the new field; without the alias, deny and route to a new subject. Cite the Avro name-based resolution rule.
+
+</details>
+
+<details><summary><b>73.</b> Walk through ruling on "change `quantity` from `int` to `string` on any topic."</summary>
+
+Deny in place. `int` to `string` is not an Avro promotion, so neither backward nor forward resolution works. Migrate via a new subject or add a new `quantity_str` field and dual-write during transition. Cite the lack of a type-promotion path between `int` and `string`.
+
+</details>
+
+<details><summary><b>74.</b> Walk through ruling on "drop deprecated `legacy_code` field that already had a default."</summary>
+
+Allow under `BACKWARD` (and `FULL` once no reader needs it). New consumers ignore the now-absent field; because it had a default, any old consumer briefly running against new data also copes. Confirm no live consumer still reads it before approving, then it is a clean compatible removal.
+
+</details>
+
+<details><summary><b>75.</b> Walk through ruling on "add required `valuation_point` field on a `FORWARD` topic."</summary>
+
+Allow. Under `FORWARD`, adding a field is permitted because old consumers ignore the unknown new field, and producers upgrade first. Note the asymmetry: this same "add required field" would be denied under `BACKWARD`. Cite the forward rule allowing field additions.
+
+</details>
+
+<details><summary><b>76.</b> Why must the policy name the compatibility level per topic class explicitly in writing?</summary>
+
+Because the safe upgrade order and allowed changes differ by level, an unwritten assumption causes teams to upgrade in the wrong order or attempt disallowed changes. Writing "reference data: `FULL_TRANSITIVE`; transactional events: `BACKWARD`" with a justification each makes the rule citable and removes per-team guesswork.
+
+</details>
+
+<details><summary><b>77.</b> What is the relationship between schema compatibility and exactly-once or replay correctness?</summary>
+
+Replay and exactly-once both depend on re-reading historical records correctly; if a schema change broke compatibility with old versions, a replay would fail or mis-decode, undermining the very correctness those mechanisms promise. Transitive backward compatibility is therefore a precondition for trustworthy replay of long-retained topics.
+
+</details>
+
+<details><summary><b>78.</b> How does an "upcaster" differ from simply registering a new schema version?</summary>
+
+A new schema version is a registry-level contract change checked for compatibility; an upcaster is application code that converts an old-version record into the new shape at read time. You use an upcaster when the registry would reject the change as incompatible but you still need consumers to see a unified current shape across all historical data.
+
+</details>
+
+<details><summary><b>79.</b> What is a realistic gotcha with upcasters over a long-lived event store?</summary>
+
+You must maintain an upcasting path for every historical version forever, and the chain grows with each schema change, so a v1-to-v7 read may pass through six transformations. Bugs accumulate and testing every path is costly — which is why upcasters suit append-only event-sourced stores but are over-engineering for short-retention topics.
+
+</details>
+
+<details><summary><b>80.</b> Why is dual-write operationally expensive despite being conceptually simple?</summary>
+
+It doubles write volume and storage during the transition, requires keeping two code paths in sync, and demands discipline to actually decommission the old path once migration completes — teams often forget, leaving permanent duplication. It is the right tool only when you genuinely need both shapes live simultaneously and the window is bounded.
+
+</details>
+
+<details><summary><b>81.</b> How does the architect "arbitrate exceptions across Kafka topics, Iceberg tables, and API payloads"?</summary>
+
+By owning the single policy and being the deciding authority when a team proposes a breaking change: the architect rules allow/deny/migrate, picks the playbook move, sets the transition plan, and records the exception. Centralising the call prevents inconsistent per-team decisions that would otherwise create cross-surface incompatibilities.
+
+</details>
+
+<details><summary><b>82.</b> Why is "compatibility is a governance decision, not a technical default" a load-bearing framing?</summary>
+
+Because the registry's default (`BACKWARD`) is a technical convenience, but which level a topic should have depends on organisational facts — who can upgrade first, how long data lives, how many consumers exist. Treating it as governance forces those facts to be stated and owned, rather than inherited silently from a tool default.
+
+</details>
+
+<details><summary><b>83.</b> How can a CI check enforce the schema-evolution policy before a change ships?</summary>
+
+By validating each proposed schema against the registry's compatibility endpoint in the pipeline — `POST /compatibility/subjects/{subject}/versions/latest` returns whether the new schema is compatible — and failing the build on a violation. This shifts enforcement left so an incompatible change is caught in review, not in production.
+
+</details>
+
+<details><summary><b>84.</b> What does the Schema Registry compatibility-check endpoint return, and how do you read its result?</summary>
+
+`POST /compatibility/subjects/{subject}/versions/{version}` (often with `verbose=true`) returns `{"is_compatible": true|false}` and, when verbose, the specific differences that caused incompatibility. A `false` with a listed difference like "READER_FIELD_MISSING_DEFAULT_VALUE" tells you exactly which rule the change violated.
+
+</details>
+
+<details><summary><b>85.</b> What does the compatibility difference code `READER_FIELD_MISSING_DEFAULT_VALUE` tell you?</summary>
+
+It tells you the new (reader) schema added a field that has no default while old writers do not provide it, so a backward read cannot fill the value — the canonical "added a required field under backward" violation. The fix is to give the field a default, which is exactly the default-value discipline the policy mandates.
+
+</details>
+
+<details><summary><b>86.</b> How does protobuf's evolution model compare to Avro's for policy purposes?</summary>
+
+Protobuf identifies fields by tag number, not name, so renaming is free and adding/removing fields is safe as long as tag numbers are never reused. The policy's principles transfer — never reuse identifiers, prefer additive change, default missing fields — but the mechanism (stable tag numbers) resembles Iceberg's column IDs more than Avro's name-based resolution.
+
+</details>
+
+<details><summary><b>87.</b> Why must a JSON Schema-based REST contract still declare which fields are required for evolution to be predictable?</summary>
+
+Because compatibility hinges on optionality: adding a `required` field breaks old producers, while adding an optional one is safe; removing a required field breaks old consumers. An explicit `required` list lets a registry or reviewer mechanically determine whether a change is backward/forward compatible, just as defaults do in Avro.
+
+</details>
+
+<details><summary><b>88.</b> A REST API adds a new field and a partner's parser starts rejecting responses. What is the first thing to check?</summary>
+
+Whether the partner's parser is a strict (fail-on-unknown) reader rather than a tolerant one. If it rejects unknown fields, even an additive, forward-compatible change breaks it. The policy mandates tolerant readers precisely to make additive changes safe; the immediate mitigation is to confirm and fix the consumer's parsing mode or version the endpoint.
+
+</details>
+
+<details><summary><b>89.</b> How do you choose between versioning a REST resource (e.g., `/v2/funds`) and evolving it in place?</summary>
+
+Evolve in place for additive, compatible changes (new optional fields, tolerant readers handle them). Version the resource for breaking changes — removed or renamed fields, restructured payloads, changed semantics — which is the REST equivalent of registering a new subject. The decision rule is identical to the Kafka playbook.
+
+</details>
+
+<details><summary><b>90.</b> Why is "one model across surfaces" easier to enforce than three separate policies?</summary>
+
+Because reviewers, CI checks, and engineers learn a single rule set and apply it everywhere, eliminating the cognitive gaps where a team treats Iceberg or REST as exempt. A unified model also means a cross-surface flow — Kafka to Iceberg to API — evolves coherently, rather than breaking at the seam where two different policies meet.
+
+</details>
+
+<details><summary><b>91.</b> How does Iceberg's sort-order evolution fit the same policy mindset?</summary>
+
+Sort-order evolution, like partition evolution, is a metadata-only change: existing files keep their old sort order, new files use the new one, and correctness is unaffected because Iceberg records the order per file. It reinforces the architectural principle that physical-layout evolution should be decoupled from the logical schema contract and never require rewrites.
+
+</details>
+
+<details><summary><b>92.</b> Why is reordering columns safe in Iceberg but risky in a position-based format?</summary>
+
+Iceberg maps columns by stable ID, so reordering is purely a presentation/metadata change and reads still find each column by its ID. In a position-based format (e.g., raw CSV consumed by index, or naive Parquet-by-position), reordering shifts which physical column a reader picks up, silently corrupting values — which is why position-based contracts evolve so poorly.
+
+</details>
+
+<details><summary><b>93.</b> What is the safe upgrade order summary you should be able to recite for each level?</summary>
+
+`BACKWARD`/`BACKWARD_TRANSITIVE`: consumers first. `FORWARD`/`FORWARD_TRANSITIVE`: producers first. `FULL`/`FULL_TRANSITIVE`: either order, independent. `NONE`: no guarantee, coordinate manually. Being able to state this instantly is one of the lesson's explicit Done-when criteria.
+
+</details>
+
+<details><summary><b>94.</b> Why does the policy distinguish "optional field" from "field with a default," and are they the same?</summary>
+
+In Avro they are effectively the same: a field is optional for evolution purposes precisely because it carries a default that readers use when it is absent. The distinction matters when people say "optional" loosely — a field with no default is not safely optional, and the registry will reject changes that assume it is.
+
+</details>
+
+<details><summary><b>95.</b> How would adding a SWIFT/BIC field to a settlement-event schema be ruled under `BACKWARD`?</summary>
+
+Allow if added as optional with a default — e.g., `{"name":"bic","type":["null","string"],"default":null}`. New consumers default it for older settlement records; the change is non-breaking. Adding it as required would be denied under `BACKWARD` and would need a default or the breaking-change playbook.
+
+</details>
+
+<details><summary><b>96.</b> When a transfer-agency integration consumes a Kafka feed it cannot upgrade quickly, which compatibility level protects it?</summary>
+
+`FORWARD` (or `FORWARD_TRANSITIVE`) on the producer's topic, so the slow-moving transfer-agency consumer keeps reading even as producers add fields. Forward compatibility lets producers evolve first and old consumers ignore new fields — exactly the protection a hard-to-upgrade external integration needs.
+
+</details>
+
+<details><summary><b>97.</b> Why might you choose `FULL_TRANSITIVE` for an ISIN/instrument master topic specifically?</summary>
+
+Because instrument reference data is consumed by many systems on independent release cycles and is re-read across full history, you want every version mutually readable in any upgrade order and against all prior versions. `FULL_TRANSITIVE` delivers that, accepting that ISIN-master changes will be limited to optional add/remove — usually acceptable for slow-changing reference data.
+
+</details>
+
+<details><summary><b>98.</b> What is the audit-trail value of recording each schema ruling with its cited rule?</summary>
+
+In regulated fund administration, a broken NAV or transfer-agency feed is an operational incident that may require explanation to auditors or regulators. A logged ruling — change, verdict, cited rule, approver — demonstrates that the change was governed and provides the evidence trail DORA-style change management expects.
+
+</details>
+
+<details><summary><b>99.</b> How does the policy prevent the classic "everyone bumps the schema and prod breaks" failure?</summary>
+
+By making compatibility level and upgrade order explicit per topic, enforcing them in CI via the registry compatibility check, and routing genuinely incompatible changes through a documented playbook with architect arbitration. The combination removes the two root causes: wrong upgrade order and unsanctioned breaking changes.
+
+</details>
+
+<details><summary><b>100.</b> Summarise the one-minute mental algorithm for ruling on any proposed field change.</summary>
+
+First, what surface and what is the topic's compatibility level? Second, is the change additive-with-default, a removal-of-defaulted-field, a rename, or a type change? Third, does it satisfy the level's allowed set and is the upgrade order respected? If yes, allow; if incompatible but needed, pick new subject / dual-write / upcaster (migrate); if incompatible and unnecessary, deny — and cite the exact rule each time.
+
+</details>
+
+
+## Phase 4 · 1.9.1 + 1.9.2 + 1.9.4 (with 1.9.3, 1.9.5, 1.9.6) Streaming semantics — the Beam model — 100 self-test questions
+
+<details><summary><b>1.</b> What is "event time" in a streaming system?</summary>
+
+Event time is the timestamp at which an event actually occurred at its source — for example the moment a fund order was placed — and it is embedded in the record itself. It is intrinsic to the data and does not change no matter when or how many times the event is processed. Because it is deterministic, event time is the basis for correct, reproducible windowed results regardless of arrival order.
+
+</details>
+
+<details><summary><b>2.</b> What is "processing time" in a streaming system?</summary>
+
+Processing time is the wall-clock time of the machine executing the operation when it observes the event, read from the system clock. It is simple and low-latency but non-deterministic: the same input replayed later yields different processing-time windows. It depends on pipeline speed, backlog, and machine scheduling rather than on when the event truly happened.
+
+</details>
+
+<details><summary><b>3.</b> Why is event time the default temporal domain for regulated finance?</summary>
+
+Regulated finance demands reproducible, auditable results: a NAV or an intraday fund-flow total must be the same whether computed live, replayed after a crash, or recomputed during a restatement. Only event time gives that determinism, because it groups data by when transactions actually occurred rather than by the accident of when the pipeline saw them. Processing-time results would shift on every replay, which is unacceptable when the number is regulatory evidence.
+
+</details>
+
+<details><summary><b>4.</b> What is the "skew" between event time and processing time?</summary>
+
+Skew is the lag between when an event occurred (event time) and when the system observed it (processing time), i.e. the horizontal distance between the two domains on a time-mapping diagram. It is variable and unpredictable, driven by network delays, batching, retries, and sources that go offline. Streaming correctness machinery — watermarks, lateness, triggers — exists precisely to cope with this non-zero, fluctuating skew.
+
+</details>
+
+<details><summary><b>5.</b> Give a fund example where event time and processing time differ materially.</summary>
+
+A subscription order is timestamped at the cut-off (event time 16:00) but the transfer-agency feed only delivers it to Kafka at 16:45 because of a batch upload (processing time 16:45). If you aggregated intraday flows by processing time, that order would land in the wrong interval; by event time it correctly falls into the 16:00 window. The 45-minute gap is the skew.
+
+</details>
+
+<details><summary><b>6.</b> Akidau frames streaming with four questions. What does the "what" question ask?</summary>
+
+"What results are being computed?" describes the transformations applied to the data — sums, counts, joins, machine-learning models, and so on. It is the classic data-processing concern shared with batch, answering what value you derive from each group of records. For a fund metric this is, for example, "net flow = subscriptions minus redemptions per share class".
+
+</details>
+
+<details><summary><b>7.</b> In the what/where/when/how framing, what does "where" ask?</summary>
+
+"Where in event time are results computed?" is answered by windowing — how the unbounded stream is sliced along the event-time axis into finite groups. It determines which events are aggregated together (e.g. one tumbling window per minute). Without windowing, an infinite stream never produces a final group, so "where" is what makes aggregation tractable.
+
+</details>
+
+<details><summary><b>8.</b> In the what/where/when/how framing, what does "when" ask?</summary>
+
+"When in processing time are results materialised?" is answered by triggers — they decide the moments at which a window emits output (early, on-time at the watermark, and late). The same window can fire multiple times, so "when" controls the latency-versus-completeness tradeoff of each emission. It is distinct from "where", which is about event-time grouping, not emission timing.
+
+</details>
+
+<details><summary><b>9.</b> In the what/where/when/how framing, what does "how" ask?</summary>
+
+"How do refinements of results relate?" is answered by the accumulation mode — discarding, accumulating, or accumulating-and-retracting. It defines whether each firing replaces, adds to, or corrects the previous output for the same window. This matters when a window fires more than once and a downstream sink must combine those panes correctly.
+
+</details>
+
+<details><summary><b>10.</b> Name the three windowing types Akidau describes.</summary>
+
+Fixed (also called tumbling) windows, sliding windows, and session windows. Fixed windows slice event time into contiguous non-overlapping segments of equal length; sliding windows have a fixed length and a fixed slide period and may overlap; session windows are bounded by gaps of inactivity. Each fits a different shape of aggregation question.
+
+</details>
+
+<details><summary><b>11.</b> What is a tumbling (fixed) window?</summary>
+
+A tumbling window slices the event-time axis into contiguous, equal-length, non-overlapping segments, so every event belongs to exactly one window. For example one-minute tumbling windows produce 16:00:00–16:00:59, 16:01:00–16:01:59, and so on. It is the natural fit for periodic totals such as "net fund flow per minute".
+
+</details>
+
+<details><summary><b>12.</b> What is a sliding window and how does it differ from a tumbling window?</summary>
+
+A sliding window has a fixed length plus a fixed slide period; when the slide is smaller than the length the windows overlap, so a single event can fall into several windows. A tumbling window is the special case where slide equals length, giving no overlap. Use sliding windows for moving aggregates, e.g. a 15-minute exposure average recomputed every minute.
+
+</details>
+
+<details><summary><b>13.</b> What is a session window and when does it fit a fund metric?</summary>
+
+A session window groups events separated by less than a configured gap of inactivity, closing only after a silence longer than that gap; window boundaries are data-driven, not clock-driven. It fits bursty activity such as a single investor's interaction session or a clustered run of corrections to one order. The gap timeout defines when one session ends and the next begins.
+
+</details>
+
+<details><summary><b>14.</b> In Flink, which assigner creates one-minute tumbling event-time windows?</summary>
+
+`TumblingEventTimeWindows.of(Duration.ofMinutes(1))`, passed to `.window(...)` on a keyed stream. It assigns each event to exactly one non-overlapping minute-aligned window based on its event-time timestamp. The event-time variant (rather than the processing-time one) is what makes the result deterministic under replay.
+
+</details>
+
+<details><summary><b>15.</b> In Flink, how do you declare a sliding event-time window?</summary>
+
+With `SlidingEventTimeWindows.of(size, slide)` — for example `SlidingEventTimeWindows.of(Duration.ofMinutes(15), Duration.ofMinutes(1))` for a 15-minute window advancing every minute. Because the slide is smaller than the size, the windows overlap and each event is assigned to multiple windows. Overlap multiplies the per-event work, so size/slide ratio drives cost.
+
+</details>
+
+<details><summary><b>16.</b> In Flink, how is a session window's gap configured?</summary>
+
+With `EventTimeSessionWindows.withGap(Duration)` — for example `withGap(Duration.ofMinutes(5))` closes a session once five minutes of event-time inactivity pass. Sessions can also merge: a late element arriving in the gap between two sessions can join them into one. This merging is why session windows are stateful and more complex than tumbling ones.
+
+</details>
+
+<details><summary><b>17.</b> What is a watermark?</summary>
+
+A watermark is a timestamp `t` that flows in the stream and asserts "event time has progressed to `t`," meaning the system expects no further elements with event timestamps less than or equal to `t`. It is how an out-of-order stream signals event-time completeness so that operators know when a window is safe to close and emit. Watermarks are the heuristic that turns "we will never see all the data" into actionable progress.
+
+</details>
+
+<details><summary><b>18.</b> What is the difference between a perfect and a heuristic watermark?</summary>
+
+A perfect watermark guarantees that absolutely no element with a timestamp at or before it will ever arrive — achievable only when the input is fully predictable. A heuristic watermark is an estimate that no more such elements will arrive, accepting that some stragglers may still come (those are late data). Real distributed sources almost always use heuristic watermarks, because true completeness cannot be known in advance.
+
+</details>
+
+<details><summary><b>19.</b> What is the latency-versus-completeness tradeoff in watermarks?</summary>
+
+A conservative watermark waits longer before declaring an event-time point complete, capturing more out-of-order data but delaying every result; an aggressive watermark fires sooner with lower latency but marks more arrivals as late. Tuning the watermark is choosing how long to wait for stragglers versus how fresh the answer must be. There is no free lunch: you trade promptness against accuracy.
+
+</details>
+
+<details><summary><b>20.</b> How does a watermark propagate through an operator with multiple input streams?</summary>
+
+The operator's current event time is the minimum of the current event times across all its input channels, so a single lagging input holds back the whole operator. Only when every input has advanced past `t` can the operator's watermark advance past `t`. This min rule is why one slow or idle partition can stall downstream windows from closing.
+
+</details>
+
+<details><summary><b>21.</b> Where do watermarks originate, and how are they emitted by parallel sources?</summary>
+
+Watermarks originate at the source operators, with each parallel subtask generating its own watermark independently from the data it sees. They then propagate downstream, advancing operator event-time clocks as described by the minimum-across-inputs rule. Because each subtask is independent, an idle or skewed subtask can drag the merged watermark unless idleness is handled.
+
+</details>
+
+<details><summary><b>22.</b> What is "allowed lateness" and what is its default in Flink?</summary>
+
+Allowed lateness extends how long a window keeps its state after the watermark passes the window end, accepting elements that are late by up to that amount and re-firing the window for them. In Flink the default is 0, meaning once the watermark passes the window end, later elements are dropped. You set it with `allowedLateness(Duration)` on the windowed stream, trading retained state and extra firings for catching stragglers.
+
+</details>
+
+<details><summary><b>23.</b> What happens to a late element when allowed lateness is greater than zero?</summary>
+
+If the element arrives before the watermark passes (window-end + allowed-lateness), it is added to the still-retained window and triggers a "late firing" that produces an updated result for that window. Once the watermark moves beyond window-end + allowed-lateness, the window state is purged and any later element is dropped or routed to a side output. So allowed lateness defines a grace zone after the on-time firing.
+
+</details>
+
+<details><summary><b>24.</b> What is a side output for late data, and how is it wired in Flink?</summary>
+
+A side output captures elements that are too late to be processed in their window so they are not silently lost. You declare an `OutputTag<T>` (an anonymous subclass, e.g. `new OutputTag<Order>("late-orders"){}`), call `.sideOutputLateData(tag)` on the windowed stream, and retrieve the stream with `result.getSideOutput(tag)`. Those captured records can then be logged, alerted on, or fed into a restatement path.
+
+</details>
+
+<details><summary><b>25.</b> Why must the `OutputTag` be created as an anonymous subclass in Flink?</summary>
+
+`OutputTag` carries a generic type parameter that Java erases at runtime, so Flink needs the type information preserved. Writing `new OutputTag<Order>("late"){}` (note the trailing braces) creates an anonymous subclass whose generic superclass retains the type for Flink's type extraction. Omitting the braces loses the type and causes a runtime error about missing type information.
+
+</details>
+
+<details><summary><b>26.</b> What is a restatement, and why does late data force one?</summary>
+
+A restatement is the publication of a corrected result that supersedes a previously emitted one, because new data — a late or amended event — changed the answer for a window that had already fired. In finance this is routine: an intraday flow total reported at the window's on-time firing is restated when a late order arrives. Streaming systems model this with late firings plus an accumulation mode that can update or retract the earlier value.
+
+</details>
+
+<details><summary><b>27.</b> What is a trigger in the Beam model?</summary>
+
+A trigger is the rule that decides, in processing time, when a window emits output — it answers the "when" question. A window can fire early (before the watermark, for speculative results), on time (when the watermark passes the window end), and late (when allowed-lateness elements arrive). Triggers therefore turn a single window into a sequence of refinements rather than one final answer.
+
+</details>
+
+<details><summary><b>28.</b> Distinguish early, on-time, and late firings.</summary>
+
+An early firing emits a speculative, possibly-incomplete result before the watermark reaches the window end, trading completeness for low latency. The on-time firing happens when the watermark passes the window end, the system's best complete answer. A late firing occurs when a late element (within allowed lateness) updates the window after it already fired on time. Each firing is a "pane" of the same window.
+
+</details>
+
+<details><summary><b>29.</b> What is the "discarding" accumulation mode?</summary>
+
+In discarding mode, after each firing the window's accumulated state is reset, so each pane contains only the new data seen since the previous firing. The downstream sink must add these deltas together to reconstruct the total. It minimises per-pane payload but pushes the burden of summation onto the consumer, and a lost pane silently understates the total.
+
+</details>
+
+<details><summary><b>30.</b> What is the "accumulating" accumulation mode?</summary>
+
+In accumulating mode the window retains its state across firings, so each pane is the complete result so far including all earlier data plus the new arrivals. Each emission is the full current answer for the window, and a later pane simply overwrites an earlier one for the same window key. This is the easiest mode for an idempotent upsert sink, since the latest pane is authoritative.
+
+</details>
+
+<details><summary><b>31.</b> What is the "accumulating and retracting" mode?</summary>
+
+Accumulating-and-retracting emits, alongside the new accumulated value, an explicit retraction of the previously emitted value for that window. This lets a downstream consumer that has already combined panes correctly undo the old contribution before adding the new one — essential when the same window feeds an aggregate further downstream. It is the most correct but most expensive mode, doubling the message volume per refinement.
+
+</details>
+
+<details><summary><b>32.</b> Which accumulation mode best matches an idempotent upsert into an Iceberg table?</summary>
+
+Accumulating mode, because each firing is the full current value for the window key and an upsert keyed on (window, share class) simply replaces the prior row. Discarding mode would require the sink to add deltas, and a missed delta would corrupt the total; retracting mode is needed only when a downstream aggregate has already folded the old value in. Accumulating plus upsert gives "last write wins" with the latest pane as truth.
+
+</details>
+
+<details><summary><b>33.</b> How do allowed lateness, triggers, and watermarks interact for a single window?</summary>
+
+The watermark determines the on-time firing (when it passes the window end) and, together with allowed lateness, determines when the window's state is finally purged (watermark past window-end + lateness). The trigger governs the emission moments — early before the watermark, on-time at it, late within the lateness grace zone. So watermark sets the "complete" line, lateness sets the grace, and the trigger fires output at each of those points.
+
+</details>
+
+<details><summary><b>34.</b> A junior asks why yesterday's intraday flow count was too low. What is your structured answer?</summary>
+
+The likely cause is late orders that arrived after the watermark passed the window end, so they were dropped instead of counted. The fix is one of three knobs: a more conservative watermark (wait longer before closing), a larger allowed lateness (re-fire the window for stragglers), or a side output plus restatement to recover them. Each fix costs latency or extra processing, and you should name which knob and what it costs.
+
+</details>
+
+<details><summary><b>35.</b> For "catch more stragglers" the knob is allowed lateness — what does choosing a large value cost?</summary>
+
+A large allowed lateness keeps each window's state in memory (or on the state backend) for longer, increasing state size and checkpoint cost, and it produces more late firings that the downstream sink must absorb as restatements. It also extends the time before a window's result is final, so consumers see updated numbers for longer. You are buying completeness with state, latency-to-finality, and write amplification.
+
+</details>
+
+<details><summary><b>36.</b> Why does a more conservative watermark reduce late data but raise latency?</summary>
+
+A conservative watermark trails further behind the maximum observed event time, so it waits longer before declaring any event-time point complete, capturing more out-of-order arrivals before the on-time firing. The cost is that every window's on-time result is delayed by that extra buffer. You move the latency-completeness dial toward completeness for all windows uniformly, not just for the stragglers.
+
+</details>
+
+<details><summary><b>37.</b> What is keyed state in a stateful streaming operator?</summary>
+
+Keyed state is per-key state maintained by an operator, partitioned by the stream's key so each key's state is independent and the work parallelises across keys. A windowed aggregation, for instance, keeps each share class's running total as keyed state. Because state is scoped to a key, Flink can redistribute keys across parallel subtasks during rescaling without mixing keys' data.
+
+</details>
+
+<details><summary><b>38.</b> What is a checkpoint and why does it matter for correctness?</summary>
+
+A checkpoint is a consistent snapshot of all operator state plus the input positions (e.g. Kafka offsets) at a point in the stream, persisted to durable storage. On failure the job restores from the latest checkpoint and resumes, so the result after recovery matches what it would have been without the crash. This is the mechanism that lets a stateful aggregation feeding a regulated NAV survive restarts without producing different numbers.
+
+</details>
+
+<details><summary><b>39.</b> Why is event-time windowing inherently a stateful operation?</summary>
+
+Because events for a window can arrive out of order and over a span of processing time, the operator must buffer and accumulate each open window's partial result until the watermark says it can fire. That retained, per-key, per-window accumulation is state. Without durable state and checkpoints, a restart would lose every open window's in-progress total.
+
+</details>
+
+<details><summary><b>40.</b> In Flink, what does `WatermarkStrategy.forBoundedOutOfOrderness(Duration)` express?</summary>
+
+It declares a heuristic watermark that assumes elements arrive out of order but by no more than the given bound — the latest element for timestamp `t` arrives at most that duration after the earliest. Flink tracks the maximum observed timestamp and emits a watermark that trails it by the bound. For example `forBoundedOutOfOrderness(Duration.ofSeconds(10))` tolerates 10 seconds of disorder before counting an element as late.
+
+</details>
+
+<details><summary><b>41.</b> When would you use `WatermarkStrategy.forMonotonousTimestamps()` instead?</summary>
+
+When event timestamps are strictly non-decreasing on each partition, i.e. no out-of-order arrivals are expected, such as a single-writer append log with monotonic sequence stamps. It emits a watermark equal to the largest timestamp seen, with zero added delay. Using it on genuinely out-of-order data would mark many legitimate events as late, so it is only safe when ordering is guaranteed at the source.
+
+</details>
+
+<details><summary><b>42.</b> What problem does `withIdleness(Duration)` solve?</summary>
+
+It addresses idle sources: if a partition produces no events for the given duration, Flink marks it idle so it stops holding back the minimum-across-inputs watermark. Without it, one quiet Kafka partition — say a share class with no orders this minute — would freeze the merged watermark and stall every window from closing. With it, active partitions advance the watermark while idle ones are temporarily excluded.
+
+</details>
+
+<details><summary><b>43.</b> A Flink job's windows never emit results even though data is flowing. What do you check first?</summary>
+
+First check the watermark: most often a timestamp/watermark assigner is missing or misconfigured, or one input partition is idle and pinning the minimum-across-inputs watermark so it never reaches any window end. Confirm a `WatermarkStrategy` is assigned with a correct `withTimestampAssigner`, and consider `withIdleness` for sparse partitions. If the watermark is not advancing, no event-time window can ever fire.
+
+</details>
+
+<details><summary><b>44.</b> What is the role of `withTimestampAssigner` in a watermark strategy?</summary>
+
+It tells Flink how to extract the event-time timestamp from each record, since the watermark logic needs a per-event time to track the maximum and compute progress. For example you map an order's `tradeTimestamp` field to the event time. It is sometimes optional when a connector like Kafka already supplies record timestamps, but for a domain field like trade time you usually assign it explicitly.
+
+</details>
+
+<details><summary><b>45.</b> Distinguish periodic from punctuated watermark generation.</summary>
+
+Periodic generation emits watermarks on a time interval, computing the current watermark from the maximum timestamp seen so far, which is the common default. Punctuated (per-element) generation emits a watermark in response to special marker records in the stream. Periodic is simpler and cheaper; punctuated suits streams that carry explicit "end of batch" or completeness markers.
+
+</details>
+
+<details><summary><b>46.</b> Why is processing-time windowing simpler but unsuitable for restatement-heavy finance?</summary>
+
+Processing-time windows just buffer until the wall clock elapses, so completeness is trivial — the window is done when its clock interval ends — and there are no late elements by definition. But the assignment depends on pipeline speed, so the same order lands in different windows on replay, and out-of-order arrivals are mis-bucketed. For finance that needs deterministic, restatable results, that non-determinism is disqualifying.
+
+</details>
+
+<details><summary><b>47.</b> Why is the completeness problem fundamentally unsolvable for event-time windows?</summary>
+
+Elements can be arbitrarily delayed — a mobile device offline for hours, a delayed batch upload — so there is no time at which you can be certain every event for a given timestamp has arrived. You can only estimate completeness with a heuristic watermark and then decide how long to wait. This irreducible uncertainty is exactly why allowed lateness and restatements exist.
+
+</details>
+
+<details><summary><b>48.</b> Map the four Beam questions to the four configuration choices you make.</summary>
+
+"What" maps to the transformation/aggregation (e.g. sum of flows); "where" maps to the windowing choice (tumbling/sliding/session and size); "when" maps to the trigger (early/on-time/late firing policy, driven by the watermark); and "how" maps to the accumulation mode (discarding/accumulating/retracting). Together these four fully specify a correct streaming aggregation. A paper design should name a concrete answer for each.
+
+</details>
+
+<details><summary><b>49.</b> Design the windowing for "intraday fund-flow totals per share class, restated as late orders arrive". What type and key?</summary>
+
+Use tumbling event-time windows (e.g. one-minute or daily-cut-off buckets) keyed by share class, because each interval's net flow is a discrete periodic total and each order belongs to exactly one interval. Keying by share class gives independent per-class state and parallelism. Tumbling, not sliding, because the totals are non-overlapping reporting intervals.
+
+</details>
+
+<details><summary><b>50.</b> For that same fund-flow job, what watermark strategy would you justify?</summary>
+
+A heuristic bounded-out-of-orderness watermark sized to the observed feed delay — e.g. `forBoundedOutOfOrderness` of a few minutes to cover transfer-agency batch latency — with `withIdleness` so share classes that are quiet in an interval do not stall the watermark. It must be heuristic because order arrivals are not perfectly ordered. The bound is a deliberate completeness-versus-latency choice, not a guess.
+
+</details>
+
+<details><summary><b>51.</b> For the fund-flow job, what trigger and accumulation mode fit, and why?</summary>
+
+Use the default watermark trigger for the on-time firing plus allowed lateness for late firings, and accumulating mode so each firing emits the full current total per share class. Accumulating pairs cleanly with an idempotent upsert into Iceberg keyed on (window, share class), so a late firing simply restates the row. Add a side output to capture orders too late even for the lateness window, for an explicit restatement path.
+
+</details>
+
+<details><summary><b>52.</b> Where does a late order land relative to the watermark, and what does the trigger do with it?</summary>
+
+If the order's event time is before the watermark but within window-end + allowed-lateness, it falls into the grace zone: it is added to the still-retained window and the trigger produces a late firing with the corrected total. If it arrives after window-end + allowed-lateness, the window state is gone, so it is dropped or routed to the side output. The watermark is the line that separates "on-time/grace" from "late/lost".
+
+</details>
+
+<details><summary><b>53.</b> State the latency cost of choosing a five-minute allowed lateness for the fund-flow job.</summary>
+
+The window's result is not final for five minutes after the watermark passes its end, so any downstream consumer must treat the on-time number as provisional and accept restated values for that whole grace period. State for each open window is held five minutes longer, increasing checkpoint size, and each straggler triggers an extra restatement write. You give up promptness-to-final and some state budget to catch late orders.
+
+</details>
+
+<details><summary><b>54.</b> How does session-window merging interact with late data?</summary>
+
+A late element arriving in the gap between two previously separate sessions can bridge them, causing Flink to merge those sessions into one and re-fire a combined result. This makes session windows more complex under lateness than tumbling windows, since a single late event can restructure window boundaries, not just update a total. The downstream sink must handle a merge as a retraction-plus-new-result, not a simple update.
+
+</details>
+
+<details><summary><b>55.</b> Why is a "perfect" watermark generally impossible for a Kafka-fed fund-order stream?</summary>
+
+Because you cannot guarantee that no order with an earlier event time will ever arrive — feeds batch, retry, and back-fill, and an upstream TA system may resend corrections hours later. A perfect watermark requires fully predictable input completeness, which a multi-source order pipeline does not have. Hence you use a heuristic watermark plus allowed lateness and accept restatements.
+
+</details>
+
+<details><summary><b>56.</b> What is the consequence of setting the out-of-orderness bound too small?</summary>
+
+A bound smaller than the real disorder means the watermark advances too aggressively, so many legitimately out-of-order orders fall behind it and are treated as late — dropped or restated rather than counted on time. Your on-time totals will be systematically understated and you will see excessive late firings or side-output volume. The symptom is a count that is "wrong yesterday" and gets corrected only via restatements.
+
+</details>
+
+<details><summary><b>57.</b> What is the consequence of setting the out-of-orderness bound too large?</summary>
+
+An over-large bound makes the watermark trail far behind real time, so every window's on-time firing is delayed by that buffer even when most data arrived promptly. You pay uniform extra latency on all results to protect against rare stragglers. The fix is to size the bound to the actual observed skew distribution, not to the worst case.
+
+</details>
+
+<details><summary><b>58.</b> How would you explain to an auditor that a late-arriving order was not lost?</summary>
+
+Show that the pipeline routes orders too late for the allowed-lateness window into a side output that is persisted and alerted on, and that orders within the lateness window trigger a documented restatement of the affected total. Therefore every order is either counted on time, restated, or captured for manual reprocessing — none is silently dropped. The audit trail is the side-output store plus the restatement log.
+
+</details>
+
+<details><summary><b>59.</b> Why is processing time still useful despite event time being the default?</summary>
+
+Processing time is what triggers operate in — early/on-time/late firings are scheduled in processing time even though windows are defined in event time — and it underpins simple low-latency, non-restatement use cases like raw throughput monitoring. It is also the only clock available when records carry no usable event timestamp. The skill is knowing the domain each concept lives in: windows in event time, firings in processing time.
+
+</details>
+
+<details><summary><b>60.</b> What does it mean that "the watermark drives the on-time firing"?</summary>
+
+The default event-time trigger emits a window's on-time result at the exact moment the watermark passes the window's end timestamp, because that is when the system believes the window is complete. So the watermark's progress, not the wall clock, decides when each window produces its main answer. If the watermark stalls, the on-time firing never happens.
+
+</details>
+
+<details><summary><b>61.</b> Contrast accumulating mode with discarding mode for a downstream that re-aggregates panes.</summary>
+
+If a downstream operator folds panes into a larger aggregate, discarding mode is correct because each pane is a delta that simply adds in. Accumulating mode would double-count, since each pane re-includes earlier data, unless the downstream replaces rather than adds. Accumulating-and-retracting is the safe general choice for such re-aggregation, as it explicitly undoes the prior pane before adding the new one.
+
+</details>
+
+<details><summary><b>62.</b> Why might you choose early firings for a fund-exposure dashboard?</summary>
+
+Early firings emit a speculative window result before the watermark closes it, giving the dashboard a low-latency provisional number that refines as more data arrives. For an exposure monitor where seeing an approximate figure now beats an exact figure minutes later, that tradeoff is worth it. You accept that the early value is incomplete and will be updated by the on-time and any late firings.
+
+</details>
+
+<details><summary><b>63.</b> What is a "pane" in window terminology?</summary>
+
+A pane is the output produced by a single firing of a window — so a window that fires early, on time, and late produces three panes for the same window. The accumulation mode defines how those panes relate (delta, full value, or value-plus-retraction). Thinking in panes makes explicit that a window result is a sequence of refinements, not a one-shot answer.
+
+</details>
+
+<details><summary><b>64.</b> Why is "the same rules govern Flink as the Beam model" a useful mental model?</summary>
+
+Because event time, watermarks, windows, triggers, and accumulation are engine-agnostic concepts from the Beam model, and Flink is one concrete implementation of them — `WatermarkStrategy`, `allowedLateness`, `OutputTag`, and the window assigners are just Flink's names for those ideas. Designing on paper in Beam terms and then mapping to Flink APIs keeps the design portable and the reasoning sound. The concepts transfer to Spark, Dataflow, and managed Flink alike.
+
+</details>
+
+<details><summary><b>65.</b> How does keyed state enable parallelism in a windowed aggregation?</summary>
+
+Because state is partitioned by key, each key's accumulation is independent, so the framework can distribute different keys across parallel subtasks and process them concurrently without coordination. A flow-total job keyed by share class therefore parallelises across share classes. This also lets the job rescale by reassigning key groups, since no key's state is entangled with another's.
+
+</details>
+
+<details><summary><b>66.</b> Why does a watermark that never advances usually point to an assigner or idleness problem?</summary>
+
+The watermark is computed from observed event timestamps; if no `WatermarkStrategy`/timestamp assigner is attached, there is nothing to advance it, and if one input partition is idle, the minimum-across-inputs rule pins the merged watermark to that stalled partition. Either way windows wait forever. The two first checks are "is a timestamp assigner present and correct?" and "is a partition idle without `withIdleness`?".
+
+</details>
+
+<details><summary><b>67.</b> What is the difference between "where" (windowing) and "when" (triggering) in one sentence each?</summary>
+
+"Where" decides which events are grouped together along the event-time axis — the window assignment. "When" decides at which processing-time moments each window emits output — the trigger and its early/on-time/late firings. One is grouping in event time, the other is emission timing in processing time, and conflating them is a common source of design confusion.
+
+</details>
+
+<details><summary><b>68.</b> An order arrives with an event time inside an already-fired, already-purged window. What happens by default?</summary>
+
+With Flink's default allowed lateness of 0, the window state was purged at the on-time firing, so the late order is dropped and not counted. To capture it you must either configure `allowedLateness` so the window is retained long enough, or attach `sideOutputLateData` to divert it for reprocessing. Out of the box, "no late handling" means "silently dropped", which is the gotcha to design against.
+
+</details>
+
+<details><summary><b>69.</b> Why is `allowedLateness` a per-window-state cost, not just a config flag?</summary>
+
+Each window must keep its accumulated state alive until the watermark passes window-end + allowed-lateness, so a larger value multiplies the number of simultaneously-open windows holding state. That inflates heap or RocksDB usage and every checkpoint. So allowed lateness is a real resource decision sized against straggler frequency, not a costless safety margin.
+
+</details>
+
+<details><summary><b>70.</b> Give a fund example distinguishing event time from processing time, one each.</summary>
+
+Event time: a redemption order's official cut-off timestamp of 16:00 is its event time and determines which trading-day window it belongs to. Processing time: the moment the Flink operator actually consumes that order from Kafka, say 16:07, is its processing time and governs when triggers fire. The 16:00 figure is fixed and audit-relevant; the 16:07 figure shifts on every run.
+
+</details>
+
+<details><summary><b>71.</b> How do triggers let you serve both a fast dashboard and a correct report from one window?</summary>
+
+An early-firing trigger feeds the dashboard a speculative low-latency value, the on-time firing at the watermark gives the report its best complete value, and late firings within allowed lateness restate it as stragglers arrive. The single window thus emits a refinement sequence consumed differently by each downstream. Accumulating mode makes the latest pane authoritative for both.
+
+</details>
+
+<details><summary><b>72.</b> Why must a streaming design name all four — windowing, watermark, trigger, accumulation — to be "ready to implement"?</summary>
+
+Because each one independently changes the result: the window decides grouping, the watermark decides the completeness line and on-time firing, the trigger decides emission moments and lateness behaviour, and accumulation decides how refinements combine. Leaving any unspecified means the implementation will silently pick a default that may be wrong for the metric. A complete paper design pins down one concrete choice for each with a one-sentence justification.
+
+</details>
+
+<details><summary><b>73.</b> What does "byte-identical results after restart" demand from the streaming model?</summary>
+
+It demands event-time semantics plus durable checkpointed state, so that after restoring from a checkpoint the operator re-derives exactly the same windows and totals it had before the crash. Processing-time windows could not be byte-identical because re-consumption happens at different wall-clock times. Determinism comes from grouping by event time and resuming from a consistent state snapshot.
+
+</details>
+
+<details><summary><b>74.</b> How do watermarks relate to the "completeness problem"?</summary>
+
+The completeness problem is that you can never be certain all data for an event-time point has arrived; the watermark is the system's heuristic answer, declaring "I believe completeness has reached `t`" so windows up to `t` may fire. It does not solve the problem — late data can still arrive — but it makes progress decidable. Allowed lateness then covers the gap between the heuristic and reality.
+
+</details>
+
+<details><summary><b>75.</b> Why is choosing the windowing type "a data-model decision", not just a tuning knob?</summary>
+
+The window type encodes what a "result" means for the metric: tumbling for discrete periodic totals, sliding for moving averages, session for activity bursts. Pick the wrong shape and the number answers a different business question, regardless of how well you tune watermarks. So the architect chooses windowing from the metric's semantics first, then tunes lateness and triggers.
+
+</details>
+
+<details><summary><b>76.</b> A sliding-window exposure metric is doubling CPU versus the tumbling version. Why, and what is the lever?</summary>
+
+Because sliding windows overlap, each event is assigned to multiple windows (roughly size/slide of them), multiplying per-event aggregation work and state. A 15-minute window sliding every minute puts each event in about 15 windows. The lever is the size-to-slide ratio: widen the slide to reduce overlap, or switch to tumbling if true overlap is not needed.
+
+</details>
+
+<details><summary><b>77.</b> What is the danger of using processing-time windows for an intraday NAV-flow total?</summary>
+
+Out-of-order or delayed orders get bucketed by when they were processed, not when they occurred, so an order placed at 15:59 but delivered at 16:01 lands in the wrong interval and corrupts both totals. Replays produce different buckets, breaking reproducibility and auditability. For a regulated flow total this is a correctness defect, not a latency nuisance.
+
+</details>
+
+<details><summary><b>78.</b> How does the minimum-across-inputs watermark rule cause a "stuck" join or union?</summary>
+
+A keyed join or union takes the minimum watermark of its inputs, so if one input stream lags or is idle, the operator's event-time clock — and therefore all its windows — cannot advance past that laggard. The whole result stalls even though other inputs are flowing. The remedy is `withIdleness` on idle inputs or fixing the slow source.
+
+</details>
+
+<details><summary><b>79.</b> Why is "event time is the regulated-finance default" not merely a preference?</summary>
+
+Because regulators and reconciliation processes require that the same inputs always yield the same outputs and that historical results be reproducible during restatements and audits — only event-time grouping delivers that determinism. Processing-time results depend on run conditions and cannot be defended as "the" answer for a given trading day. Event time makes the result a function of the data alone.
+
+</details>
+
+<details><summary><b>80.</b> In one sentence, what does each Beam question answer for a NAV-flow job?</summary>
+
+What = net subscriptions minus redemptions per share class; where = one tumbling window per reporting interval keyed by share class; when = on-time firing at the watermark plus late firings within allowed lateness; how = accumulating mode so each firing emits the full restated total. That fully specifies a correct, restatable design ready to code in Flink.
+
+</details>
+
+<details><summary><b>81.</b> What is the relationship between a heuristic watermark and the volume of side-output (very-late) records?</summary>
+
+The more aggressive (earlier) the heuristic watermark relative to true disorder, the more records fall past window-end + allowed-lateness and land in the side output as too-late; a more conservative watermark reduces that volume but delays results. Side-output depth is thus a tuning signal — a growing late-output stream means your watermark or lateness is mis-sized for the feed. You read it as a feedback metric on your completeness assumptions.
+
+</details>
+
+<details><summary><b>82.</b> Why can the same logical window fire more than once, and what must the sink tolerate?</summary>
+
+It fires once early (speculative), once on-time (at the watermark), and potentially several times late (within allowed lateness), because new data keeps changing the answer. The sink must therefore tolerate multiple emissions for the same window key — typically by upserting in accumulating mode so the latest pane overwrites prior ones. A sink that blindly appends would duplicate and inflate the metric.
+
+</details>
+
+<details><summary><b>83.</b> How does allowed lateness differ from the out-of-orderness bound in the watermark?</summary>
+
+The out-of-orderness bound delays the watermark itself, affecting the on-time firing of every window uniformly and what counts as "on time". Allowed lateness keeps a window's state alive after its on-time firing, governing how long late elements can still update it before being dropped. One shifts the completeness line; the other extends the grace period after that line — they are independent knobs you tune together.
+
+</details>
+
+<details><summary><b>84.</b> Why is "event time vs processing time" called the central distinction of streaming?</summary>
+
+Because almost every correctness subtlety — windows, watermarks, lateness, restatements — exists only because event time and processing time diverge by an unpredictable skew. If data always arrived instantly and in order, processing-time windows would be correct and none of the machinery would be needed. The whole Beam model is, in effect, a disciplined way to reconcile the two time domains.
+
+</details>
+
+<details><summary><b>85.</b> A consumer of your window output is double-counting flows. What mode mismatch is the likely cause?</summary>
+
+The producer is likely emitting accumulating panes (each pane is the full running total) while the consumer is adding panes together as if they were discarding-mode deltas, so earlier data is counted repeatedly. The fix is to align the contract: either switch the producer to discarding, or have the consumer replace (upsert) rather than add. Accumulation mode is part of the interface, not an internal detail.
+
+</details>
+
+<details><summary><b>86.</b> How would you preview the role of checkpoints when teaching the Beam model, before the Flink lesson?</summary>
+
+Explain that windows hold per-key accumulated state that must survive failures, and that a checkpoint is a consistent snapshot of that state plus input offsets, taken periodically and restored on restart. This lets a stateful aggregation resume exactly where it left off, so results are reproducible across crashes — the detailed barrier mechanism is deepened in the Flink entry. The takeaway is that stateful streaming correctness depends on durable, consistent snapshots.
+
+</details>
+
+<details><summary><b>87.</b> Why does an EMT or EPT data feed benefit from event-time semantics if streamed?</summary>
+
+EMT/EPT files carry reference and cost figures tied to specific effective dates and as-of points, so any streamed processing must bucket and reconcile them by their effective (event) time, not by ingestion time, to keep restatements correct. Late or corrected EMT records would otherwise mis-bucket against the wrong reporting period. Event-time windowing plus restatement is what keeps the feed's downstream consumers consistent with the file's stated dates.
+
+</details>
+
+<details><summary><b>88.</b> How does a watermark let you bound, but not eliminate, the wait for completeness?</summary>
+
+The watermark sets a defensible point at which you stop waiting and fire, encoding your assumption about maximum disorder, so results are produced with bounded latency. It cannot eliminate the wait-for-completeness uncertainty because genuinely late data can still appear afterwards. That residual is handled by allowed lateness and side outputs rather than by the watermark itself.
+
+</details>
+
+<details><summary><b>89.</b> Why is "restatement-heavy finance demands event-time rigor" the motivating theme of this lesson?</summary>
+
+Because fund metrics are routinely corrected after the fact — late orders, amended trades, NAV adjustments — and each correction must reproducibly re-derive the affected window from the data, which only event time guarantees. The lesson's machinery (watermarks, lateness, triggers, accumulation) is exactly what makes those restatements principled rather than ad hoc. The architect's job is to choose those knobs so corrections are automatic and auditable.
+
+</details>
+
+<details><summary><b>90.</b> What two checks form the first move when a windowed result looks wrong?</summary>
+
+First, is the result wrong because data was dropped as late — check the watermark progression and the allowed-lateness/side-output configuration. Second, is the grouping wrong because of processing-time vs event-time assignment or an idle-partition-stalled watermark — verify the timestamp assigner and idleness handling. Most "wrong window" incidents resolve to one of these two: late-data loss or watermark stall.
+
+</details>
+
+<details><summary><b>91.</b> Why is naming the accumulation mode part of the data contract between teams?</summary>
+
+Because a consumer cannot correctly combine multiple panes of a window without knowing whether each pane is a delta (discarding), a full value (accumulating), or a value-plus-retraction (retracting). Get it wrong and you silently under- or over-count. So the producing team must publish the accumulation mode just as it publishes the schema, since it changes how the output must be read.
+
+</details>
+
+<details><summary><b>92.</b> How do session windows differ from tumbling windows in determinism under late data?</summary>
+
+Tumbling windows have fixed, data-independent boundaries, so a late element only updates one window's total. Session windows have data-driven boundaries, so a late element can merge two sessions and restructure the grouping itself. Sessions are therefore harder to reason about and restate, since lateness can change which events belong together, not just the value.
+
+</details>
+
+<details><summary><b>93.</b> What is the practical meaning of "the watermark is a heuristic" for capacity planning?</summary>
+
+It means you are choosing how long to buffer out-of-order data, and that choice directly sizes how much window state is held open and how big checkpoints get. A more conservative watermark buffers more open windows; a larger allowed lateness extends their lifetime further. So watermark and lateness tuning is also a memory- and checkpoint-capacity decision, not only a correctness one.
+
+</details>
+
+<details><summary><b>94.</b> Why can two correct streaming jobs over the same data produce different "on-time" numbers?</summary>
+
+Because they may set different watermark bounds and allowed-lateness values, so they draw the completeness line at different points and thus include different sets of out-of-order events in their on-time firing. Both are internally consistent; they simply encode different completeness-versus-latency tradeoffs. Only after each has caught all its late data (via restatement) do they converge on the same final total.
+
+</details>
+
+<details><summary><b>95.</b> How does the Beam model treat a "final" answer for a window?</summary>
+
+It treats finality as conditional: a window's result is final only once the watermark has passed window-end + allowed-lateness and the state is purged, after which no further refinement is possible. Before that, every emission is provisional and may be restated by a later firing. So "final" is a defined point in the lifecycle, not the first time the window fires.
+
+</details>
+
+<details><summary><b>96.</b> Why does choosing tumbling windows aligned to the fund's cut-off times matter?</summary>
+
+Aligning window boundaries to the official dealing cut-off makes each window correspond to a regulatory reporting interval, so the aggregate answers exactly the question compliance asks. Misaligned windows would split a trading period across buckets and require error-prone reassembly. Boundary alignment is therefore part of getting the "where" question right for fund data.
+
+</details>
+
+<details><summary><b>97.</b> Summarise the exact knob-to-symptom mapping for a "count was too low yesterday" incident.</summary>
+
+If stragglers were dropped after the on-time firing, the fix is larger allowed lateness (cost: more state and restatements). If many events were behind an over-aggressive watermark, the fix is a larger out-of-orderness bound (cost: higher latency on all results). If events were lost entirely past the grace period, the fix is a side output plus restatement path (cost: extra processing and a manual or automated re-feed). Name the knob and its cost, not just the cause.
+
+</details>
+
+<details><summary><b>98.</b> What is a "trigger" gotcha when combining early firings with discarding accumulation?</summary>
+
+With early firings in discarding mode, each pane carries only the data since the last firing, so a consumer that displays a single pane as "the total" will show a fraction of the real value. Discarding is meant for consumers that sum panes; pairing it with an early-firing speculative dashboard that reads one pane in isolation understates the metric badly. The safe pairing for a "show me the current total" view is accumulating mode, where every pane is the full running value.
+
+</details>
+
+<details><summary><b>99.</b> How would you reason about a SWIFT or transfer-agency feed that delivers settlement messages in bursts hours late?</summary>
+
+Such a feed has large, lumpy event-to-processing skew, so a tight watermark would mark the bursts as late and an over-wide one would delay every result; the better design is a moderate heuristic watermark plus a generous allowed lateness sized to the burst delay, with a side output capturing anything beyond it. Each burst then triggers late firings that restate the affected windows, and the side output guarantees nothing settled is silently lost. The completeness story you tell an auditor is "on-time, restated, or parked for reprocessing — never dropped".
+
+</details>
+
+<details><summary><b>100.</b> Why is the Beam model described as engine-agnostic, and why does that matter to an architect?</summary>
+
+Because event time, windows, watermarks, triggers, and accumulation are conceptual primitives that Flink, Spark Structured Streaming, Beam/Dataflow, and managed services all implement under different API names. An architect who reasons in these primitives can specify a correct design once and map it to whatever engine the platform uses, and can audit any pipeline's guarantees by these same questions. It future-proofs the design against engine choice.
+
+</details>
+
+
+## Phase 4 · 4.2.1 Stateful stream processing (Flink) — 100 self-test questions
+
+<details><summary><b>1.</b> What does it mean for a stream processor to be "stateful," and why is Flink the reference engine for it?</summary>
+
+Stateful means the engine remembers information across events — running counts, window contents, last-seen values — rather than treating each record independently. Flink is the reference because it bakes durable, fault-tolerant keyed state and exactly-once semantics into the runtime, so a windowed aggregation survives crashes; many managed services (AWS Managed Service for Apache Flink, Azure Stream Analytics internals, Confluent Flink) run Flink or a Flink-like engine underneath.
+
+</details>
+
+<details><summary><b>2.</b> Why does stateful streaming matter specifically for a regulated NAV pipeline?</summary>
+
+Real-time NAV estimates and exposure monitoring accumulate state — positions per share class, running flow totals — that must be identical after a restart as before it. If checkpointing or state evolution is wrong, a job restart can produce different numbers than the pre-crash run, which is unacceptable when those numbers feed a regulated NAV that auditors will reconcile.
+
+</details>
+
+<details><summary><b>3.</b> What is the Flink dataflow graph?</summary>
+
+A Flink job is expressed as a directed graph of operators (sources, transformations, sinks) through which records flow; the API graph is the logical "JobGraph," and the runtime expands it into an "ExecutionGraph" of parallel subtasks. Edges between operators carry records, and an edge may be a forward, a rebalance, or a keyed (hash) partition depending on the transformation.
+
+</details>
+
+<details><summary><b>4.</b> What is a keyed stream in Flink and how do you create one?</summary>
+
+A keyed stream partitions records by a key (for example ISIN or share-class id) so that all records with the same key are routed to the same operator subtask, where per-key state lives. You create one with `keyBy(...)`, which hash-partitions the stream; only on a keyed stream can you use keyed state (`ValueState`, `ListState`, `MapState`) and keyed timers.
+
+</details>
+
+<details><summary><b>5.</b> Why must state be accessed on a keyed stream rather than an arbitrary operator?</summary>
+
+Keyed state is scoped to the current key, and Flink guarantees all records for a key land on one subtask, so the state for that key is local and consistent. Without `keyBy`, there is no key context, so `ValueState` and friends are unavailable; operator (non-keyed) state exists but follows different scoping and redistribution rules on rescale.
+
+</details>
+
+<details><summary><b>6.</b> What is operator parallelism in Flink and what controls it?</summary>
+
+Parallelism is the number of parallel subtasks an operator runs as, each handling a slice of the stream; it is set per-operator with `setParallelism(...)`, per-job with the default parallelism, or by the cluster default. For a keyed operator, parallelism bounds how many key-groups can be processed concurrently, and changing it requires redistributing keyed state across subtasks.
+
+</details>
+
+<details><summary><b>7.</b> What is a key group in Flink and why does it exist?</summary>
+
+A key group is the atomic unit of keyed-state assignment: every key hashes into one of `maxParallelism` key groups, and key groups are distributed across subtasks. This indirection lets Flink rescale a job (change parallelism) by reassigning whole key groups without rehashing every individual key, which is why `maxParallelism` is fixed at job start and caps future rescaling.
+
+</details>
+
+<details><summary><b>8.</b> What is the difference between keyed state and operator state?</summary>
+
+Keyed state is partitioned by key and only available on keyed streams (`ValueState`, `ListState`, `MapState`, `ReducingState`, `AggregatingState`); operator state is bound to a parallel operator instance regardless of key, used by things like the Kafka source to track offsets per subtask. On rescale, keyed state moves by key group, while operator state is redistributed via list-style or union-style schemes the operator defines.
+
+</details>
+
+<details><summary><b>9.</b> Name the common keyed state primitives Flink exposes.</summary>
+
+`ValueState<T>` holds a single value per key, `ListState<T>` an appendable list, `MapState<K,V>` a per-key map, `ReducingState<T>` and `AggregatingState<IN,OUT>` maintain an incrementally combined value. Each is obtained from the `RuntimeContext` via a corresponding state descriptor (for example `ValueStateDescriptor`) inside `open()` of a `RichFunction`.
+
+</details>
+
+<details><summary><b>10.</b> What is a state backend in Flink?</summary>
+
+A state backend determines how working (in-flight) keyed state is stored and accessed while a job runs — on the JVM heap as objects, or in an embedded on-disk store. It is a separate concern from checkpoint storage (where snapshots are durably written), a distinction Flink made explicit when it split the old combined backends.
+
+</details>
+
+<details><summary><b>11.</b> What are the two main Flink state backends today and how do they differ?</summary>
+
+`HashMapStateBackend` keeps state as Java objects on the TaskManager JVM heap — fastest access but bounded by heap and subject to GC pressure. `EmbeddedRocksDBStateBackend` stores state in an embedded RocksDB on local disk, serializing keys/values, scaling working state to terabytes at the cost of per-access serialization and disk I/O latency.
+
+</details>
+
+<details><summary><b>12.</b> Which state backend is the default if you configure nothing?</summary>
+
+`HashMapStateBackend` is the default. It is appropriate for development and for jobs whose per-slot state stays in the hundreds of megabytes to single-digit gigabytes range; beyond roughly 10 GB per slot you should move to RocksDB to avoid GC stalls and out-of-memory failures.
+
+</details>
+
+<details><summary><b>13.</b> When would you pick `EmbeddedRocksDBStateBackend` over `HashMapStateBackend` for a fund job?</summary>
+
+Choose RocksDB when keyed state is large — for example one running position and a window buffer per ISIN across tens of thousands of instruments, or long allowed-lateness windows that retain many in-flight aggregations. RocksDB also uniquely supports incremental checkpoints, so for large state it dramatically cuts checkpoint size and duration versus a full heap snapshot.
+
+</details>
+
+<details><summary><b>14.</b> What is the size/latency tradeoff between heap and RocksDB state backends?</summary>
+
+Heap (`HashMapStateBackend`) gives the lowest per-record latency because state is live Java objects, but capacity is limited by heap and large state causes long GC pauses. RocksDB trades latency — every access serializes/deserializes and may hit disk — for near-unbounded capacity and incremental checkpointing, so you accept slower point lookups to hold terabytes safely.
+
+</details>
+
+<details><summary><b>15.</b> Why did Flink separate "state backend" from "checkpoint storage"?</summary>
+
+The old API conflated where live state lives with where snapshots are persisted, which confused configuration. The split lets you pick, independently, a working-state store (`HashMapStateBackend` or `EmbeddedRocksDBStateBackend`) and a checkpoint storage target (`JobManagerCheckpointStorage` for tiny state, or `FileSystemCheckpointStorage` pointing at S3/MinIO/HDFS) so you can run heap state but still snapshot durably to object storage.
+
+</details>
+
+<details><summary><b>16.</b> What does a checkpoint achieve in Flink?</summary>
+
+A checkpoint is a periodic, consistent, asynchronous snapshot of all operator state plus the source positions (offsets) that produced it, written to durable checkpoint storage. On failure Flink restarts the whole job from the last completed checkpoint, restoring state and rewinding sources, which is the foundation of its exactly-once-within-Flink guarantee.
+
+</details>
+
+<details><summary><b>17.</b> Explain the checkpoint barrier mechanism from memory.</summary>
+
+The `JobManager`'s checkpoint coordinator periodically injects numbered barriers into the source streams. A barrier flows through the dataflow with the records; when an operator has received the barrier for checkpoint N on all its input channels, it snapshots its state to durable storage and forwards the barrier downstream. When every operator and sink has acknowledged barrier N, the checkpoint is complete and becomes the recovery point.
+
+</details>
+
+<details><summary><b>18.</b> What is checkpoint barrier alignment?</summary>
+
+When an operator has multiple input channels, alignment means it stops processing records from a channel once that channel's barrier N arrives, buffering them, until barrier N has arrived on all channels — only then does it snapshot and emit the barrier. This guarantees the snapshot reflects exactly the records before barrier N on every input, giving a clean exactly-once cut, but it stalls fast channels while waiting for slow ones.
+
+</details>
+
+<details><summary><b>19.</b> What is an aligned checkpoint and what is its cost under backpressure?</summary>
+
+An aligned checkpoint performs the alignment described above, producing a snapshot with no in-flight data captured. Under backpressure a barrier travels slowly because it is stuck behind buffered records, and alignment makes operators wait, so checkpoint duration balloons and can time out exactly when the system is already struggling — the problem unaligned checkpoints address.
+
+</details>
+
+<details><summary><b>20.</b> What is an unaligned checkpoint and what does it capture that aligned does not?</summary>
+
+An unaligned checkpoint lets the barrier overtake buffered in-flight records, and it snapshots that in-flight buffer data as part of the checkpoint state. This decouples checkpoint duration from throughput/backpressure because the barrier no longer waits behind queued records, at the cost of larger checkpoints (the buffered data is now persisted).
+
+</details>
+
+<details><summary><b>21.</b> When should you prefer unaligned over aligned checkpoints?</summary>
+
+Prefer unaligned when the job suffers backpressure and aligned checkpoints are timing out or growing unacceptably long, since unaligned keeps checkpoint time roughly constant regardless of load. Prefer aligned (the default) when the job is healthy and you want the smallest checkpoints, because unaligned persists in-flight buffers and increases I/O and state size.
+
+</details>
+
+<details><summary><b>22.</b> What is the adaptive (timeout-based) unaligned checkpoint behaviour?</summary>
+
+Flink can start a checkpoint as aligned and automatically fall back to unaligned if the alignment phase exceeds a configured timeout (`execution.checkpointing.aligned-checkpoint-timeout`). This gives you small aligned checkpoints in the common healthy case and the backpressure-resilience of unaligned only when alignment is actually slow, rather than paying the unaligned cost on every checkpoint.
+
+</details>
+
+<details><summary><b>23.</b> How do checkpoints enable exactly-once within Flink?</summary>
+
+At a checkpoint, every operator's state and the source offsets that produced it are captured at the same logical cut (via barriers). On recovery, Flink restores that state and rewinds sources to those exact offsets, so every record is reflected in state exactly once — no record is double-counted or lost relative to the snapshot, which is exactly-once state semantics inside the engine.
+
+</details>
+
+<details><summary><b>24.</b> What does "exactly-once within Flink" not by itself guarantee?</summary>
+
+It guarantees state consistency inside the engine but not end-to-end exactly-once to external sinks, because on replay Flink may re-emit output records. End-to-end exactly-once additionally requires either an idempotent sink or a transactional/two-phase-commit sink that only makes output visible when the corresponding checkpoint completes.
+
+</details>
+
+<details><summary><b>25.</b> What is at-least-once checkpointing mode and when is it acceptable?</summary>
+
+In at-least-once mode Flink skips barrier alignment, so an operator processes records past a barrier before all barriers arrive, meaning some records may be counted twice after recovery. It is acceptable when downstream is idempotent or small duplication is tolerable, and it lowers latency and checkpoint cost — but for a NAV total you almost always want exactly-once.
+
+</details>
+
+<details><summary><b>26.</b> What is incremental checkpointing and which backend supports it?</summary>
+
+Incremental checkpointing uploads only the state changes (new RocksDB SST files) since the last checkpoint instead of the full state, drastically reducing checkpoint size and time for large state. Only `EmbeddedRocksDBStateBackend` supports it, because it relies on RocksDB's immutable SST file structure; `HashMapStateBackend` always writes a full snapshot.
+
+</details>
+
+<details><summary><b>27.</b> What is a savepoint and how does it differ from a checkpoint?</summary>
+
+A savepoint is a manually triggered, self-contained, durable snapshot of job state intended for operational use — upgrades, migrations, A/B redeploys — whereas checkpoints are automatic and owned by the running job for failure recovery. Savepoints are not auto-deleted, are designed to be portable and restorable into a (possibly modified) job, and you trigger one with `flink savepoint <jobId>` or stop-with-savepoint.
+
+</details>
+
+<details><summary><b>28.</b> What are the CANONICAL and NATIVE savepoint formats?</summary>
+
+`CANONICAL` is a backend-independent uniform format that lets you restore into a different state backend (for example switch heap to RocksDB), at the cost of slower creation. `NATIVE` writes the backend's own format (RocksDB SST files), which is faster to take and restore but ties the savepoint to that backend; you choose with `--type canonical` or `--type native` when triggering.
+
+</details>
+
+<details><summary><b>29.</b> How do you perform a savepoint-based upgrade without losing state?</summary>
+
+Take a savepoint (ideally stop-with-savepoint to drain cleanly: `flink stop --savepointPath <dir> <jobId>`), deploy the new job jar, then start the new job from that savepoint with `flink run -s <savepointPath>`. Flink remaps state to operators by their stable `uid`s, so state survives the code change as long as operator UIDs and state schemas remain compatible.
+
+</details>
+
+<details><summary><b>30.</b> Why must you assign stable `uid`s to operators for upgrades?</summary>
+
+On restore Flink matches saved state to operators by their UID, not by position in the graph; if you let Flink auto-generate UIDs, any change to the job graph reshuffles them and state can no longer be matched, causing restore to fail or silently drop state. Calling `.uid("flow-total-agg")` on each stateful operator pins identity so savepoint restores stay stable across code changes.
+
+</details>
+
+<details><summary><b>31.</b> What is state schema evolution in Flink?</summary>
+
+It is changing the type/shape of state (adding or removing fields, widening types) and still restoring old snapshots into the new job. Flink supports it for state serialized with Avro or POJO serializers under compatible changes; the serializer's compatibility check decides whether old state can be read, and incompatible changes require a migration (for example an upcaster) rather than a direct restore.
+
+</details>
+
+<details><summary><b>32.</b> What is an event-time operator in Flink?</summary>
+
+An event-time operator triggers logic based on timestamps carried in the data and the watermark, not wall-clock time — for example a window that fires when the watermark passes the window end. This makes results deterministic and replayable, which is why event time is the regulated-finance default: re-running the same input yields the same windows regardless of when processing happens.
+
+</details>
+
+<details><summary><b>33.</b> What is a watermark in Flink?</summary>
+
+A watermark is a marker flowing in the stream asserting "no more events with timestamp ≤ T are expected," letting event-time operators decide when a window is complete enough to fire. It is the engine's estimate of event-time progress; choosing it trades completeness (waiting longer catches stragglers) against latency (firing sooner emits results faster).
+
+</details>
+
+<details><summary><b>34.</b> What is a `WatermarkStrategy` and how do you configure a bounded-out-of-orderness watermark?</summary>
+
+A `WatermarkStrategy` tells Flink how to extract event timestamps and how to generate watermarks. For heuristic out-of-order streams you use `WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(n))` plus `.withTimestampAssigner(...)`, which emits a watermark of (max-seen-timestamp − n), tolerating up to n of lateness before an event is considered late.
+
+</details>
+
+<details><summary><b>35.</b> What is the difference between a perfect and a heuristic watermark?</summary>
+
+A perfect watermark guarantees no event later than T will ever arrive (possible only when the source has total event-time knowledge, like a sorted file). A heuristic watermark — what real streams use — estimates progress and may be wrong, so some events arrive after the watermark has passed their timestamp; those are "late" and must be handled with allowed lateness or side outputs.
+
+</details>
+
+<details><summary><b>36.</b> What is allowed lateness in a Flink window and what does it cost?</summary>
+
+Allowed lateness (`window(...).allowedLateness(Duration.ofMinutes(m))`) keeps a window's state alive for m after the watermark passes the window end, so late events that arrive within m re-fire the window and update (restate) the result. The cost is latency-to-finalize and memory: window state is retained longer, and downstream sees corrected re-emissions, so the consumer must handle restatements.
+
+</details>
+
+<details><summary><b>37.</b> What is a side output for late data and why use it?</summary>
+
+A side output is a separate stream tagged with an `OutputTag` to which a windowed operator routes events that arrive even after allowed lateness expires (truly late). You use it so stragglers are never silently dropped — they can be logged, alerted, or reconciled in batch — which matters when a late trade would otherwise quietly understate a fund-flow total.
+
+</details>
+
+<details><summary><b>38.</b> How would you compute per-share-class windowed flow totals with heuristic watermarks in Flink?</summary>
+
+Key the order stream by share class with `keyBy`, assign event-time timestamps and a `forBoundedOutOfOrderness` watermark strategy, apply a tumbling event-time window (for example `TumblingEventTimeWindows.of(...)`), and aggregate net flow with an `AggregateFunction`. Add `allowedLateness` plus a late-data side output so stragglers restate the total rather than being lost.
+
+</details>
+
+<details><summary><b>39.</b> What is a Flink timer and when is it used?</summary>
+
+A timer is a callback registered in a `KeyedProcessFunction` to fire at a specific event-time or processing-time instant, invoking `onTimer(...)`. You use timers for custom time-based logic — emitting a result when no event arrived for a key within a timeout, expiring stale per-key state, or implementing custom windowing — and event-time timers fire when the watermark passes their timestamp.
+
+</details>
+
+<details><summary><b>40.</b> What is a `ProcessFunction` / `KeyedProcessFunction` and why is it the low-level escape hatch?</summary>
+
+It is the most general stateful operator, giving direct access to keyed state, event-time and processing-time timers, the current watermark, and side outputs via its `Context`. It is the escape hatch when windows and built-in operators cannot express the logic — for example bespoke session logic, custom lateness handling, or emitting on a timeout — at the price of writing the state and timer bookkeeping yourself.
+
+</details>
+
+<details><summary><b>41.</b> What does the Flink DataStream window API let you express?</summary>
+
+It expresses keyed (or non-keyed) windowed computations: pick a window assigner (tumbling, sliding, session, global), optionally a trigger and evictor, then apply `reduce`, `aggregate`, or `process` to compute per-window results. It is the declarative path for event-time aggregations where you do not need the full manual control of a `ProcessFunction`.
+
+</details>
+
+<details><summary><b>42.</b> What is Flink SQL / the Table API and when do you reach for it?</summary>
+
+Flink SQL and the Table API are the declarative layer where you express windowed aggregations, joins, and filters as SQL or fluent Table operations, and the planner compiles them to the same DataStream runtime. Reach for them when the logic is relational and standard (windowed `GROUP BY`, temporal joins) — they are far less code than DataStream and easier for analysts to read and audit.
+
+</details>
+
+<details><summary><b>43.</b> How are windowed aggregations expressed in Flink SQL?</summary>
+
+Modern Flink SQL uses windowing table-valued functions such as `TUMBLE`, `HOP` (sliding), and `CUMULATE`, then groups by the `window_start`/`window_end` columns: for example `SELECT window_start, share_class, SUM(amount) FROM TABLE(TUMBLE(TABLE orders, DESCRIPTOR(event_time), INTERVAL '1' HOUR)) GROUP BY window_start, window_end, share_class`. Watermarks are declared on the source table's event-time column.
+
+</details>
+
+<details><summary><b>44.</b> How do you declare event time and watermarks for a Flink SQL source table?</summary>
+
+In the `CREATE TABLE` DDL you mark a column as the event-time attribute and add a `WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND` clause, which generates a bounded-out-of-orderness watermark. The column must be a `TIMESTAMP(3)` or `TIMESTAMP_LTZ(3)`, and that watermark drives all windowing TVFs over the table.
+
+</details>
+
+<details><summary><b>45.</b> What is the Kafka source/sink EOS wiring in Flink?</summary>
+
+The Kafka source (`KafkaSource`) tracks consumer offsets in Flink's checkpointed state (not via Kafka auto-commit) so on recovery it rewinds to the checkpointed offset. The `KafkaSink` with `DeliveryGuarantee.EXACTLY_ONCE` writes records inside a Kafka transaction per checkpoint cycle, pre-committing at the barrier and committing only when the checkpoint completes — a two-phase commit.
+
+</details>
+
+<details><summary><b>46.</b> When configuring `KafkaSink` for exactly-once, what extra setting is mandatory and why?</summary>
+
+You must call `setTransactionalIdPrefix(...)`, because exactly-once uses Kafka's transactional producer and Flink needs a stable, unique transactional-id prefix per sink to fence zombie producers and resume transactions correctly after recovery. Omitting it (while requesting `EXACTLY_ONCE`) is a configuration error; the prefix must be unique across all applications writing to that Kafka cluster.
+
+</details>
+
+<details><summary><b>47.</b> What is the two-phase-commit (2PC) sink and how does Flink coordinate it with checkpoints?</summary>
+
+A 2PC sink splits output into a pre-commit and a commit phase tied to checkpointing: as records process, the sink writes them into an external transaction (pre-commit), at the checkpoint barrier it persists enough to resume the transaction, and only when the checkpoint completes (notified by `notifyCheckpointComplete`) does it commit. Flink abstracts this in `TwoPhaseCommitSinkFunction` (and the newer unified-sink `TwoPhaseCommittingSink`), giving end-to-end exactly-once into transactional sinks.
+
+</details>
+
+<details><summary><b>48.</b> Why does committing a 2PC sink transaction on checkpoint completion (not on the barrier) give exactly-once?</summary>
+
+Because the checkpoint is the recovery point: if the job fails after pre-commit but before checkpoint completion, recovery restarts from the prior checkpoint and the uncommitted transaction is aborted, so no output leaks. Output becomes externally visible only for checkpoints that actually completed, so each record is committed exactly once and replayed records never produce a second visible commit.
+
+</details>
+
+<details><summary><b>49.</b> How do you write Flink results exactly-once into Iceberg?</summary>
+
+Use the Flink Iceberg sink (`FlinkSink` with a `TableLoader`), which buffers writes and commits new data files to the Iceberg table as an atomic snapshot tied to Flink checkpoints. Because the Iceberg commit is atomic and aligned to checkpoint completion, a job restart re-creates the same files without double-committing, giving exactly-once results in the lakehouse table on MinIO.
+
+</details>
+
+<details><summary><b>50.</b> A restored Flink job must produce byte-identical results to the pre-crash run — what makes that achievable?</summary>
+
+Determinism plus exactly-once recovery: event-time logic makes results depend on data and watermarks rather than wall clock, checkpoints restore state with sources rewound to the matching offsets, and a 2PC/idempotent sink ensures no duplicate or missing output. As long as the computation is deterministic (no random ordering, no processing-time dependence), replaying from the checkpoint yields identical output.
+
+</details>
+
+<details><summary><b>51.</b> What can make a Flink job non-deterministic and thus produce different results on restore?</summary>
+
+Reliance on processing time, wall-clock timers, random or `now()` values, non-deterministic UDFs, or non-deterministic input ordering across keys/partitions all break determinism. For reproducible NAV-feeding results you use event time, deterministic aggregations, stable partitioning, and avoid embedding the current time into outputs unless it is itself part of the checkpointed, replayable state.
+
+</details>
+
+<details><summary><b>52.</b> How does Spark Structured Streaming compare to Flink at a high level?</summary>
+
+Spark Structured Streaming defaults to a micro-batch model — it discretizes the stream into small batches executed by the Spark SQL engine — whereas Flink processes event-at-a-time natively. Spark reuses the batch engine and DataFrame API (familiar, strong ecosystem) but imposes a per-batch latency floor; Flink offers lower latency and richer event-time/state primitives at the cost of a separate operational model.
+
+</details>
+
+<details><summary><b>53.</b> What is the micro-batch latency floor and why does event-at-a-time avoid it?</summary>
+
+In micro-batch, results cannot appear faster than the trigger interval because records are buffered into a batch before processing, so end-to-end latency is at least one batch (often ~100 ms and up). Flink's event-at-a-time pipeline processes and emits each record as it arrives, so it has no inherent batch boundary and can reach lower latencies.
+
+</details>
+
+<details><summary><b>54.</b> What is Spark's continuous processing mode and its tradeoff?</summary>
+
+Continuous processing is an experimental Spark mode targeting ~1 ms end-to-end latency by running long-lived tasks instead of micro-batches. The tradeoff is it provides only at-least-once fault tolerance (versus exactly-once for micro-batch) and supports a limited set of operations, so for exactly-once stateful aggregations the micro-batch engine remains the production choice.
+
+</details>
+
+<details><summary><b>55.</b> When is Spark Structured Streaming "enough" versus needing Flink?</summary>
+
+Spark is enough when latency requirements are seconds-to-minutes, the team already runs Spark, and the logic is batch-shaped (windowed aggregations, joins) — for example minute-grained reconciliation. Flink wins when you need sub-second latency, complex event-time handling, large evolving keyed state with fine control, or per-record processing — for example a sub-second exposure monitor.
+
+</details>
+
+<details><summary><b>56.</b> How does Spark Structured Streaming persist and recover state?</summary>
+
+It writes progress and state to a configured `checkpointLocation` (offsets, commit log, and the state store) at the end of each micro-batch; on restart it reads the offset log to resume from the last committed batch and reloads state. The watermark is checkpointed at the end of every micro-batch and restored at the start of the next, so event-time cleanup continues correctly across restarts.
+
+</details>
+
+<details><summary><b>57.</b> Scenario — after a Flink job restart, the flow totals differ from before the crash. What do you check first?</summary>
+
+First confirm the job actually restored from the last completed checkpoint/savepoint rather than starting fresh (check the restore log line and the restored checkpoint id), and that the Kafka source resumed from checkpointed offsets, not Kafka-committed or `latest`. Then check for non-determinism (processing-time logic, unstable ordering) and that the sink is exactly-once/idempotent so no duplicates were re-emitted on replay.
+
+</details>
+
+<details><summary><b>58.</b> Scenario — a Flink windowed count is consistently too low for late-arriving fund orders. Which knob fixes it and at what cost?</summary>
+
+The window is firing before stragglers arrive because the watermark advances too aggressively, so increase the out-of-orderness bound and/or add `allowedLateness` so late orders re-fire and restate the window — and capture truly-late events in a side output. The cost is latency: results finalize later and the consumer must accept restatements of previously emitted totals.
+
+</details>
+
+<details><summary><b>59.</b> Scenario — Flink checkpoints keep timing out and the job is under heavy backpressure. First mitigations?</summary>
+
+Because aligned checkpoints stall behind buffered data under backpressure, enable unaligned checkpoints (or the adaptive aligned-checkpoint timeout) so barriers overtake in-flight data and checkpoint duration decouples from throughput. Also address the root backpressure (scale the slow operator, tune the sink) and consider RocksDB with incremental checkpoints if large state is part of the cost.
+
+</details>
+
+<details><summary><b>60.</b> Scenario — a savepoint restore fails after a code change with a state-incompatibility error. Likely causes?</summary>
+
+Most often the operator `uid`s changed (auto-generated and reshuffled by editing the graph) so state cannot be matched, or a state type's serializer changed incompatibly (renamed/retyped a field with no migration path). Fix by pinning stable `.uid(...)` on stateful operators, and for type changes use a compatible serializer (Avro/POJO) or an explicit migration rather than an in-place incompatible change.
+
+</details>
+
+<details><summary><b>61.</b> Scenario — the Iceberg table fed by Flink shows duplicate rows after a job restart. What is the first thing to check?</summary>
+
+Verify the sink is genuinely exactly-once: confirm the Iceberg/Flink sink commits are tied to checkpoint completion and that checkpointing is enabled and succeeding, because without checkpoints the 2PC sink cannot commit transactionally. Also check the source rewound to checkpointed offsets — if it replayed records into a non-transactional or append-only write path, you get duplicates.
+
+</details>
+
+<details><summary><b>62.</b> Why does enabling checkpointing matter for exactly-once sinks specifically?</summary>
+
+Two-phase-commit sinks only commit their transaction when a checkpoint completes, so if checkpointing is disabled or never completes, the sink either never commits (data stuck) or falls back to at-least-once behaviour. Exactly-once therefore requires a working checkpoint cycle with a reasonable interval; the checkpoint is literally the commit trigger.
+
+</details>
+
+<details><summary><b>63.</b> What is the relationship between checkpoint interval and end-to-end latency for a 2PC sink?</summary>
+
+Output becomes visible only at checkpoint completion, so the externally observable latency of a transactional sink is roughly bounded by the checkpoint interval plus commit time. A shorter interval lowers visibility latency but increases checkpoint overhead; you tune it to balance how fresh downstream NAV results must be against the I/O cost of frequent snapshots.
+
+</details>
+
+<details><summary><b>64.</b> What is backpressure in Flink and how is it signalled?</summary>
+
+Backpressure is a slow downstream operator forcing upstream operators to slow down because output buffers fill and cannot be drained. Flink propagates it through its credit-based flow control rather than dropping data, and you observe it in the web UI's backpressure metrics and via rising input-buffer usage and growing consumer lag at the source.
+
+</details>
+
+<details><summary><b>65.</b> How does Flink's credit-based flow control prevent data loss under backpressure?</summary>
+
+Each receiving subtask advertises buffer "credits" to senders, and a sender only transmits when the receiver has credit, so a slow consumer naturally throttles producers instead of overflowing buffers and dropping records. The slowdown propagates upstream to the source (which reads Kafka slower, growing lag) — flow is paused, never silently discarded.
+
+</details>
+
+<details><summary><b>66.</b> How would you point to backpressure in a running Flink job and prove it is not dropping data?</summary>
+
+In the Flink UI, the job graph colours operators by backpressure status and shows busy/backpressured percentages and buffer-pool usage; a backpressured operator plus rising Kafka consumer lag at the source confirms throttling. Because credit-based flow control pauses upstream rather than dropping, no records are lost — they wait in Kafka (durable) until the consumer catches up.
+
+</details>
+
+<details><summary><b>67.</b> Why is consumer lag the early-warning signal even for a stateful Flink job?</summary>
+
+Lag (committed/processed source offset versus log end offset) rises when Flink cannot keep up, which is the earliest external symptom of backpressure or an undersized job — well before checkpoints start failing. Monitoring lag per partition lets you act (scale, tune the slow sink) before the pipeline falls so far behind that NAV results become stale.
+
+</details>
+
+<details><summary><b>68.</b> What is a tumbling event-time window and when does it fit a fund metric?</summary>
+
+A tumbling window is fixed-size and non-overlapping (for example hourly buckets), assigning each event to exactly one window. It fits metrics defined over disjoint periods — intraday fund-flow totals per hourly bucket, or daily subscription/redemption counts — where each event must be counted once in exactly one period.
+
+</details>
+
+<details><summary><b>69.</b> What is a sliding window and when would a fund use it?</summary>
+
+A sliding window has a fixed size but advances by a smaller slide, so windows overlap and an event can belong to several windows (for example a 1-hour window sliding every 5 minutes). A fund would use it for a moving exposure or rolling-flow indicator that must update frequently while still summarizing a fixed look-back period.
+
+</details>
+
+<details><summary><b>70.</b> What is a session window and what defines its boundary?</summary>
+
+A session window groups events separated by gaps smaller than a configured inactivity gap, closing when no event arrives for that gap duration; window length is data-driven, not fixed. For fund data it suits bursty per-investor activity — grouping a flurry of related orders from one investor into one logical session for analysis.
+
+</details>
+
+<details><summary><b>71.</b> Why is event time, not processing time, the default for regulated finance windows?</summary>
+
+Because regulators care when a trade actually occurred, not when the pipeline happened to process it, and restatements demand reproducibility. Event time makes a window's membership depend on the embedded timestamp, so reprocessing the same input always yields the same totals; processing time would change results based on transient system speed, which is indefensible to an auditor.
+
+</details>
+
+<details><summary><b>72.</b> Give a fund example distinguishing event time from processing time.</summary>
+
+Event time is the timestamp on an order ("this subscription was placed at 14:59:50"); processing time is when Flink ingested it ("the message reached the consumer at 15:02 after a broker lag"). Bucketing intraday flows by event time keeps a 14:59 order in the 14:00–15:00 window even if it arrives at 15:02, which is what NAV-flow correctness requires.
+
+</details>
+
+<details><summary><b>73.</b> What is a trigger in the Beam/Flink windowing model?</summary>
+
+A trigger decides when a window emits a result relative to the watermark — on-time when the watermark passes the window end, optionally early (speculative) firings before completion, and late firings as stragglers arrive within allowed lateness. Triggers let you trade freshness against completeness, for example emitting a provisional intraday flow total early and restating it as late orders land.
+
+</details>
+
+<details><summary><b>74.</b> What are discarding, accumulating, and accumulating-and-retracting accumulation modes?</summary>
+
+Discarding emits only the delta since the last firing (downstream must sum); accumulating re-emits the full updated window result each firing (downstream overwrites); accumulating-and-retracting emits a retraction of the previous result plus the new one so downstream can correct exactly. For restated NAV-flow totals, accumulating (overwrite) or retracting modes are typical so the latest figure replaces the earlier provisional one.
+
+</details>
+
+<details><summary><b>75.</b> Why do late firings require thinking about accumulation mode downstream?</summary>
+
+Because a late firing re-emits or amends a window result, the sink must know whether it is receiving a delta, a full replacement, or a retraction-plus-new — get it wrong and you double-count or fail to correct. With accumulating mode the sink upserts on the window key; with retractions it applies the retract then the new value, keeping the stored total exact.
+
+</details>
+
+<details><summary><b>76.</b> What is the watermark latency-versus-completeness tradeoff in one sentence?</summary>
+
+A more conservative watermark (longer out-of-orderness bound) waits longer so it captures more late events and is more complete, but it delays window firing and thus increases latency; a more aggressive watermark fires sooner but risks treating real events as late.
+
+</details>
+
+<details><summary><b>77.</b> How do watermarks propagate through a multi-input Flink operator?</summary>
+
+An operator's output watermark is the minimum of the watermarks across all its input channels, because it can only assert completeness up to the slowest input. This is why one idle or lagging source partition can stall the whole job's event-time progress — its low (or absent) watermark holds back the minimum.
+
+</details>
+
+<details><summary><b>78.</b> What problem does watermark idleness handle and how do you configure it?</summary>
+
+If a Kafka partition receives no data, its watermark never advances, and since downstream takes the minimum, event time stalls and windows never fire. You mark such sources idle with `WatermarkStrategy.withIdleness(Duration.ofMinutes(n))`, so an idle partition is temporarily excluded from the minimum computation, letting active partitions advance the watermark.
+
+</details>
+
+<details><summary><b>79.</b> What is the role of `RichFunction.open()` in stateful Flink operators?</summary>
+
+`open()` is the lifecycle hook called once per subtask before processing begins, where you obtain state handles from the `RuntimeContext` (for example `getRuntimeContext().getState(descriptor)`) and initialize resources. State descriptors must be registered here because state access requires the runtime context, which is only available after the operator is opened.
+
+</details>
+
+<details><summary><b>80.</b> What is `notifyCheckpointComplete` and why do 2PC sinks rely on it?</summary>
+
+It is a callback Flink invokes on operators after a checkpoint has fully completed and been confirmed durable. A two-phase-commit sink uses it as the signal to commit the external transaction it pre-committed at the barrier, because only at this point is the checkpoint guaranteed recoverable — committing earlier could leak output that a failed checkpoint would have had to abort.
+
+</details>
+
+<details><summary><b>81.</b> What happens to a 2PC sink's pre-committed transaction if the job fails before the checkpoint completes?</summary>
+
+On recovery from the previous checkpoint, the pre-committed-but-not-committed transaction is aborted (or simply never committed and times out), so its output is not externally visible. This is precisely what preserves exactly-once: only transactions whose checkpoint completed are committed, so replayed records do not produce duplicate visible writes.
+
+</details>
+
+<details><summary><b>82.</b> What is the difference between checkpoint storage `JobManagerCheckpointStorage` and `FileSystemCheckpointStorage`?</summary>
+
+`JobManagerCheckpointStorage` keeps checkpoint data in the JobManager's heap memory — only viable for tiny state and testing, with a bounded size. `FileSystemCheckpointStorage` writes checkpoints to a durable file system or object store (S3/MinIO/HDFS) via a configured path, which is what production jobs use so checkpoints survive a full cluster restart.
+
+</details>
+
+<details><summary><b>83.</b> For the Phase-4 lab, where would you checkpoint Flink state and why?</summary>
+
+To MinIO (S3-compatible object storage) via `FileSystemCheckpointStorage` with an `s3://` path, because object storage is durable and survives TaskManager/JobManager loss, which heap-based storage does not. This mirrors the production pattern (S3/ADLS) and lets a restarted job recover state independently of which node it lands on.
+
+</details>
+
+<details><summary><b>84.</b> Why can a heap state backend still checkpoint to object storage?</summary>
+
+Because state backend (where live state lives — JVM heap for `HashMapStateBackend`) and checkpoint storage (where snapshots are persisted) are independent settings. You can run fast heap working state and still configure `FileSystemCheckpointStorage` pointing at MinIO so snapshots are durable — the split exists exactly to allow this combination.
+
+</details>
+
+<details><summary><b>85.</b> What is `maxParallelism` and why does it cap rescaling?</summary>
+
+`maxParallelism` fixes the number of key groups, which is the granularity at which keyed state is distributed and reassigned on rescale; an operator's actual parallelism can never exceed it. Because changing it would require rehashing all keys (invalidating existing snapshots), it is set at job creation and cannot be changed by a savepoint restore, so choose it generously up front.
+
+</details>
+
+<details><summary><b>86.</b> How do you rescale a stateful Flink job and what enables it?</summary>
+
+Take a savepoint, then restart the job with a new parallelism from that savepoint; Flink redistributes keyed state by reassigning whole key groups to the new set of subtasks. Rescaling is bounded by `maxParallelism` (you cannot exceed the key-group count), which is why that value is the true ceiling on a job's scalability.
+
+</details>
+
+<details><summary><b>87.</b> What is an `AggregateFunction` in Flink and why prefer it for windowed sums?</summary>
+
+`AggregateFunction<IN, ACC, OUT>` defines incremental aggregation — `add`, `merge`, `getResult` — so the window maintains only a small accumulator rather than buffering every event. For per-share-class flow totals it is far more memory-efficient than a `ProcessWindowFunction` that holds all events, and you can combine the two to get incremental aggregation plus window metadata.
+
+</details>
+
+<details><summary><b>88.</b> How do you get both incremental aggregation and window-context metadata?</summary>
+
+Combine an `AggregateFunction` with a `ProcessWindowFunction` via the windowed `aggregate(aggFn, processFn)` overload: the aggregate keeps a compact accumulator, and the process function receives the pre-aggregated result plus the window's start/end and key. This gives memory-efficient totals while still emitting, say, the share class and window boundaries needed to upsert into Iceberg.
+
+</details>
+
+<details><summary><b>89.</b> What does it mean that managed cloud streaming "runs Flink underneath," and why care?</summary>
+
+Services like AWS Managed Service for Apache Flink and Confluent Flink expose Flink (SQL or DataStream) as a managed offering, handling cluster ops while preserving Flink semantics. As architect you care because the concepts you debug locally — checkpoints, watermarks, state backends — transfer directly, and a build-vs-buy decision is largely about ops burden and lock-in, not a different programming model.
+
+</details>
+
+<details><summary><b>90.</b> How does Azure Stream Analytics fit a build-vs-buy comparison against self-managed Flink?</summary>
+
+Azure Stream Analytics is the Azure-native, fully managed streaming option with a SQL-like language and tight Azure integration, attractive for low-ops simple windowed jobs. Compared to self-managed Flink it trades flexibility and portability (you cannot drop to arbitrary `ProcessFunction` code, and you are tied to Azure) for far lower operational overhead — the architect weighs that per workload.
+
+</details>
+
+<details><summary><b>91.</b> What is the difference between a window's allowed lateness and the watermark's out-of-orderness bound?</summary>
+
+The out-of-orderness bound (in the `WatermarkStrategy`) delays the watermark so the window fires later and counts more events before its on-time firing. Allowed lateness applies after the window's on-time firing, keeping state alive so even-later events re-fire and restate it; together they form a two-stage tolerance — wait a bit before firing, then correct for a while after.
+
+</details>
+
+<details><summary><b>92.</b> Why might you choose RocksDB even when state fits in heap?</summary>
+
+To get incremental checkpoints (only RocksDB supports them), which keep checkpoint size and duration small and predictable for a continuously updated state, and to avoid GC pauses that hurt latency tails. The point lookups are slower, but for jobs where checkpoint stability and bounded GC matter more than per-record latency, RocksDB is the safer operational choice.
+
+</details>
+
+<details><summary><b>93.</b> What is the practical difference between stop-with-savepoint and a plain cancel?</summary>
+
+Stop-with-savepoint (`flink stop --savepointPath ...`) drains the pipeline, advances watermarks/finishes in-flight work, takes a final savepoint, and stops cleanly — ideal for upgrades. A plain cancel stops immediately without a fresh snapshot, so you would have to restore from the last automatic checkpoint, potentially losing the most recent progress and any clean drain.
+
+</details>
+
+<details><summary><b>94.</b> In the EOS chain Kafka source → Flink → Kafka/Iceberg sink, where exactly does each guarantee live?</summary>
+
+The source guarantees no-loss/no-double via checkpointed offsets (rewind on recovery); Flink guarantees exactly-once state via barriers and checkpoints; the sink guarantees no duplicate external output via a transactional/2PC commit tied to checkpoint completion. Break any link — for example a non-transactional sink — and the end-to-end claim degrades to at-least-once at that edge.
+
+</details>
+
+<details><summary><b>95.</b> Why is "exactly-once" a property of the whole pipeline, not just Flink?</summary>
+
+Flink's checkpointing only makes its internal state exactly-once; on replay it re-emits output, so without a transactional or idempotent sink the external world sees duplicates. End-to-end exactly-once requires every boundary to cooperate — checkpointed sources, exactly-once internal processing, and a sink that commits transactionally or deduplicates — which is why architects audit the claim edge by edge.
+
+</details>
+
+<details><summary><b>96.</b> How does an idempotent sink achieve effectively-once without 2PC?</summary>
+
+An idempotent sink makes re-applying the same record a no-op — for example upserting on a primary key (ISIN + window) so a replayed record overwrites rather than appends. Combined with Flink's at-least-once delivery on replay, the net external effect is exactly-once ("effectively-once") without coordinating a distributed transaction, which is often simpler than 2PC.
+
+</details>
+
+<details><summary><b>97.</b> What determines whether you use a 2PC sink versus an idempotent sink for a fund result?</summary>
+
+Use an idempotent sink when the target supports natural upserts/dedup on a stable key (most lakehouse merges, keyed stores) — it is simpler and avoids transaction coordination. Use a 2PC/transactional sink when output must be atomic and the target cannot dedupe append-only writes (for example transactional Kafka output or systems without an upsert key), accepting the extra coordination cost.
+
+</details>
+
+<details><summary><b>98.</b> What is the danger of running Flink at-least-once into a non-idempotent NAV store?</summary>
+
+On recovery Flink replays records, and a non-idempotent store (plain append/insert) will record each replayed flow twice, silently inflating a NAV-flow total — exactly the kind of duplicated figure compliance discovers downstream. The fix is to make the store idempotent (upsert on key) or wrap output in a transactional sink so replays do not double-apply.
+
+</details>
+
+<details><summary><b>99.</b> How does a Flink keyed window cause memory growth if misconfigured, and how do you bound it?</summary>
+
+Long allowed-lateness, many distinct keys, or session windows that never close retain window state indefinitely, growing memory until the job fails. Bound it by setting realistic allowed-lateness, using `EmbeddedRocksDBStateBackend` to spill to disk for large state, applying state TTL where appropriate, and using incremental aggregation so each window holds an accumulator rather than raw events.
+
+</details>
+
+<details><summary><b>100.</b> What is state TTL in Flink and when is it useful?</summary>
+
+State TTL (`StateTtlConfig`) automatically expires keyed-state entries after a configured time-to-live, freeing state for keys that go silent. It is useful for unbounded key spaces — for example per-investor or per-ISIN state where old, inactive keys would otherwise accumulate forever — preventing slow state growth that eventually exhausts the backend.
+
+</details>
+
+
+## Phase 4 · 1.8.3 + 1.8.4 Outbox & saga (implemented) — 100 self-test questions
+
+<details><summary><b>1.</b> What is the "dual-write" problem the transactional outbox pattern exists to solve?</summary>
+
+Dual-write is when a service must update its own database and also publish an event to a broker as two separate writes that are not in one atomic unit. If the process crashes between the database commit and the publish, the state change is persisted but the event is lost (or vice versa), corrupting every downstream consumer. The outbox eliminates the race by making the event a row written inside the same local database transaction as the state change.
+
+</details>
+
+<details><summary><b>2.</b> In one sentence, how does the transactional outbox pattern work?</summary>
+
+Instead of publishing to the broker directly, the service inserts the event as a row into an `outbox` table within the same database transaction that performs the business state change, so both commit or neither does. A separate relay process then reads new outbox rows and publishes them to the broker. This converts an unsafe distributed dual-write into a single local atomic write plus an at-least-once relay.
+
+</details>
+
+<details><summary><b>3.</b> Why does writing the event into the same transaction as the state change give you atomicity?</summary>
+
+A single database transaction is ACID, so the business-row update and the outbox-row insert either both commit or both roll back as one unit. There is no window in which the state changed but the event row is missing. The broker publish becomes a downstream concern handled by the relay, decoupled from the transactional boundary.
+
+</details>
+
+<details><summary><b>4.</b> What are the two distinct responsibilities the outbox pattern separates?</summary>
+
+First, capturing the event reliably — inserting it into the outbox table inside the business transaction so it can never be lost. Second, relaying the event — a separate, asynchronous process that reads committed outbox rows and publishes them to the broker. Keeping these separate is what lets the capture be transactional while the publish is at-least-once.
+
+</details>
+
+<details><summary><b>5.</b> What delivery guarantee does the outbox relay give you, and why not exactly-once?</summary>
+
+It gives at-least-once delivery: the relay may crash after publishing but before marking the row processed, so it republishes on restart and the same event can appear more than once. True end-to-end exactly-once across a database and a broker would need distributed transactions, which the outbox deliberately avoids. The duplicates are made harmless by idempotent consumers downstream.
+
+</details>
+
+<details><summary><b>6.</b> Name the two common families of outbox relay implementations.</summary>
+
+The "polling publisher", where a relay process periodically queries the outbox table for unsent rows, publishes them, and marks them sent. And "transaction log tailing" (change data capture), where a tool like Debezium reads the database's write-ahead log and emits an event for every outbox row insert. CDC tailing avoids polling lag and load but requires log-level access to the database.
+
+</details>
+
+<details><summary><b>7.</b> What is the main drawback of a polling-publisher outbox relay versus log tailing?</summary>
+
+Polling adds latency (you only publish as often as you poll) and load (every poll queries the table even when empty), and you must manage marking or deleting sent rows to avoid rescanning them. Log tailing reads the write-ahead log instead, so it reacts to commits with near-zero added query load and lower latency. The trade-off is that tailing needs replication-level database privileges and a CDC connector.
+
+</details>
+
+<details><summary><b>8.</b> What does CDC stand for and how does it relate to the outbox?</summary>
+
+CDC is change data capture — reading a database's transaction log (the WAL in PostgreSQL) to stream every committed row change as an event. For the outbox, a CDC tool tails the log and emits an event for each new outbox-table insert, so you get the relay "for free" without polling. Debezium is the canonical open-source CDC platform used this way.
+
+</details>
+
+<details><summary><b>9.</b> Which PostgreSQL feature does Debezium use to capture the outbox table's inserts?</summary>
+
+Logical replication via a replication slot reading the write-ahead log (WAL) through an output plugin such as `pgoutput`. Debezium decodes the WAL into change events, so an `INSERT` into the outbox table becomes a create event. You must run PostgreSQL with `wal_level = logical` for this to work.
+
+</details>
+
+<details><summary><b>10.</b> What is the role of the Debezium Outbox Event Router?</summary>
+
+It is a Kafka Connect Single Message Transform (SMT) that takes the raw CDC change event for an outbox-row insert and reshapes it into a clean, business-meaningful Kafka message: extracting the payload, routing it to the right topic, and setting the key and headers. Without it, consumers would see a generic Debezium envelope describing a row insert rather than a domain event. It turns the outbox table into a set of clean event topics.
+
+</details>
+
+<details><summary><b>11.</b> What is the fully qualified class name of the Debezium relational Outbox Event Router SMT?</summary>
+
+`io.debezium.transforms.outbox.EventRouter`. You add it to the Kafka Connect connector configuration as a transform of this type. There is a separate `io.debezium.connector.mongodb.transforms.outbox.MongoEventRouter` for MongoDB sources.
+
+</details>
+
+<details><summary><b>12.</b> What columns does the Debezium Outbox Event Router expect by default in the outbox table?</summary>
+
+By default it expects `id`, `aggregatetype`, `aggregateid`, `type`, and `payload`. `id` is the unique event id, `aggregatetype` drives the topic, `aggregateid` becomes the message key, `type` is the event type, and `payload` is the event body. Each of these is configurable if your column names differ.
+
+</details>
+
+<details><summary><b>13.</b> By default, which outbox column does the Debezium router use to choose the Kafka topic?</summary>
+
+The `aggregatetype` column, controlled by the `route.by.field` option whose default value is `aggregatetype`. So a row with `aggregatetype = 'Order'` is routed based on that value. This lets one outbox table feed many topics, one per aggregate type.
+
+</details>
+
+<details><summary><b>14.</b> What is the default Debezium topic-naming expression and what topic does `aggregatetype = 'Order'` produce?</summary>
+
+The `route.topic.replacement` option defaults to `outbox.event.${routedByValue}`, so `aggregatetype = 'Order'` produces the topic `outbox.event.Order`. The `${routedByValue}` placeholder is substituted with the value of the routing column. You override `route.topic.replacement` to change the prefix or naming scheme.
+
+</details>
+
+<details><summary><b>15.</b> Which outbox column becomes the Kafka message key by default in the Debezium router, and why does the key matter?</summary>
+
+The `aggregateid` column, set by `table.field.event.key` (default `aggregateid`). Using the aggregate id as the key means all events for the same aggregate (e.g. one order or one investor account) land in the same partition and stay strictly ordered. That ordering guarantee is essential for consumers that fold events into per-aggregate state.
+
+</details>
+
+<details><summary><b>16.</b> What does the `table.field.event.id` option default to, and where does that value end up?</summary>
+
+It defaults to `id`, the unique event identifier column. The router places this id into a message header (by default a header named `id`) so consumers can deduplicate on it. This event id is the linchpin of idempotent-consumer deduplication.
+
+</details>
+
+<details><summary><b>17.</b> What does `table.field.event.payload` default to, and what happens to that column?</summary>
+
+It defaults to `payload`. The router uses that column's contents as the Kafka message value (the event body), typically JSON, rather than emitting Debezium's generic row-change envelope. So consumers receive the clean domain payload your service wrote, not a CDC wrapper.
+
+</details>
+
+<details><summary><b>18.</b> What is `table.fields.additional.placement` used for in the Debezium router?</summary>
+
+It lets you carry extra outbox columns into the emitted message, placing each either in a Kafka header or in the message envelope. The syntax is `column:placement[:alias]`, where placement is `header` or `envelope`. This is how you propagate things like a trace id, tenant, or schema version alongside the payload.
+
+</details>
+
+<details><summary><b>19.</b> What does `route.tombstone.on.empty.payload` control and what is its default?</summary>
+
+It controls whether an outbox row with an empty or null payload causes the router to emit a Kafka tombstone (a record with a null value), and it defaults to `false`. Tombstones are used to signal deletion in log-compacted topics. With the default `false`, an empty payload does not produce a tombstone.
+
+</details>
+
+<details><summary><b>20.</b> Why is JSON or Avro in the `payload` column preferable to letting Debezium emit the raw row-change envelope?</summary>
+
+The raw CDC envelope describes a database operation ("a row was inserted with these columns") and is coupled to your table schema, leaking internal storage details to consumers. A curated `payload` is a stable, versioned domain event contract decoupled from the table. The outbox router exists precisely to swap the storage-shaped envelope for the contract-shaped payload.
+
+</details>
+
+<details><summary><b>21.</b> In a fund order service, what would a typical row in the outbox table look like conceptually?</summary>
+
+For booking a subscription order you might write a row with `aggregatetype = 'Order'`, `aggregateid` = the order id, `type = 'OrderCreated'`, and `payload` = JSON containing the ISIN, investor id, amount, and currency. It is inserted in the same transaction that inserts the order itself. Debezium then routes it to `outbox.event.Order` keyed by the order id.
+
+</details>
+
+<details><summary><b>22.</b> An idempotent consumer is one that does what?</summary>
+
+It processes the same message more than once without producing a different or duplicated effect — applying the event twice yields the same final state as applying it once. This is required because the outbox relay is at-least-once and brokers redeliver after failures. Idempotency is what makes at-least-once delivery safe to build on.
+
+</details>
+
+<details><summary><b>23.</b> How do you typically make a consumer idempotent in the outbox pattern?</summary>
+
+Give every event a unique id (the outbox `id`), and have the consumer record processed ids in a deduplication table or store; before applying an event it checks whether that id was already handled and skips it if so. The processed-id record and the resulting state change are written in the same local transaction. This guarantees the effect happens exactly once even though delivery is at-least-once.
+
+</details>
+
+<details><summary><b>24.</b> Why must the dedup-id record and the state change be written in the same transaction in an idempotent consumer?</summary>
+
+If you applied the state change first and then crashed before recording the id, a redelivery would re-apply the change and double its effect; if you recorded the id first and then crashed, the change would be lost but treated as done. Writing both atomically closes both windows. It is the consumer-side mirror of the outbox's producer-side atomicity.
+
+</details>
+
+<details><summary><b>25.</b> Besides a dedup table, name another way to achieve idempotent application of an event.</summary>
+
+Make the operation itself naturally idempotent — e.g. an upsert keyed by a stable id, or a "set position to X" assignment rather than "add to position". Conditional updates guarded by a version or sequence number also work. When the operation is inherently idempotent you may not need an explicit dedup table at all.
+
+</details>
+
+<details><summary><b>26.</b> What is a saga?</summary>
+
+A saga is a way to maintain data consistency across multiple services without a distributed (two-phase-commit) transaction, by breaking a business transaction into a sequence of local transactions. Each local transaction commits in its own service and triggers the next step via an event or command. If a step fails, the saga runs compensating transactions to undo the previously committed steps.
+
+</details>
+
+<details><summary><b>27.</b> Why can't you just use a single ACID transaction or two-phase commit for a multi-service trade lifecycle?</summary>
+
+Each microservice owns its own database, so there is no single transaction manager spanning them, and two-phase commit (2PC) is a blocking, tightly-coupled protocol that scales and fails poorly across independent services and brokers. The saga trades the strong isolation of 2PC for availability and loose coupling, accepting that consistency is achieved over time via compensations. The architect's job is to design those compensations so the eventual state is correct.
+
+</details>
+
+<details><summary><b>28.</b> Define choreography-based saga coordination.</summary>
+
+In choreography there is no central coordinator: each service performs its local transaction and publishes domain events, and other services subscribe to those events and react with their own local transactions. The workflow emerges from the chain of events. Control is fully distributed across the participants.
+
+</details>
+
+<details><summary><b>29.</b> Define orchestration-based saga coordination.</summary>
+
+In orchestration a central orchestrator object tells each participant which local transaction to execute next, stores and interprets the state of the overall saga, and drives compensations on failure. Participants do work when commanded and report back. The flow logic lives in one place rather than being implicit in event subscriptions.
+
+</details>
+
+<details><summary><b>30.</b> Give two advantages of choreography over orchestration.</summary>
+
+It needs no extra coordination service and introduces no single point of failure because responsibility is spread across participants, and it is well suited to simple workflows with few services. It also keeps each service autonomous, reacting only to events it cares about. The cost is that the overall flow is implicit and harder to see.
+
+</details>
+
+<details><summary><b>31.</b> Give two drawbacks of choreography.</summary>
+
+The workflow becomes hard to follow as you add steps — it is difficult to know which service responds to which event — and there is a risk of cyclic dependencies because participants consume each other's events. Integration testing is also harder because you must run all participating services to exercise one transaction. These costs grow with workflow complexity.
+
+</details>
+
+<details><summary><b>32.</b> Give two advantages of orchestration over choreography.</summary>
+
+It handles complex workflows and the addition of new services more cleanly, and it avoids cyclic dependencies because the orchestrator centrally manages the flow. It also gives a clear separation of responsibilities and a single place to observe and reason about saga state. The flow is explicit rather than emergent.
+
+</details>
+
+<details><summary><b>33.</b> What is the principal drawback of orchestration?</summary>
+
+The orchestrator is additional design and infrastructure that you must build and operate, and it concentrates the coordination logic in one place that becomes a potential single point of failure. You also risk pushing too much business logic into the orchestrator, turning participants into anaemic CRUD services. Mitigations include making the orchestrator highly available and keeping business rules in the services.
+
+</details>
+
+<details><summary><b>34.</b> When should you reach for orchestration instead of choreography?</summary>
+
+When the workflow is complex, has many steps or participants, requires clear visibility into saga state, or is likely to change and grow — orchestration's centralized control and explicit flow pay off. Choreography is preferable for short, stable, low-fanout flows. A 3-step subscription saga could go either way, but a full trade lifecycle with many participants argues for orchestration.
+
+</details>
+
+<details><summary><b>35.</b> A 3-step subscription saga is "reserve cash, book units, confirm". Sketch how this runs as a choreography.</summary>
+
+The order service emits `CashReservationRequested`; the cash service reserves cash and emits `CashReserved`; the register service books units and emits `UnitsBooked`; the order service then confirms and emits `SubscriptionConfirmed`. Each step is a local transaction triggered by the prior event. There is no orchestrator — the flow is the chain of events.
+
+</details>
+
+<details><summary><b>36.</b> What is a compensating transaction in a saga?</summary>
+
+It is a local transaction that semantically undoes the effect of a previously committed step when a later step fails — for example releasing reserved cash after unit booking fails. Because the original step already committed in its own service, you cannot roll it back automatically; you must explicitly perform an inverse action. Compensations are how a saga reaches a consistent state after a partial failure.
+
+</details>
+
+<details><summary><b>37.</b> Why is "semantic undo" the right phrase for compensation rather than "rollback"?</summary>
+
+A database rollback removes an uncommitted change as if it never happened, but saga steps have already committed and may have had observable side effects, so you cannot literally rewind them. Instead you apply a new transaction whose business meaning negates the original — release the reservation, issue a refund, cancel the booking. The history still shows the original action plus its compensation, which is exactly what an auditor wants to see.
+
+</details>
+
+<details><summary><b>38.</b> In the subscription saga, what is the compensation for "reserve cash" when "book units" fails?</summary>
+
+A "release cash reservation" local transaction in the cash service that frees the previously reserved amount back to the available balance. It is triggered when the saga learns that unit booking failed. After it commits, no cash is left reserved against units that were never issued.
+
+</details>
+
+<details><summary><b>39.</b> What are the three types of transaction in Richardson's saga model?</summary>
+
+Compensatable transactions, which can be undone by a later compensating transaction; the pivot transaction, which is the go/no-go point of no return; and retriable transactions, which follow the pivot and are guaranteed to eventually succeed. Ordering steps into these three categories is central to a clean compensation design. Everything before the pivot must be compensatable; everything after must be retriable.
+
+</details>
+
+<details><summary><b>40.</b> What is the pivot transaction in a saga?</summary>
+
+It is the point of no return: once it commits, the saga is committed to completing and there is no going back via compensation. A pivot may be an irreversible step (it cannot be undone), or simply the boundary — the last compensatable step or the first retriable one. Designing where the pivot sits is a key part of saga design because it fixes which steps need compensations.
+
+</details>
+
+<details><summary><b>41.</b> What is a retriable transaction and why must it never fail permanently?</summary>
+
+A retriable transaction comes after the pivot and is designed to be idempotent and to eventually succeed through retries even after transient failures. It must not fail permanently because there is no compensation path after the pivot — the saga is already committed to finishing. So steps that genuinely could fail in a business sense belong before the pivot, as compensatable transactions.
+
+</details>
+
+<details><summary><b>42.</b> Why should you order saga steps so that all compensatable steps precede the pivot and all retriable steps follow it?</summary>
+
+Because anything before the pivot can be cleanly undone, you put the steps most likely to fail (validations, reservations, business-rule checks) there. Once you pass the pivot you can no longer compensate, so everything after must be guaranteed-to-succeed retriable work. Getting this ordering right is what makes a partial failure recoverable rather than corrupting.
+
+</details>
+
+<details><summary><b>43.</b> What is the fundamental ACID property a saga gives up, and what does that cause?</summary>
+
+It gives up Isolation — the "I" in ACID — because the intermediate, uncommitted-from-a-business-view results of one saga are visible to other concurrent sagas. This lack of isolation causes anomalies such as lost updates, dirty reads, and fuzzy (non-repeatable) reads. Countermeasures must be designed in deliberately to restore enough isolation.
+
+</details>
+
+<details><summary><b>44.</b> Name the three classic data anomalies that arise from a saga's lack of isolation.</summary>
+
+Lost updates, where one saga overwrites a change made by another saga; dirty reads, where a saga reads data another saga has modified but not yet finalized (and may later compensate away); and fuzzy or non-repeatable reads, where two reads in the same saga see different values because another saga wrote in between. These are the concurrency hazards the saga's missing isolation exposes.
+
+</details>
+
+<details><summary><b>45.</b> What is the "dirty read" anomaly in a saga, with a fund example?</summary>
+
+A dirty read is when a saga reads a value that another in-flight saga has changed but might still compensate (undo). For example saga A reserves cash, lowering an investor's available balance; saga B reads that lowered balance and rejects a second subscription — but then A fails and releases the cash, so B rejected based on a value that was rolled back. The read was of dirty, uncommitted-from-the-business-view data.
+
+</details>
+
+<details><summary><b>46.</b> What is the "dirty compensation" / dirty-write hazard that compensation design must avoid?</summary>
+
+It is when a compensating transaction overwrites or releases something based on a stale assumption, undoing more than it should because another saga touched the same data in between. For instance releasing a fixed cash amount when part of it was meanwhile legitimately consumed by another operation. Avoiding it requires countermeasures like rereading the value or using semantic locks so compensation acts only on what its own saga actually changed.
+
+</details>
+
+<details><summary><b>47.</b> What is the "semantic lock" countermeasure?</summary>
+
+A semantic lock is an application-level flag a compensatable transaction sets on any record it creates or updates, marking it as "in progress / not yet final". Other sagas that encounter the flag know the data may still change and can wait, fail, or handle it explicitly. It restores a form of isolation without a database lock, at the cost of having to manage and clear the flag.
+
+</details>
+
+<details><summary><b>48.</b> What are "commutative updates" as a saga countermeasure?</summary>
+
+They are updates designed so that applying them in any order produces the same final result, which removes the lost-update and ordering hazards between concurrent sagas. For example crediting and debiting a balance commute, whereas "set balance to X" does not. Where you can model state changes as commutative deltas, two sagas interleaving cannot corrupt each other.
+
+</details>
+
+<details><summary><b>49.</b> Explain the "pessimistic view" countermeasure.</summary>
+
+It reorders the saga so that the riskier updates — those that grant a resource or increase a value others might read — are moved to retryable transactions after the pivot, so no other saga can dirty-read a temporary grant that later gets compensated away. By the time the value is visible it will not be rolled back. It trades some flexibility in step ordering for elimination of certain dirty reads.
+
+</details>
+
+<details><summary><b>50.</b> Explain the "reread value" countermeasure.</summary>
+
+Before a step updates a record, it rereads the record and verifies it has not changed since the saga last saw it; if it changed, the saga aborts or restarts that step rather than overwriting another saga's update. This prevents lost updates and dirty writes. It is essentially optimistic concurrency applied within the saga.
+
+</details>
+
+<details><summary><b>51.</b> Explain the "version file" countermeasure.</summary>
+
+A version file records the sequence of operations performed on a record so that operations which are not naturally commutative can be reordered and applied in the correct logical order, effectively making them commutative. It lets out-of-order saga messages be sorted before they take effect. This protects against anomalies caused by reordering of concurrent operations.
+
+</details>
+
+<details><summary><b>52.</b> What is the "by value" (risk-based concurrency) countermeasure?</summary>
+
+It chooses the concurrency mechanism dynamically based on the business risk of each request: low-risk operations use sagas with their relaxed isolation, while high-risk operations (large amounts, sensitive accounts) fall back to stricter mechanisms such as distributed transactions. You spend the cost of strong isolation only where the stakes justify it. It is a pragmatic, value-driven mix rather than one policy everywhere.
+
+</details>
+
+<details><summary><b>53.</b> Why does a regulated fund platform care intensely about getting compensation design right?</summary>
+
+Because a half-completed subscription that reserves cash but never issues units, with no clean compensation, leaves money tied up against nothing — a reconciliation and reporting problem the transfer agent and auditors will surface. Incorrect compensation can also double-release or mis-state investor positions, breaching the accuracy obligations around NAV and the share register. The architect must design failures to resolve automatically into a provably consistent state.
+
+</details>
+
+<details><summary><b>54.</b> What does "timeout and dead-man handling" mean in a saga?</summary>
+
+It is what the saga does when a participant never replies — neither success nor failure — because it crashed, the message was lost, or it is hung. The saga cannot wait forever, so it sets a timeout after which it treats the step as failed and triggers compensation, or routes the stuck message for human handling. Without this, one silent participant freezes the whole business transaction.
+
+</details>
+
+<details><summary><b>55.</b> What happens to a saga step that hangs indefinitely if you have no timeout?</summary>
+
+The saga blocks on that step forever, leaving earlier steps' changes (e.g. reserved cash) committed but uncompensated and the business transaction neither completed nor reversed. Resources stay locked or reserved, and the inconsistency accumulates silently. A timeout converts the silent hang into a definite outcome the saga can act on.
+
+</details>
+
+<details><summary><b>56.</b> After a saga step times out, what are the safe options the design must choose between?</summary>
+
+Either treat the step as failed and run compensations to unwind the saga, or retry the step if it is past the pivot and must eventually succeed, or park the case for human intervention with full diagnostic context. The right choice depends on whether the step is compensatable or retriable. The decision must be deterministic and recorded, never left to chance.
+
+</details>
+
+<details><summary><b>57.</b> Why is idempotency a prerequisite for safely retrying or timing out saga steps?</summary>
+
+Because after a timeout you do not know whether the participant actually performed the work before going silent, so a retry might be a duplicate. Only if the operation is idempotent can you retry safely without double-booking units or double-reserving cash. Idempotency is therefore baked into both the consumer side and the retriable steps of a saga.
+
+</details>
+
+<details><summary><b>58.</b> Where do saga orchestrators like Temporal and Camunda fit?</summary>
+
+They are workflow/orchestration engines that act as the saga orchestrator: they durably persist the saga's state, drive each step, enforce timeouts, and run compensations automatically on failure, so you do not hand-code that coordination. They turn the orchestration pattern into managed, restartable, observable workflows. They are previewed here and revisited in later lessons as the production way to run complex sagas.
+
+</details>
+
+<details><summary><b>59.</b> What does an orchestration engine give you over hand-rolled choreography for a complex trade lifecycle?</summary>
+
+Durable state that survives crashes and resumes exactly where it left off, built-in timers and timeouts, automatic retry and compensation handling, and a single place to observe and audit the whole workflow. Hand-rolled choreography scatters this across many event handlers and is hard to see or debug. For a long, multi-step regulated workflow, the engine's durability and visibility are decisive.
+
+</details>
+
+<details><summary><b>60.</b> Why is debugging a saga harder than debugging a single transaction, and how do you mitigate it?</summary>
+
+Because the business operation is spread across several services and (in choreography) several event hops, no single stack trace or log shows the whole flow, and partial failures interleave with compensations. You mitigate it with correlation/trace ids carried on every event, centralized saga-state tracking or an orchestrator, and an audit log that records each step and compensation. The lesson's "Done when" requires the audit log alone to explain a failure.
+
+</details>
+
+<details><summary><b>61.</b> What does "the audit log alone explains the whole failure-and-compensation sequence" require of your event design?</summary>
+
+Every step — each local transaction, each failure, and each compensation — must emit a durable, correlated, timestamped record, so that reading the log end to end tells the full story without inspecting service internals. Events need a shared correlation id and meaningful types. This is exactly what event sourcing and a disciplined outbox give you, and it is the regulated-finance acceptance bar.
+
+</details>
+
+<details><summary><b>62.</b> How do the outbox pattern and sagas combine in this lesson's design?</summary>
+
+Each saga step is a local transaction that, in the same database commit, writes its state change and an outbox event; Debezium relays those events to topics, and the next participant (or orchestrator) consumes them. This guarantees that every saga step's event is published exactly when and only when the step committed — no dual-write loss. The outbox is what makes the saga's event-driven coordination reliable.
+
+</details>
+
+<details><summary><b>63.</b> A consumer is processing duplicate events and double-booking units. What is the first thing to check?</summary>
+
+Whether the consumer is idempotent — does it deduplicate on the event id before applying the effect? The outbox relay is at-least-once, so duplicates are expected; the consumer, not the producer, must absorb them. Check that a dedup record keyed by the outbox `id` is written in the same transaction as the booking and that the check actually runs before the effect.
+
+</details>
+
+<details><summary><b>64.</b> Your Debezium outbox events are all landing on one topic instead of per-aggregate topics. What do you check first?</summary>
+
+Check `route.by.field` and the `aggregatetype` column: if every row has the same (or null) `aggregatetype`, or `route.by.field` points at the wrong column, all events route to the same `route.topic.replacement` result. Confirm the outbox rows actually carry distinct aggregate types. Then verify `route.topic.replacement` is producing the topic names you expect.
+
+</details>
+
+<details><summary><b>65.</b> Debezium is emitting verbose row-change envelopes instead of clean payloads on your topics. What is likely misconfigured?</summary>
+
+The Outbox Event Router SMT is probably not applied (or not first) in the connector's `transforms` chain, so consumers see the raw CDC envelope rather than the extracted `payload`. Confirm the transform of type `io.debezium.transforms.outbox.EventRouter` is configured and that `table.field.event.payload` points at your payload column. Without the router, the payload extraction and routing do not happen.
+
+</details>
+
+<details><summary><b>66.</b> Orders are committing but no events ever reach Kafka. Walk through the first checks.</summary>
+
+Confirm the outbox rows are actually being inserted in the same transaction (look in the table), then confirm PostgreSQL has `wal_level = logical` and the Debezium connector's replication slot is active and not erroring. Check the connector status and logs for the outbox table being captured. The failure is usually a CDC/connector problem, not the application, if the rows exist but no topic messages appear.
+
+</details>
+
+<details><summary><b>67.</b> After a Debezium connector restart you see duplicate outbox events. Is this a bug?</summary>
+
+No — CDC and the outbox relay are at-least-once, so on restart Debezium may re-emit events it had read but not fully committed offsets for. The correct fix is not to chase exactly-once but to ensure consumers deduplicate on the event id. Duplicates after restart are expected and must be absorbed downstream.
+
+</details>
+
+<details><summary><b>68.</b> A saga left cash reserved but no units booked, and nobody noticed for days. What design failures does this reveal?</summary>
+
+The compensation for the failed unit-booking step was missing or never triggered, and there was no timeout/dead-man handling to detect the stuck step, and no alerting or audit visibility to surface the dangling reservation. The reserved-cash-without-units state should have been compensated automatically and, if not, raised an alert. It is exactly the reconciliation nightmare the lesson says the architect must design out.
+
+</details>
+
+<details><summary><b>69.</b> In choreography, two services keep triggering each other's events in a loop. What anti-pattern is this?</summary>
+
+A cyclic dependency between saga participants — a known drawback of choreography where services consume each other's events and form a cycle. It makes the flow confusing and can create infinite or unintended loops. The standard remedy is to switch to orchestration, where a central orchestrator manages the order and breaks the implicit cycle.
+
+</details>
+
+<details><summary><b>70.</b> Your compensation released a fixed reserved amount, but the investor's available cash is now wrong. What likely went wrong?</summary>
+
+A dirty-write / dirty-compensation anomaly: another concurrent operation changed the balance between reservation and compensation, and the compensation released a stale fixed amount rather than reconciling against the current state. The fix is a countermeasure such as rereading the value before compensating, or a semantic lock so only this saga's reservation is released. Compensation must act on what this saga actually changed, not a remembered number.
+
+</details>
+
+<details><summary><b>71.</b> Why does the outbox `id` need to be globally unique and stable, and what breaks if it is reused?</summary>
+
+Idempotent consumers deduplicate on that id, so if two distinct events share an id, the second is wrongly skipped as a duplicate and its effect is lost; if the same logical event gets different ids on redelivery, dedup fails and it is applied twice. A UUID generated once at insert time gives the needed uniqueness and stability. The id is the contract between the outbox and every idempotent consumer.
+
+</details>
+
+<details><summary><b>72.</b> For the subscription saga, where would you place the pivot transaction and why?</summary>
+
+The pivot is naturally at "book units" or the confirmation: before it you have only reserved cash (fully compensatable by releasing the reservation), and once units are issued in the share register you are committed to finishing and confirming. Cash reservation and validations sit before the pivot as compensatable steps; confirmation and notifications sit after as retriable. This ordering means any business failure happens while you can still cleanly unwind.
+
+</details>
+
+<details><summary><b>73.</b> How does writing events into an outbox preserve event ordering for a single aggregate?</summary>
+
+Events for one aggregate are inserted in commit order, and because the Debezium router keys messages by `aggregateid`, all of an aggregate's events go to the same partition where Kafka preserves their order. Consumers folding those events therefore see them in the right sequence. Cross-aggregate global ordering is not guaranteed and usually not needed.
+
+</details>
+
+<details><summary><b>74.</b> Why might an architect deliberately keep a simple workflow as a choreography rather than introducing an orchestrator?</summary>
+
+For a short, stable, low-fanout flow, an orchestrator is extra infrastructure, an extra failure point, and extra operational burden that buys little; choreography keeps services autonomous and avoids a central coordinator. The drawbacks of choreography (poor visibility, cyclic risk) only bite as the workflow grows. Matching the coordination style to the workflow's complexity is the design judgment being taught.
+
+</details>
+
+<details><summary><b>75.</b> What is the difference between a command and an event in saga messaging?</summary>
+
+A command is an instruction to do something that may still be rejected (e.g. "reserve cash"), whereas an event is a statement that something already happened and is a fact (e.g. "cash reserved"). Orchestration tends to send commands to participants; choreography propagates events that participants react to. Mixing the two clearly in your topic and message design keeps intent and history distinct.
+
+</details>
+
+<details><summary><b>76.</b> How do you make the relay step of the outbox tolerant of broker outages?</summary>
+
+The outbox rows are already durably committed in the database, so if the broker is down the relay simply retries publishing later; nothing is lost because the source of truth is the table, not the in-flight publish. For CDC, Debezium tracks its log offset and resumes from where it left off. This is the whole point of decoupling capture from relay.
+
+</details>
+
+<details><summary><b>77.</b> What gotcha arises if you delete outbox rows immediately after publishing in a polling relay?</summary>
+
+If you delete before the publish is confirmed durable on the broker, a crash can lose the event with no trace; if you delete inside the same transaction as the business change you re-introduce a dual-write. The safe pattern is to publish, confirm, then mark or delete the row, accepting at-least-once and relying on consumer idempotency. With CDC tailing you can often retain or prune rows independently of publishing.
+
+</details>
+
+<details><summary><b>78.</b> Why does at-least-once plus idempotent consumers give effectively-once processing, and how is that different from exactly-once delivery?</summary>
+
+At-least-once guarantees no event is lost but allows duplicates; an idempotent consumer makes duplicates harmless, so the observable effect happens exactly once even though delivery did not. Exactly-once delivery (no duplicate ever reaches the consumer) is far harder and usually unnecessary. The pragmatic, production answer is at-least-once delivery with effectively-once processing.
+
+</details>
+
+<details><summary><b>79.</b> In a transfer-agency context, why is an event-sourced/outbox-backed audit trail attractive to regulators?</summary>
+
+Because every state change — order, allocation, cash movement, compensation — is captured as a durable, ordered, timestamped event you cannot have skipped, the log itself becomes the evidence of what happened and when. Auditors can reconstruct any investor's position and the full lifecycle of a subscription from the events alone. This "audit by construction" is far stronger than reconstructing history from mutable tables.
+
+</details>
+
+<details><summary><b>80.</b> What could go wrong if the outbox table and business tables live in different databases?</summary>
+
+You lose the single local transaction that gives atomicity, reintroducing the very dual-write race the outbox was meant to remove — the business write could commit while the outbox write fails. The outbox only works when its insert shares one transaction with the state change in the same database. Keeping them co-located is a non-negotiable invariant of the pattern.
+
+</details>
+
+<details><summary><b>81.</b> How would you propagate a correlation id through an outbox-driven saga so the audit log ties together?</summary>
+
+Put the correlation (saga) id in the outbox payload and/or as an additional column surfaced via `table.fields.additional.placement` into a Kafka header, so every event for the saga carries it. Each participant copies it onto the events it emits. Then a query or trace on that id reconstructs the entire saga, including failures and compensations.
+
+</details>
+
+<details><summary><b>82.</b> A retriable post-pivot step keeps failing permanently. What does that tell you about the saga design?</summary>
+
+That a step which can genuinely fail in a business sense was wrongly placed after the pivot, where there is no compensation path, so the saga is stuck committed but unfinished. The fix is to move that risk before the pivot as a compensatable step, or to make the post-pivot step truly always-eventually-succeed (only transient failures). Post-pivot steps must not have business-rule failure modes.
+
+</details>
+
+<details><summary><b>83.</b> Why should compensating transactions themselves be idempotent?</summary>
+
+Because a timeout or retry may cause the same compensation to be requested more than once (e.g. "release reservation" twice), and a non-idempotent compensation could over-release or error. Making it idempotent means re-running it has no extra effect once the undo is done. The same dedup or conditional-update discipline applies to compensations as to forward steps.
+
+</details>
+
+<details><summary><b>84.</b> What is the danger of putting too much business logic into a saga orchestrator?</summary>
+
+The participants degrade into anaemic CRUD services and the orchestrator becomes a god object that is hard to change and a heavy single point of failure. The intended balance is for the orchestrator to coordinate sequencing and compensation while each service keeps its own business rules. Keeping logic in the services preserves their autonomy and testability.
+
+</details>
+
+<details><summary><b>85.</b> How does Debezium's CDC approach to the outbox reduce load compared with application polling?</summary>
+
+Polling repeatedly queries the outbox table even when there is nothing new, adding query load and latency proportional to the poll interval; CDC instead reads the write-ahead log the database already writes, reacting to commits with essentially no extra query load. There is no "is there anything new?" loop. The trade-off is the operational cost of running and securing the CDC connector and replication slot.
+
+</details>
+
+<details><summary><b>86.</b> Why is an outbox event's `type` column useful to consumers?</summary>
+
+It names the kind of event (e.g. `OrderCreated`, `OrderCancelled`) so a consumer can dispatch on type without inspecting the payload structure, and so a single topic can carry several event types for an aggregate. Debezium surfaces it (commonly as a header) for routing and handling. It is part of the stable event contract.
+
+</details>
+
+<details><summary><b>87.</b> A subscription saga must reverse "book units" if a later AML check fails. Is "book units" compensatable, and what is its compensation?</summary>
+
+Yes, if you place the AML check after unit booking but before the pivot, then booking is compensatable and its compensation is a "reverse units" local transaction in the share register that removes the issued units. The original booking and its reversal both remain in the event log for audit. If instead unit issuance is your point of no return, the AML check must run before it.
+
+</details>
+
+<details><summary><b>88.</b> Why is "the system is consistent after the failure path" a stronger claim than "no error was thrown"?</summary>
+
+An error-free run only means nothing crashed; consistency means that after a partial failure and its compensations, no resource is left half-committed — no cash reserved against unissued units, no orphaned bookings. Sagas deliberately allow steps to fail, so success is measured by the final reconciled state, not by absence of errors. That is why the lesson's acceptance test inspects the end state and audit log.
+
+</details>
+
+<details><summary><b>89.</b> How do snapshots of saga state in an orchestrator help with crash recovery?</summary>
+
+A durable orchestrator persists the saga's current step and accumulated state, so after a crash it reloads that state and resumes the workflow exactly where it stopped rather than restarting or losing in-flight sagas. This durability is what distinguishes an engine like Temporal from coordinating in process memory. It is the reason orchestration engines are preferred for long-running, multi-step sagas.
+
+</details>
+
+<details><summary><b>90.</b> Why can the lack of isolation in sagas be acceptable in many fund-platform flows despite the anomalies?</summary>
+
+Because many flows are not highly contended on the same records, the anomalies are rare, and targeted countermeasures (semantic locks, rereads) cover the cases that do contend, while the gain in availability and loose coupling is large. The architect applies the "by value" idea: strong isolation only where business risk demands it. Blanket distributed transactions would be far costlier for little benefit on most paths.
+
+</details>
+
+<details><summary><b>91.</b> What is the difference between "compensatable" and "irreversible" in saga design?</summary>
+
+A compensatable step can be semantically undone by a later compensating transaction; an irreversible step cannot be undone at all and therefore acts as (or sits at) the pivot, after which the saga must complete. Recognizing which real-world actions are irreversible (sending a SWIFT payment, issuing units to a registrar) tells you where the pivot must be. You arrange compensatable risk before any irreversible action.
+
+</details>
+
+<details><summary><b>92.</b> Why might sending an external SWIFT payment force the pivot earlier in a payment-bearing saga?</summary>
+
+Because a dispatched SWIFT message generally cannot be un-sent, that step is effectively irreversible and becomes a point of no return, so all compensatable validation and reservation must precede it. After it, the saga can only move forward with retriable steps. The architect orders the saga so that anything that might fail in a business sense happens before the irreversible external send.
+
+</details>
+
+<details><summary><b>93.</b> Why is "every consumer survives a replayed event without double-effect" one of the lesson's done-when criteria?</summary>
+
+Because replays are inevitable — broker redelivery, CDC restarts, reprocessing — and the entire reliability story rests on consumers being idempotent. If a single replay can double-book units or double-release cash, the outbox/saga design is unsafe in production. The criterion forces you to prove idempotency rather than assume it.
+
+</details>
+
+<details><summary><b>94.</b> How can you test the saga's failure path deliberately as the lesson's "Do" step requires?</summary>
+
+Force the step-2 unit booking to fail (e.g. inject an error or a rejecting stub), then observe that the saga triggers the cash-release compensation, the final state shows no reservation and no units, and the audit log records the failure and compensation in order. You verify consistency from the end state and the log, not from the absence of exceptions. Repeating it confirms the compensation is idempotent.
+
+</details>
+
+<details><summary><b>95.</b> Why is the outbox pattern preferable to "publish then write to the database" ordering?</summary>
+
+Publishing first risks announcing an event for a state change that then fails to commit, so consumers act on something that never happened (a phantom event). Writing the database first then publishing risks the crash-before-publish lost-event case. The outbox sidesteps the whole ordering dilemma by making the event part of the single committed transaction and relaying it afterward.
+
+</details>
+
+<details><summary><b>96.</b> In a saga, what is the consequence of a participant processing a stale (out-of-order) compensation message?</summary>
+
+It may undo work that was never done or has already moved on, corrupting state — for example releasing a reservation that a newer saga has already legitimately consumed. Countermeasures like a version file (ordering operations) or rereading current state before compensating guard against this. Compensations must be guarded so they act only when the original effect is actually present.
+
+</details>
+
+<details><summary><b>97.</b> How would you size the alerting around a saga so a stuck step is noticed?</summary>
+
+Track saga age and per-step latency, and alert when a saga or a step exceeds its expected timeout, plus alert on reserved-but-not-confirmed resources (e.g. cash reserved beyond a threshold age). These signals surface dead-man steps that timeouts should be acting on. The point is that a dangling reservation pages someone rather than sitting unnoticed for days.
+
+</details>
+
+<details><summary><b>98.</b> Why is co-locating the dedup store with the consumer's business data important?</summary>
+
+So the processed-id record and the resulting business write commit in one local transaction, giving true exactly-once effect; a remote or separate dedup store reintroduces a dual-write between marking-processed and applying-effect. Locality is what makes the idempotency atomic. It mirrors the producer-side rule that the outbox row must share the business transaction.
+
+</details>
+
+<details><summary><b>99.</b> What is the simplest way to verify your subscription saga's audit log "tells the whole story" without manual digging?</summary>
+
+Filter the event log by the saga's correlation id and read it top to bottom: it should show cash reserved, the booking attempt, the booking failure, the cash-release compensation, and a terminal failed state, each timestamped. If you can narrate the entire incident from that filtered log alone, the criterion is met. If you must inspect service databases to understand it, the event design is incomplete.
+
+</details>
+
+<details><summary><b>100.</b> Summarize, in one breath, why the outbox plus a well-designed saga turns event-driven theory into production-shaped reflexes for fund administration.</summary>
+
+The outbox makes every state-change-plus-event atomic so no event is ever lost to a dual-write crash, idempotent consumers make at-least-once delivery effectively-once, and a saga with the right pivot, compensations, timeouts, and countermeasures makes a partial failure resolve into a provably consistent state explained entirely by the audit log. Together they ensure a half-completed subscription never leaves cash reserved against unissued units. That reliability and auditability is exactly what a regulated transfer-agency platform must guarantee.
+
+</details>
+
+
+## Phase 4 · 1.8.5 + 1.8.6 Event sourcing & CQRS — 100 self-test questions
+
+<details><summary><b>1.</b> In one sentence, what is event sourcing?</summary>
+
+Event sourcing is a persistence pattern where you store an append-only, ordered log of the events that happened to an entity, rather than storing only its current state. Current state is never the authoritative record; it is derived on demand by replaying those events. The event log is the single source of truth, and everything else is a projection of it.
+
+</details>
+
+<details><summary><b>2.</b> What does "state as a fold over events" mean?</summary>
+
+It means current state is computed by starting from an empty/initial state and applying each event in order with a function that folds the next event into the running state — exactly like a `reduce`/`foldLeft` over a list. For a share register, you start with zero shares and fold `SharesAllocated`, `SharesTransferred`, and `SharesRedeemed` events to arrive at the current position. The state is a pure function of the event sequence, so the same events always yield the same state.
+
+</details>
+
+<details><summary><b>3.</b> Why is the event log called the "source of truth" rather than the current-state table?</summary>
+
+Because in event sourcing the log of facts is what is durably stored and never mutated, and any current-state representation is a derived, disposable artefact that can be thrown away and rebuilt by replaying the log. If a derived table and the log ever disagree, the log wins by definition. This inverts the usual CRUD assumption where the current-state row is primary and history, if kept at all, is a side-effect.
+
+</details>
+
+<details><summary><b>4.</b> What is the difference between a command and an event?</summary>
+
+A command expresses intent — a request to do something, phrased in the imperative (`PlaceRedemptionOrder`), which may be validated and rejected. An event expresses a fact — something that has already happened, phrased in the past tense (`RedemptionOrderPlaced`), which cannot be rejected because it is history. The flow is: a command is handled, business rules are checked, and if accepted one or more events are emitted and appended.
+
+</details>
+
+<details><summary><b>5.</b> Why are events named in the past tense by convention?</summary>
+
+Because an event records something that already occurred and is therefore immutable fact, not a request. Past-tense naming (`PositionTransferred`, not `TransferPosition`) signals to readers that the event cannot be vetoed or retried away — it is part of history. This naming discipline keeps the model honest: anything you might still reject belongs in a command, not an event.
+
+</details>
+
+<details><summary><b>6.</b> Can an event be rejected after it has been recorded?</summary>
+
+No. An event is a fact that already happened, so once it is appended to the log it stands; you cannot un-happen it. If a later business decision must undo its effect, you append a new compensating event (for example `AllocationReversed`) rather than deleting or editing the original. The append-only, never-rewrite rule is what makes the log a trustworthy audit record.
+
+</details>
+
+<details><summary><b>7.</b> A command is rejected. Does that produce an event?</summary>
+
+Typically no event is appended to the entity's stream for a rejected command, because nothing happened to that entity's state — the rejection is just the command handler returning a failure. Some systems deliberately record a `CommandRejected` or validation-failure event for audit or analytics, but that is a separate design choice. The key point is that rejection means no state-changing fact, so the canonical event stream stays clean.
+
+</details>
+
+<details><summary><b>8.</b> What is a "stream" or "aggregate stream" in event sourcing?</summary>
+
+It is the ordered sequence of all events for a single aggregate instance, such as the event stream for one investor's holding in one fund. Each aggregate has its own stream, and folding that stream reconstructs that aggregate's current state. Streams are the unit of consistency and the natural boundary for optimistic concurrency checks.
+
+</details>
+
+<details><summary><b>9.</b> Why is the event store append-only and immutable?</summary>
+
+Because the whole value proposition — auditability, reproducible replay, temporal queries — depends on history never changing under you. If events could be edited or deleted, you could no longer trust that replaying the log reproduces what actually happened, and the regulator's evidence would be worthless. Append-only also simplifies concurrency and makes the store a natural fit for log-structured systems like Kafka.
+
+</details>
+
+<details><summary><b>10.</b> How do you "correct" a mistake in an event-sourced system without editing history?</summary>
+
+You append a corrective or compensating event that the fold knows how to apply, leaving the erroneous event in place. For example, if `SharesAllocated 100` was wrong, you append `AllocationCorrected -10` (or a reversal plus a fresh allocation), so the log shows both the error and its correction. This preserves the full audit trail and answers "what did we believe, and when did we fix it?".
+
+</details>
+
+<details><summary><b>11.</b> What is the killer feature of event sourcing for regulated fund administration?</summary>
+
+Audit-by-construction: because every state change is stored as an immutable, ordered event, the log itself is the regulator's evidence of what happened and in what order. You do not have to bolt on a separate audit table that can drift from reality — the system of record and the audit trail are the same artefact. Reconstructing "what did we know about investor X on date D?" becomes a deterministic replay rather than a forensic investigation.
+
+</details>
+
+<details><summary><b>12.</b> How does "as-known-at" differ from "as-of" in bitemporal terms?</summary>
+
+"As-of date D" means the business-effective state at D — the position that was economically in force on that date. "As-known-at date D" means the state as the system actually knew it at D — i.e. using only the information recorded up to that point, including any later-corrected mistakes. The two differ whenever facts arrive late or are corrected, which is exactly the situation regulators care about.
+
+</details>
+
+<details><summary><b>13.</b> What are the two time axes of bitemporality?</summary>
+
+Valid time (also called business or effective time) — when a fact is true in the real world — and transaction time (also called system or record time) — when the system learned or recorded the fact. Bitemporal data tracks both, so you can ask "what was true as-of D1 according to what we knew at D2?". Event sourcing naturally captures transaction time via append order and can carry valid time as a field on each event.
+
+</details>
+
+<details><summary><b>14.</b> Give a fund example where as-known-at and as-of diverge.</summary>
+
+Suppose a subscription with trade date Monday is only entered into the register on Wednesday because of a late SWIFT confirmation. As-of Monday, the investor's economic position includes those shares; but as-known-at Tuesday, the system did not yet know about them, so a report run Tuesday legitimately omitted them. Replaying the event log up to the Tuesday cut-off reproduces exactly the Tuesday view, which is how you defend a historical NAV or position report.
+
+</details>
+
+<details><summary><b>15.</b> Why is "position as-known-at date D" a replay rather than a reconstruction?</summary>
+
+Because every fact the system ever recorded is in the log with its recording order, so you simply fold all events whose recorded time is at or before D and stop. You are not inferring or guessing what the system believed — you are literally re-running the same folds over the same recorded inputs. That determinism is why the answer is defensible to an auditor: it is reproduction, not estimation.
+
+</details>
+
+<details><summary><b>16.</b> What is a snapshot in event sourcing?</summary>
+
+A snapshot is a periodically materialised copy of an aggregate's derived state at a known event position (version), stored so that replay can start from it instead of from event zero. To rebuild current state you load the latest snapshot and then fold only the events that occurred after the snapshot's position. It is a pure performance optimisation and contains no information not already derivable from the log.
+
+</details>
+
+<details><summary><b>17.</b> Why do snapshots not compromise the event log as source of truth?</summary>
+
+Because a snapshot is just a cached fold result that can be deleted and recomputed at any time from the events alone. The log remains the authority; if a snapshot is corrupt or its fold logic changes, you discard it and rebuild. Nothing is ever read from a snapshot that could not be obtained by replaying events, so trust still rests entirely on the immutable log.
+
+</details>
+
+<details><summary><b>18.</b> When should you take a snapshot?</summary>
+
+When replaying an aggregate's full stream from zero becomes too slow or expensive — typically for long-lived, high-event-count aggregates. A common policy is "snapshot every N events" or "snapshot on a schedule," tuned so the number of events to replay after the latest snapshot stays bounded. Short-lived or low-volume aggregates often need no snapshots at all.
+
+</details>
+
+<details><summary><b>19.</b> How does loading an aggregate work when snapshots exist?</summary>
+
+You fetch the most recent snapshot for that aggregate (state plus the event version it was taken at), then read and fold only the events with a higher version than the snapshot. The result is the same current state you would get by folding from zero, but with far less work. If no snapshot exists, you fall back to folding the whole stream.
+
+</details>
+
+<details><summary><b>20.</b> What can go wrong if your fold/apply logic changes after a snapshot was taken?</summary>
+
+The snapshot was produced by the old fold logic, so a snapshot plus new-logic replay can yield a state that differs from a full new-logic replay from zero. The safe fix is to invalidate and regenerate snapshots whenever the apply logic or event interpretation changes. Treat snapshots as a cache keyed implicitly on the fold code version, not as durable truth.
+
+</details>
+
+<details><summary><b>21.</b> What is event replay?</summary>
+
+Replay is the act of re-reading events from the log in order and re-applying the fold to rebuild state — either to reconstruct current state, to build a new read model, or to answer a temporal query at a cut-off. Because the log is immutable and the fold is deterministic, replay reproduces results exactly. It is the mechanism behind rebuilding projections, recovering from a lost read store, and as-known-at queries.
+
+</details>
+
+<details><summary><b>22.</b> Why must the fold/apply function be deterministic and side-effect-free?</summary>
+
+Because replay re-runs it many times — at load, when rebuilding projections, and for historical queries — and it must produce identical state every time given identical events. If `apply` called `now()`, generated random IDs, or invoked external services, replay could yield different results or fire duplicate side-effects. Keep all such non-determinism in the command-handling path that produces events, never in the fold that consumes them.
+
+</details>
+
+<details><summary><b>23.</b> Why should you never call an external system from inside the event apply/fold function?</summary>
+
+Because the fold runs during every replay, so an external call there would re-trigger emails, payments, or SWIFT messages each time you rebuild state — a serious bug in finance. External effects must be driven by event consumers/handlers under at-least-once or idempotent control, not by the pure state fold. The fold's only job is to transform events into state.
+
+</details>
+
+<details><summary><b>24.</b> What is event schema evolution and why is it inevitable in event sourcing?</summary>
+
+Event schema evolution is the process of changing the shape of event types over time — adding fields, renaming, splitting, or restructuring — while old events with the old shape remain permanently in the log. It is inevitable because the business changes but you can never rewrite history, so v1 events and v5 events coexist forever. The replay path must therefore be able to read every historical version.
+
+</details>
+
+<details><summary><b>25.</b> What is upcasting?</summary>
+
+Upcasting is transforming an old-version event into the current event shape at read/replay time, so the fold logic only ever sees the latest schema. For example, an upcaster might add a defaulted `currency: "EUR"` field to old `SharesAllocated` events that predate multi-currency support. The stored event is untouched on disk; the conversion happens in memory as events are loaded.
+
+</details>
+
+<details><summary><b>26.</b> Why upcast on read instead of rewriting old events in place?</summary>
+
+Because rewriting events in place would mutate the immutable audit log, destroying the very property — faithful history — that event sourcing exists to provide. Upcasting on read keeps the original bytes intact for audit while letting application code work with a single, current shape. It also means a future schema can re-interpret the originals differently if needed.
+
+</details>
+
+<details><summary><b>27.</b> How would you handle an old event that lacks a field your current fold needs?</summary>
+
+Write an upcaster that supplies a sensible default or derives the value, applied as the event is read, so the fold sees a complete current-shape event. The default must be one that reproduces correct historical behaviour — for instance defaulting a missing `settlementCycle` to whatever the rule actually was at that time. Document the assumption, because a wrong default silently corrupts replayed history.
+
+</details>
+
+<details><summary><b>28.</b> What is an "upcaster chain"?</summary>
+
+It is a sequence of upcasters, each converting events from one version to the next (v1→v2, v2→v3, …), composed so that any historical version can be lifted to the current shape by passing it through the relevant steps. This keeps each upcaster small and focused on a single migration rather than one giant function handling every version. Frameworks like Axon implement exactly this chained-upcasting model.
+
+</details>
+
+<details><summary><b>29.</b> Why is including a version or type indicator on each event important?</summary>
+
+Because at replay the deserializer/upcaster must know which schema an event was written with to interpret it correctly. A `version` field or a versioned event-type name (`SharesAllocated.v2`) lets the upcaster chain pick the right transformations. Without it you would have to guess the shape, which is fragile and breaks the moment two versions share a field name with different meaning.
+
+</details>
+
+<details><summary><b>30.</b> When is event sourcing the WRONG choice?</summary>
+
+For simple CRUD applications and weak-invariant domains where the entity is essentially a form you create, read, update, and delete with no meaningful behaviour or history requirement. There, event sourcing adds replay machinery, eventual consistency, schema-evolution burden, and operational complexity while delivering no audit, temporal-query, or invariant-protection benefit. Stopford's guidance is blunt: do not event-source things that are basically a key-value store with edit screens.
+
+</details>
+
+<details><summary><b>31.</b> What is a "weak-invariant domain" and why does it make event sourcing a poor fit?</summary>
+
+It is a domain with few or no business rules that the aggregate must enforce across a sequence of changes — essentially data that can be edited freely without violating consistency constraints. Event sourcing pays off when reconstructing state to enforce invariants and when history matters; with weak invariants there is no rule worth replaying to protect and no narrative worth preserving. You get the cost without the payoff.
+
+</details>
+
+<details><summary><b>32.</b> Name concrete signs that a system does NOT need event sourcing.</summary>
+
+No regulatory or audit requirement for full history, no demand for temporal/as-known-at queries, simple last-write-wins update semantics, and stakeholders who would be harmed rather than helped by eventual consistency. A reference-data table of fund static (name, domicile, base currency) edited occasionally by ops is a classic example. If "just keep the current row and maybe a change-log trigger" satisfies everyone, event sourcing is over-engineering.
+
+</details>
+
+<details><summary><b>33.</b> Give a transfer-agency example where event sourcing is the RIGHT choice.</summary>
+
+The share register itself — modelling subscription, redemption, allocation, transfer, and switch events and folding them to current positions per investor. It demands strict invariants (you cannot redeem more than you hold), full auditability, and the ability to answer "investor X's position as-known-at date D" for regulators. That combination of strong invariants plus mandatory history is precisely where event sourcing earns its complexity.
+
+</details>
+
+<details><summary><b>34.</b> Give a transfer-agency example where event sourcing would be the WRONG choice.</summary>
+
+A fund's marketing/static reference table — long name, share-class label, distribution policy text, contact email — where updates are infrequent, rule-free, and history beyond a simple change log is not required. Event-sourcing that data inflicts replay and eventual consistency on a glorified settings record. A normal CRUD table, optionally with audit triggers, is the correct, cheaper design.
+
+</details>
+
+<details><summary><b>35.</b> What does CQRS stand for and what does it separate?</summary>
+
+CQRS stands for Command Query Responsibility Segregation, and it separates the model that handles writes (commands that change state) from the model(s) that serve reads (queries). The write side validates commands and produces events; the read side maintains query-optimised views derived from those events. The two sides can use different schemas, storage technologies, and scaling profiles.
+
+</details>
+
+<details><summary><b>36.</b> Is CQRS the same thing as event sourcing?</summary>
+
+No. CQRS is purely about splitting read and write responsibilities into separate models and can be applied to a plain CRUD database with no events at all. Event sourcing is about storing state as a log of events. They are independent patterns that happen to pair well, because the event log is a natural feed for building CQRS read models — but each can exist without the other.
+
+</details>
+
+<details><summary><b>37.</b> Why do event sourcing and CQRS pair so naturally?</summary>
+
+Because an event log is an excellent write model — append-only, audit-friendly, invariant-enforcing — but a poor read model for arbitrary queries, since answering "all investors over X shares" by folding every stream is slow. CQRS solves that by projecting the events into purpose-built read views (tables, search indexes, caches). The events flow one way: commands produce events on the write side, projectors consume events to maintain the read side.
+
+</details>
+
+<details><summary><b>38.</b> What is a "read model" (projection) in CQRS?</summary>
+
+It is a denormalised, query-optimised view built by consuming the event stream and updating a store shaped for a specific read use-case — for instance a per-fund holdings table or a per-investor position summary. You can maintain many read models from the same events, each tuned to one query pattern, and rebuild any of them by replaying. They are disposable derivations of the log, never the source of truth.
+
+</details>
+
+<details><summary><b>39.</b> How is a read model kept up to date?</summary>
+
+A projector (event handler) subscribes to the event stream and applies each new event to update the read store — incrementally, as events arrive. The same projector logic, run over the full history, builds the read model from scratch during a rebuild. Because reads come from this separately-maintained store, query load never touches or competes with the write-side log.
+
+</details>
+
+<details><summary><b>40.</b> Why is the CQRS read side typically eventually consistent?</summary>
+
+Because there is a delay between an event being committed on the write side and the projector applying it to the read model, the read view briefly lags the latest writes. During that window a query may not yet reflect a just-accepted command. This eventual consistency is the fundamental tax of CQRS and the main reason not to apply it where strong read-your-writes consistency is expected.
+
+</details>
+
+<details><summary><b>41.</b> What is "read-your-writes" and why does CQRS threaten it?</summary>
+
+Read-your-writes is the guarantee that after a client successfully performs a write, its subsequent reads see that write. CQRS threatens it because the read model is updated asynchronously, so a user who places an order and immediately refreshes may not see it yet. You must either tolerate this in the UX, route that read to the write model, or wait for the projection to catch up.
+
+</details>
+
+<details><summary><b>42.</b> How can you mitigate the user-visible effects of eventual consistency in CQRS?</summary>
+
+Common tactics: have the UI optimistically show the expected result, return the new version/position from the command so the client can display it without re-querying, poll the read model until it reaches the expected version, or serve specific "must be fresh" reads from the write side. Each trades complexity for freshness. The architect's job is to apply these only where the staleness genuinely matters.
+
+</details>
+
+<details><summary><b>43.</b> What is the over-application hazard of CQRS the architect must guard against?</summary>
+
+Splitting read and write models everywhere by default, which inflicts eventual consistency, extra moving parts, and projection-maintenance cost on teams and use-cases that needed none. CQRS should be introduced where read and write demands genuinely diverge — different scaling, very different query shapes, or an event-sourced write side — not as a blanket architecture. Applied indiscriminately it is complexity for its own sake.
+
+</details>
+
+<details><summary><b>44.</b> Where is CQRS genuinely justified?</summary>
+
+When the write and read workloads have fundamentally different shapes or scale — e.g. a heavily-validated event-sourced write side plus many high-volume, varied analytical read queries — or when you need multiple specialised read views off one consistent stream of facts. It is also justified when you must serve reads from a totally different technology (search index, cache) than the system of record. The divergence must be real, not hypothetical.
+
+</details>
+
+<details><summary><b>45.</b> In CQRS, can you have more than one read model from the same events?</summary>
+
+Yes, and this is one of its main strengths: the same event stream can feed a relational positions table, an Elasticsearch index for search, a Redis cache for hot lookups, and an analytics warehouse, each tuned to its query pattern. Because read models are disposable projections, you can add a new one at any time by replaying history. This lets read concerns evolve independently of the write model.
+
+</details>
+
+<details><summary><b>46.</b> What is the typical command-side flow in an event-sourced CQRS system?</summary>
+
+A command arrives, the relevant aggregate is loaded by folding its events (optionally from a snapshot), business rules are checked against that reconstructed state, and if valid one or more events are appended to the store. Those appended events are then published for projectors and other consumers. The write side never queries the read models; it relies only on the authoritative event log.
+
+</details>
+
+<details><summary><b>47.</b> How do you enforce an invariant like "cannot redeem more than held" in an event-sourced aggregate?</summary>
+
+When handling a `RedeemShares` command you first fold the investor's holding events to compute the current balance, then reject the command if the redemption exceeds it; only if it passes do you append a `SharesRedeemed` event. The invariant is checked against freshly-reconstructed state inside the consistency boundary of that single aggregate. This is why strong-invariant domains are where event sourcing shines.
+
+</details>
+
+<details><summary><b>48.</b> What role does optimistic concurrency / expected version play in the event store?</summary>
+
+When appending events, the writer asserts the stream's expected current version; if another writer has appended in the meantime, the version no longer matches and the append fails, signalling a concurrency conflict. This prevents two commands from being decided against stale state and producing conflicting events. The losing command is typically retried after reloading the aggregate at the new version.
+
+</details>
+
+<details><summary><b>49.</b> Why is Kafka often discussed as an event store, and what is the catch?</summary>
+
+Kafka is an append-only, ordered, durable, replayable log, which lines up beautifully with event sourcing's storage needs and is central to Stopford's "Kafka-as-event-store" framing. The catch is that classic per-aggregate operations — load one stream and append with an expected-version check — are not Kafka's native model; topics partition by key and lack first-class optimistic concurrency per aggregate. Many teams use a purpose-built event store for the write side and Kafka to distribute events to consumers.
+
+</details>
+
+<details><summary><b>50.</b> What does "the event log is the integration point" mean in an event-driven architecture?</summary>
+
+It means other services and read models integrate by subscribing to the shared stream of events rather than by querying each other's databases or calling synchronous APIs. The producer publishes facts once, and any number of consumers react and build their own views. This decouples teams: a new consumer can be added without touching the producer, and it can replay history to catch up.
+
+</details>
+
+<details><summary><b>51.</b> What is the difference between an event store and an event log/broker like Kafka in this context?</summary>
+
+An event store is optimised for the write side of event sourcing: appending to and loading individual aggregate streams with optimistic concurrency and often built-in snapshotting. A log/broker like Kafka is optimised for distributing ordered event streams to many consumers at scale. They are complementary — store for sourcing the aggregate, broker for fan-out to projections and other services.
+
+</details>
+
+<details><summary><b>52.</b> Why does event sourcing make temporal/historical queries cheap that are expensive in CRUD?</summary>
+
+In CRUD, the current-state row overwrites history, so reconstructing a past state requires audit tables, slowly-changing dimensions, or backups, and is often impossible. In event sourcing the entire history is the primary store, so any past state is just "fold up to that point." The difference is structural: event sourcing keeps everything by design, so time-travel is a query, not a recovery operation.
+
+</details>
+
+<details><summary><b>53.</b> What is "projection rebuild" and when do you do it?</summary>
+
+A projection rebuild is recreating a read model from scratch by replaying the whole event history through the projector logic. You do it when you change a read model's schema, fix a bug in projection logic, add a brand-new read view, or recover a corrupted/lost read store. Because the events are the truth, you can always regenerate any projection, which makes read-side bugs cheaper to fix than in CRUD.
+
+</details>
+
+<details><summary><b>54.</b> Why is it safe to delete and rebuild a read model but not the event log?</summary>
+
+Because the read model is a pure derivation of the events and carries no unique information, so deleting it loses nothing recoverable — a replay regenerates it exactly. The event log, by contrast, is the only place the facts live; delete it and the information is gone forever. This asymmetry is the heart of the pattern: one immutable source, many disposable views.
+
+</details>
+
+<details><summary><b>55.</b> What is an "aggregate" in the DDD sense as it applies here?</summary>
+
+An aggregate is a consistency boundary — a cluster of objects treated as a unit for data changes, with a root through which all modifications flow. In event sourcing each aggregate has its own event stream, and invariants are enforced within that single aggregate when handling a command. Cross-aggregate consistency is handled with separate mechanisms (sagas/process managers), not within one stream.
+
+</details>
+
+<details><summary><b>56.</b> How do you handle business processes that span multiple aggregates in an event-sourced system?</summary>
+
+With a saga or process manager that reacts to events from one aggregate and issues commands to others, coordinating a multi-step workflow with compensating actions on failure. Each aggregate keeps its own local consistency via its stream, and the saga supplies eventual, choreographed consistency across them. This is how, for example, a fund switch (redeem in fund A, subscribe in fund B) is coordinated.
+
+</details>
+
+<details><summary><b>57.</b> What does "command handler" do versus "event handler/projector"?</summary>
+
+A command handler validates intent against reconstructed aggregate state and emits events (the write path). An event handler/projector consumes already-committed events to update read models or trigger side-effects (the read/reaction path). Keeping these roles distinct is what enforces the one-way flow: commands in, events out, projections and reactions downstream.
+
+</details>
+
+<details><summary><b>58.</b> Why must event consumers/projectors be idempotent?</summary>
+
+Because event delivery is usually at-least-once, so a projector may receive the same event more than once after a retry or restart, and applying it twice must not corrupt the read model. Idempotency — e.g. tracking the last-processed event position, or using upserts keyed by event id — guarantees double-delivery is harmless. Without it, a redelivered `SharesAllocated` could double an investor's position.
+
+</details>
+
+<details><summary><b>59.</b> How does tracking the last-processed event position help a projector?</summary>
+
+By recording the position/offset of the most recent event it successfully applied, a projector can resume exactly where it left off after a crash and can ignore any event whose position it has already passed. This both prevents duplicate application (idempotency) and avoids reprocessing the entire history on restart. It is the standard checkpointing mechanism for read-model maintenance.
+
+</details>
+
+<details><summary><b>60.</b> Does event sourcing make GDPR "right to erasure" harder, and how is it addressed?</summary>
+
+Yes, because the whole point is an immutable, never-deleted log, which conflicts with a hard requirement to erase personal data. The common mitigation is crypto-shredding: store personal data encrypted with a per-subject key and delete the key to render those events unreadable, leaving the log structurally intact. The architect must design for this tension up front, since it does not resolve itself.
+
+</details>
+
+<details><summary><b>61.</b> What is crypto-shredding in the context of an immutable event log?</summary>
+
+Crypto-shredding means encrypting personal/sensitive fields in events with a key tied to the data subject, then satisfying an erasure request by destroying that key rather than mutating the log. The ciphertext remains in place — preserving the log's append-only integrity and event ordering — but becomes permanently undecipherable. It reconciles immutability with privacy-deletion obligations.
+
+</details>
+
+<details><summary><b>62.</b> How does event sourcing relate to DORA and operational-resilience evidence?</summary>
+
+An immutable, ordered event log provides strong, tamper-evident evidence of system behaviour and the exact sequence of state changes, which supports the kind of reconstruction and reporting operational-resilience regimes like DORA expect. You can demonstrate precisely what happened and when it was recorded, and replay to investigate incidents. It does not by itself satisfy DORA, but it is a powerful substrate for the auditability such regulations demand.
+
+</details>
+
+<details><summary><b>63.</b> What is an ADR and why write one for "where ES applies in a TA system"?</summary>
+
+An ADR (Architecture Decision Record) is a short, dated document capturing a significant decision, its context, the options considered, and the consequences. Writing one for event sourcing forces you to state explicitly which parts of the transfer-agency system are event-sourced (e.g. the register) and which must not be (e.g. static reference data) and why. It becomes the durable rationale future engineers consult before extending or copying the pattern.
+
+</details>
+
+<details><summary><b>64.</b> What should the "consequences" section of an event-sourcing ADR honestly include?</summary>
+
+It should name the costs you are accepting: eventual consistency on read models, the need to manage event schema evolution and upcasters, projection-rebuild and snapshot operations, GDPR/erasure handling, and the learning curve for the team. A good ADR is not a sales pitch; it records the downsides so the decision can be revisited if the benefits stop justifying them. This is what makes "saying no to ES somewhere" credible.
+
+</details>
+
+<details><summary><b>65.</b> Why is "saying no to event sourcing somewhere" a sign of architectural maturity?</summary>
+
+Because event sourcing is seductive and easy to over-apply, and the discipline to scope it to where strong invariants and mandatory history actually exist is what separates an architect from an enthusiast. Deliberately keeping reference data, simple CRUD, and weak-invariant areas out of event sourcing controls complexity and protects teams from needless eventual consistency. Knowing the boundary is as important as knowing the pattern.
+
+</details>
+
+<details><summary><b>66.</b> How do you model a share transfer between two investors as events?</summary>
+
+You append the facts that occurred — for example a `SharesTransferred` event referencing the source holder, the destination holder, the share class, and the quantity, or a pair of `SharesDebited`/`SharesCredited` events. Folding the source investor's stream reduces their balance and folding the destination's increases it. Because it is recorded as events, the transfer is fully auditable and replayable as-known-at any later date.
+
+</details>
+
+<details><summary><b>67.</b> How do you answer "investor X's position as known on date D" from the log?</summary>
+
+You read investor X's event stream (and any relevant aggregates), filter to events whose recorded/transaction time is at or before D, fold those into a position, and return it — ignoring any later events even if they correct earlier ones. The result is exactly what the system would have reported on D. This is a deterministic replay, which is why it is defensible to a regulator.
+
+</details>
+
+<details><summary><b>68.</b> Why must you filter by transaction time (recorded time), not valid time, for an as-known-at query?</summary>
+
+Because as-known-at asks what the system actually knew at the cut-off, and the system "knew" a fact only once it was recorded — regardless of the business date the fact applies to. A late-recorded subscription with an earlier trade date must be excluded from an as-known-at-yesterday view even though its valid time is older. Filtering by recorded order reproduces the historical knowledge state precisely.
+
+</details>
+
+<details><summary><b>69.</b> What goes wrong if you store only valid time and not transaction time?</summary>
+
+You lose the ability to answer as-known-at questions, because you can no longer tell when each fact entered the system — only when it was economically effective. That makes it impossible to faithfully reproduce a report run last Tuesday if facts have since been added or corrected with old valid dates. For regulated reconstruction you need both axes, and event sourcing's append order naturally supplies transaction time.
+
+</details>
+
+<details><summary><b>70.</b> How does event sourcing help reproduce a historical NAV?</summary>
+
+Because every position-affecting fact is in the log with its recorded order, you can replay the share register and relevant inputs up to the exact knowledge cut-off used for that NAV strike, reconstructing the holdings the NAV was based on. If a later correction arrived, the original NAV's as-known-at view is still reproducible because the correcting event is simply excluded by the cut-off. This turns "why was the NAV X on date D?" into a replay.
+
+</details>
+
+<details><summary><b>71.</b> What is the relationship between an outbox pattern and an event-sourced system?</summary>
+
+The outbox pattern ensures that state changes and the publication of corresponding messages happen atomically, avoiding the dual-write problem where a DB commit succeeds but the broker publish fails. In event sourcing the event store append is the state change, and events can be reliably relayed to a broker from the store (or via an outbox) so consumers see exactly what was committed. Both patterns exist to guarantee that "what was stored" and "what was published" agree.
+
+</details>
+
+<details><summary><b>72.</b> What is the "dual-write problem" and how does event sourcing relate to it?</summary>
+
+The dual-write problem is writing to two systems (e.g. a database and a message broker) without a shared transaction, so a crash between them leaves them inconsistent. Event sourcing reduces it by making a single atomic append to the event store the one write, then deriving everything else — read models and broker fan-out — from that committed log. The append becomes the single source of truth that downstream effects key off.
+
+</details>
+
+<details><summary><b>73.</b> Why is ordering of events critical, and what guarantees it within an aggregate?</summary>
+
+Ordering is critical because the fold's result depends on applying events in the sequence they happened — apply a redemption before its allocation and the balance is wrong. Within a single aggregate stream, the event store assigns a monotonically increasing version/sequence number per event, which defines the canonical order. Cross-aggregate global ordering is weaker and usually not relied upon for correctness.
+
+</details>
+
+<details><summary><b>74.</b> Can you rely on global total ordering across all aggregate streams?</summary>
+
+Generally no — most event stores and logs guarantee strict ordering only within a stream/partition, not across all of them, so two events in different aggregates may be observed in different relative orders by different consumers. Designs should depend only on per-aggregate ordering for invariants and use explicit correlation/causation metadata where cross-stream order matters. Assuming a global clock here is a classic source of subtle bugs.
+
+</details>
+
+<details><summary><b>75.</b> What are correlation and causation IDs on events used for?</summary>
+
+A correlation ID groups all events belonging to the same business workflow (e.g. one redemption request end-to-end), while a causation ID points to the specific command/event that directly caused this event. Together they let you trace and reconstruct the full chain of cause-and-effect across aggregates and services. In audit-heavy fund operations this traceability is invaluable for explaining how a given outcome came about.
+
+</details>
+
+<details><summary><b>76.</b> Why should events be "thin" or carry just enough data, and what is the trade-off?</summary>
+
+Thin events carry minimal data (often just IDs), which keeps the log small and decoupled but forces consumers to look up additional details elsewhere. Fat events carry a fuller snapshot of relevant data, which makes consumers self-sufficient and replay-friendly but couples the event to more of the model and bloats the log. Event sourcing generally favours events rich enough to reconstruct state without external lookups, since the log must stand alone for replay.
+
+</details>
+
+<details><summary><b>77.</b> What is an "event-carried state transfer" and how does it differ from notification events?</summary>
+
+Event-carried state transfer means events include the changed state data so consumers can maintain their own local copy without calling back to the source. A notification (or "thin") event merely announces that something happened and expects the consumer to fetch details. For building independent read models, carried-state events are convenient because the projector has everything it needs in the stream itself.
+
+</details>
+
+<details><summary><b>78.</b> How do you choose the granularity of events — fine-grained vs coarse-grained?</summary>
+
+Fine-grained events capture small, specific facts (`ShareClassChanged`) giving precise audit and flexibility but more event types to manage; coarse-grained events bundle more into one (`OrderProcessed`) which is simpler but loses detail and replay flexibility. The guideline is to model events at the granularity of meaningful business facts the domain actually cares about. Over-coarse events lose the very history that justified event sourcing.
+
+</details>
+
+<details><summary><b>79.</b> Why should event payloads avoid embedding derived/computed values that may change interpretation?</summary>
+
+Because events are permanent and replayed under future code; if you store a value that depends on logic that later changes, the stored value may contradict current interpretation and you cannot re-derive it cleanly. It is usually safer to record the raw facts and let folds compute derived values, so changing the derivation just means re-replaying. Embed derived values only when you specifically need to preserve "what we computed at the time."
+
+</details>
+
+<details><summary><b>80.</b> What is the difference between a "soft delete" event and physically deleting data?</summary>
+
+A soft-delete event (e.g. `AccountClosed` or `HoldingDeactivated`) records the fact of deletion as just another event, leaving the history intact and the entity reconstructable; physical deletion removes data and breaks the immutable-log guarantee. In event sourcing you almost always model deletion as an event rather than a row removal. The exception is privacy-driven erasure, handled via crypto-shredding rather than literal log deletion.
+
+</details>
+
+<details><summary><b>81.</b> A new projector is added but its read model is empty — what is the first thing to do?</summary>
+
+Trigger a full rebuild by replaying the entire event history through the new projector from position zero, so it catches up to the present. Because the events are the source of truth, the read model is meant to be regenerated this way, and you should also confirm the projector is then subscribed to live events so it stays current. Forgetting the live subscription leaves the model frozen at the rebuild cut-off.
+
+</details>
+
+<details><summary><b>82.</b> A read model shows a stale value seconds after a successful command — is this necessarily a bug?</summary>
+
+Not necessarily; in CQRS the read side is eventually consistent, so a short lag between the committed event and the projector applying it is expected, not broken. The first check is whether the staleness exceeds the normal projection latency or is permanent. If it never catches up, then it is a real projector fault (stuck consumer, error, checkpoint problem); if it resolves quickly, it is just eventual consistency.
+
+</details>
+
+<details><summary><b>83.</b> A replayed historical position does not match what was reported on that date — what is the first thing to check?</summary>
+
+Check that you are filtering by transaction/recorded time (as-known-at), not valid/business time, and that your cut-off boundary is correct (inclusive vs exclusive of date D). A mismatch often comes from including later-recorded corrections that the original report did not have. Also verify that your fold/upcasting logic still interprets old events the way the original code did.
+
+</details>
+
+<details><summary><b>84.</b> Replay is extremely slow for one aggregate — what is the first thing to check?</summary>
+
+Check whether snapshots exist and are being used for that aggregate; an aggregate with a very long stream and no snapshot will fold from event zero every load. The fix is to introduce or restore snapshotting so replay starts near the tail. Also verify the snapshot's stored version actually precedes the events being folded, so you are not re-folding the whole history anyway.
+
+</details>
+
+<details><summary><b>85.</b> After deploying new event-apply logic, current state looks wrong — what is a likely cause?</summary>
+
+A likely cause is stale snapshots: the snapshot was produced by the old fold logic, so loading it and applying only newer events yields a hybrid state inconsistent with the new logic. The fix is to invalidate and regenerate snapshots after fold-logic changes. A second suspect is an upcaster that no longer maps an old event version correctly into the new shape.
+
+</details>
+
+<details><summary><b>86.</b> Two concurrent commands both succeed and produce conflicting events — what guard was missing?</summary>
+
+Optimistic concurrency control on append: each command should assert the aggregate's expected version, so the second append fails when the first has already advanced the stream, forcing a reload-and-retry. Without that expected-version check, both commands decided against the same stale state and both wrote events, breaking the invariant. The store's version conflict is the intended serialization point.
+
+</details>
+
+<details><summary><b>87.</b> A projector double-counts some events after a restart — what is the root cause and fix?</summary>
+
+The root cause is non-idempotent projection combined with at-least-once redelivery: after a crash, already-applied events were re-delivered and re-applied. The fix is to make the projector idempotent — checkpoint the last-processed position and skip anything at or below it, or use upserts keyed by event id. Then redelivery becomes a no-op instead of a doubling bug.
+
+</details>
+
+<details><summary><b>88.</b> An old event fails to deserialize during replay after a schema change — what is the fix?</summary>
+
+Add or correct an upcaster that transforms that old event version into the current shape at read time, including defaults for any newly-required fields, so the deserializer/fold sees valid current-shape data. Never "fix" it by rewriting the stored event. Ensure the event carries (or can be matched to) a version so the upcaster chain selects the right transformation.
+
+</details>
+
+<details><summary><b>89.</b> Why can changing the meaning of an existing event field (not just adding one) be dangerous?</summary>
+
+Because all historical events with that field were written under the old meaning, and reinterpreting it during replay silently changes what those past events assert, corrupting reconstructed history. Additive changes (new optional fields) are safe; redefining an existing field is a breaking semantic change. The safe path is to introduce a new field/version and upcast, leaving the old field's original meaning intact.
+
+</details>
+
+<details><summary><b>90.</b> How does event sourcing support reproducible debugging of production incidents?</summary>
+
+Because you can replay the exact sequence of real events through your code (current or historical) in a test environment, you can reproduce precisely how an aggregate reached a bad state — no guessing from logs. This deterministic re-execution turns "we think this happened" into "we replayed it and it did." For a regulated system, being able to demonstrate the causal chain is both a debugging and a compliance asset.
+
+</details>
+
+<details><summary><b>91.</b> What is the danger of putting business decisions inside the event apply/fold function?</summary>
+
+If the fold makes decisions (rejects, branches on external conditions), those decisions get re-evaluated on every replay and may differ over time or duplicate effects, breaking determinism. All decision-making belongs in command handling, which runs once and emits events; the fold must only mechanically project events into state. Mixing the two is a frequent and corrosive event-sourcing mistake.
+
+</details>
+
+<details><summary><b>92.</b> Why is "the event log is the regulator's evidence" only true if the log is genuinely immutable and complete?</summary>
+
+Because the evidentiary value rests entirely on the guarantee that nothing was edited, deleted, or dropped — if events could be silently altered or lost, the log proves nothing. That is why append-only storage, reliable (at-least-once, idempotent) capture, and integrity controls are non-negotiable in a regulated event-sourced system. The pattern's headline benefit is exactly as strong as the immutability guarantee behind it.
+
+</details>
+
+<details><summary><b>93.</b> How does an ISIN typically appear in event-sourced share-register events?</summary>
+
+As an immutable identifier field on the relevant events — e.g. each `SharesAllocated` or `SharesTransferred` event carries the share class's ISIN so the fact is unambiguous on replay. Because the ISIN identifies the security a position is in, embedding it keeps each event self-contained and lets projections group holdings by instrument without external lookups. Storing it on the event also future-proofs replay against later reference-data changes.
+
+</details>
+
+<details><summary><b>94.</b> Why might EMT/EPT file generation be a read model rather than part of the write side?</summary>
+
+Because EMT/EPT regulatory disclosure files are derived, query-optimised outputs assembled from underlying facts, which maps cleanly onto a CQRS projection built off the event log rather than onto the command-handling write side. Treating them as a read model means you can regenerate them by replaying events and can produce as-known-at versions for a given reporting date. Keeping generation on the read side also isolates reporting churn from the core register's invariants.
+
+</details>
+
+<details><summary><b>95.</b> Why does an LEI belong on the event as data rather than being looked up at read time?</summary>
+
+Because the LEI identifies the legal entity a fact pertains to, embedding it on the event makes the historical record self-contained and immune to later changes or lapses in reference data. If you looked it up at read time, replaying an old event could attach a today's-LEI that differs from what was true then, corrupting the as-known-at view. Event-carried identity preserves faithful history.
+
+</details>
+
+<details><summary><b>96.</b> How would you defend an event-sourced register design to an auditor in one sentence?</summary>
+
+Every change to an investor's holding is stored as an immutable, time-ordered event, so the system of record and the audit trail are the same artefact, and any past position can be reproduced exactly by replaying the events recorded up to the relevant date. That single property delivers audit-by-construction and defensible historical reconstruction. It is the core reason event sourcing is chosen in regulated fund administration.
+
+</details>
+
+<details><summary><b>97.</b> What is the relationship between event sourcing and "temporal database" features like system-versioned tables?</summary>
+
+Both aim to preserve history and answer time-travel queries, but a system-versioned/temporal table keeps current state primary and records row versions as a side mechanism, whereas event sourcing makes the change events themselves the primary, behaviour-bearing store. Temporal tables answer "what did this row look like at time T"; event sourcing additionally captures intent-laden, named business facts you can fold and re-interpret. Choose temporal tables for history-on-CRUD and event sourcing where behaviour and invariants matter.
+
+</details>
+
+<details><summary><b>98.</b> When would you prefer a temporal/bitemporal CRUD table over full event sourcing?</summary>
+
+When you need historical and as-known-at queries but the domain is essentially data with weak behaviour and few invariants, so the named-event, fold, and replay machinery would be overkill. A system-versioned bitemporal table can give you both time axes with far less operational complexity than a full event-sourced aggregate. This is precisely the "say no to ES" boundary — get the history benefit without the behavioural machinery.
+
+</details>
+
+<details><summary><b>99.</b> Why is event sourcing sometimes described as "the database of the future is a log of the past"?</summary>
+
+Because instead of treating storage as a mutable snapshot of now, event sourcing treats it as an immutable record of everything that happened, from which any view of "now" or any past moment can be derived. The log of facts is primary; the snapshot is secondary and disposable. This reframing — facts first, state derived — is the conceptual heart of the pattern.
+
+</details>
+
+<details><summary><b>100.</b> Summarise the decision rule an architect should apply for event sourcing plus CQRS.</summary>
+
+Use event sourcing where the domain has strong invariants and a hard requirement for audit and temporal/as-known-at reconstruction — the share register is the canonical yes; pair it with CQRS to serve diverse, high-volume reads via projections, accepting eventual consistency only where it is harmless. Refuse both for weak-invariant CRUD and reference data, where they add eventual consistency, schema-evolution, and operational cost with no offsetting benefit. The skill is matching the pattern's costs to genuine need, and writing the boundary down in an ADR.
+
+</details>
+
+
+## Phase 4 · 1.8.7 + 1.8.8 Dead-letter queues & backpressure — 100 self-test questions
+
+<details><summary><b>1.</b> What is a dead-letter queue (DLQ) in a streaming or integration pipeline?</summary>
+
+A DLQ is a separate destination — in Kafka, a dedicated topic — where messages that cannot be processed successfully are parked instead of being dropped or blocking the main flow. Its purpose is to isolate failures so the healthy stream keeps moving while the bad records wait for human triage or automated replay. The name comes from the AMQP world but the pattern is universal across brokers and connectors.
+
+</details>
+
+<details><summary><b>2.</b> Why is a DLQ described as the thing that decides whether a bad message "takes down the flow or just bumps a metric"?</summary>
+
+Without a DLQ, a single unprocessable record blocks the consumer that hit it — the offset never advances, the partition stalls, and every downstream consumer of that data starves. With a DLQ the bad record is shunted aside, the consumer commits past it, and the only visible effect is a non-zero DLQ-depth metric you can investigate calmly. The DLQ converts a hard outage into a quiet, bounded signal.
+
+</details>
+
+<details><summary><b>3.</b> What is a "poison pill" message?</summary>
+
+A poison pill is a message that a consumer cannot process and that, without error handling, it retries forever — re-reading the same offset, failing, and re-reading again — so the partition never progresses. The classic cause is a deserialization failure: a record on a topic that does not match the expected schema or format. It is "poison" because one such record can halt an entire consumer group.
+
+</details>
+
+<details><summary><b>4.</b> In Kafka Connect, which configuration property controls how the framework reacts to record-level errors?</summary>
+
+`errors.tolerance` controls it. The default value `none` makes the task fail immediately on the first error, which is correct when data integrity must never be silently bypassed. Setting it to `all` lets the connector skip or route failed records (to a DLQ) and keep running.
+
+</details>
+
+<details><summary><b>5.</b> What does `errors.tolerance = none` do, and when is it the right choice?</summary>
+
+With `errors.tolerance = none` the connector task stops and goes to `FAILED` state the moment any record causes an error, so nothing is skipped or rerouted. It is the right default when you cannot tolerate silently losing or deferring records — for example a NAV-affecting feed where a missing record must halt processing and page someone rather than slip past. The trade-off is that one bad record stops the whole task.
+
+</details>
+
+<details><summary><b>6.</b> What does `errors.tolerance = all` do?</summary>
+
+With `errors.tolerance = all`, Kafka Connect tolerates record-level errors: it logs them and, if a DLQ topic is configured, routes the failed records there instead of failing the task. The task keeps consuming good records and advancing offsets. You pair it with `errors.deadletterqueue.topic.name` so failures are captured rather than just dropped.
+
+</details>
+
+<details><summary><b>7.</b> Which Kafka Connect property names the DLQ topic, and what happens if you set tolerance to `all` but omit it?</summary>
+
+`errors.deadletterqueue.topic.name` names the DLQ topic. If `errors.tolerance = all` but no DLQ topic name is set, failed records are logged and silently dropped rather than parked — you lose the bad data and the chance to replay it. Always set both together so a tolerated failure leaves a recoverable artifact.
+
+</details>
+
+<details><summary><b>8.</b> What is the role of `errors.deadletterqueue.context.headers.enable` and why does the architect care?</summary>
+
+Setting `errors.deadletterqueue.context.headers.enable = true` makes Kafka Connect attach diagnostic headers to every DLQ message describing where and why it failed. The architect cares because those headers are what make a parked message triageable "cold" — without them the DLQ holds opaque bytes and an analyst at 9am has no idea which connector, topic, partition, or exception produced each record. It is off by default, so it must be explicitly enabled.
+
+</details>
+
+<details><summary><b>9.</b> Name three of the `__connect.errors.*` headers Kafka Connect adds to a DLQ record and what each tells you.</summary>
+
+`__connect.errors.topic`, `__connect.errors.partition`, and `__connect.errors.offset` tell you the exact origin coordinates of the failed record so you can find it in the source topic. `__connect.errors.exception.message` and `__connect.errors.exception.stacktrace` carry the failure reason and full stack trace. `__connect.errors.stage` and `__connect.errors.connector.name` tell you which connector and which processing stage (e.g. transformation, conversion) blew up.
+
+</details>
+
+<details><summary><b>10.</b> Why do all the Kafka Connect error-context header keys begin with the prefix `__connect.errors.`?</summary>
+
+The `__connect.errors.` prefix namespaces the diagnostic headers so they cannot clash with application headers that were already on the original record. A producer might legitimately set a header called `topic` or `offset`; prefixing keeps Connect's metadata distinct and lets a replay tool strip exactly the diagnostic headers before re-emitting the payload. It is a deliberate collision-avoidance convention.
+
+</details>
+
+<details><summary><b>11.</b> On a single-node Kafka cluster, why might creating a DLQ topic fail, and which property fixes it?</summary>
+
+The DLQ topic defaults to a replication factor of 3, so on a single-broker cluster the topic cannot be created and the connector errors out. Set `errors.deadletterqueue.topic.replication.factor = 1` to match the available brokers. This is a classic first-day gotcha when testing DLQ behaviour locally before deploying to a replicated cluster.
+
+</details>
+
+<details><summary><b>12.</b> What diagnostic information must a parked message carry to be "triageable cold" by someone who was not there when it failed?</summary>
+
+At minimum it needs the source coordinates (topic, partition, offset), the failure reason (exception class, message, stack trace), the processing stage and connector/task that failed, and a timestamp. With those an analyst can locate the original record, reproduce the error, decide whether it is a data fix or a code fix, and replay deterministically. "Cold" means no tribal knowledge or live session is required.
+
+</details>
+
+<details><summary><b>13.</b> Why is the original message payload alone insufficient in a DLQ, even though it contains the data?</summary>
+
+The payload tells you what the record was but not why it failed or where it came from in a multi-stage pipeline. The same bytes might fail at deserialization, at a transform, or at the sink for entirely different reasons, and replaying blindly would just reproduce the failure. Diagnostic headers supply the context — stage, exception, source offset — that turns raw bytes into an actionable triage item.
+
+</details>
+
+<details><summary><b>14.</b> How does a DLQ let a consumer commit offsets past a poison pill without losing the data?</summary>
+
+When the bad record is routed to the DLQ, the consumer treats it as "handled," commits its offset, and moves on, so the main partition is no longer blocked. The data is not lost because a copy now lives durably in the DLQ topic with diagnostics attached. Recovery happens later by replaying from the DLQ rather than by rewinding the main stream.
+
+</details>
+
+<details><summary><b>15.</b> What is a "replay procedure" in the context of a DLQ runbook?</summary>
+
+A replay procedure is the defined, repeatable set of steps to take the messages parked in the DLQ, optionally fix or re-route them, and re-inject them into the pipeline so they are processed as if they had succeeded the first time. It names the command(s) to run, the conditions under which replay is safe, and who is authorized to do it. Without a documented procedure, replay becomes an improvised, error-prone scramble during an incident.
+
+</details>
+
+<details><summary><b>16.</b> Why is idempotency a precondition for safely replaying DLQ messages?</summary>
+
+Replay re-injects records that may have been partially processed before failing, so without idempotency you risk double-counting — applying the same trade or NAV adjustment twice. Idempotent processing (e.g. keyed upserts, dedup on a natural key, or transactional exactly-once) means replaying a message that already had partial effects produces the same end state, not a duplicate. The runbook should state this precondition explicitly because replay is otherwise unsafe.
+
+</details>
+
+<details><summary><b>17.</b> A runbook says "replay the DLQ at 9am." What three things must it name to be complete?</summary>
+
+It must name the triage owner (who decides whether and how to replay), the exact replay procedure (the command or tool and its parameters), and the idempotency precondition (why replay will not double-apply effects). The lesson's "Done when" makes these three non-negotiable. Missing any one turns a calm 9am recovery into guesswork.
+
+</details>
+
+<details><summary><b>18.</b> How do you distinguish a one-off bad record from a systemic failure when messages start landing in the DLQ?</summary>
+
+Look at the rate and the shape of the DLQ inflow: a single record or a handful with distinct, unrelated exceptions is a one-off poison pill; a sudden flood of records sharing the same exception class and stage signals a systemic problem like an upstream schema change or a sink outage. The exception message and stage headers are the discriminator. The response differs sharply — fix-and-replay one record versus halt-and-fix the pipeline.
+
+</details>
+
+<details><summary><b>19.</b> Why is treating every systemic failure as a "skip to DLQ" dangerous?</summary>
+
+If a whole upstream schema change makes every record fail, `errors.tolerance = all` will cheerfully route the entire stream into the DLQ and keep committing offsets, so you silently lose your real-time data while a DLQ swells unnoticed. Tolerance is designed for sparse bad records, not for masking a broken pipeline. That is precisely why DLQ-depth must be alerted: a spike means "stop and investigate," not "let it drain later."
+
+</details>
+
+<details><summary><b>20.</b> A DLQ that was empty suddenly fills with thousands of messages all carrying the same `__connect.errors.exception.message`. What does that pattern tell you?</summary>
+
+Identical exception messages at high volume mean a systemic cause, not a scattering of bad records — most likely an upstream contract break such as a schema-registry change, a renamed field, or a format switch. The fix is upstream (or in the connector config), not record-by-record replay. Replaying without fixing the root cause would just refill the DLQ.
+
+</details>
+
+<details><summary><b>21.</b> What is backpressure in a streaming pipeline?</summary>
+
+Backpressure is the condition where a downstream stage cannot consume data as fast as an upstream stage produces it, so the producer must slow down. A well-designed system propagates this signal backward to the source so producers throttle gracefully; a poorly designed one lets buffers grow unbounded until memory is exhausted. Backpressure is therefore both a problem symptom and the mechanism that prevents collapse.
+
+</details>
+
+<details><summary><b>22.</b> Why is a slow Iceberg sink without backpressure handling described as something that "quietly blows out memory until the job dies"?</summary>
+
+If the sink cannot keep up and there is no bounded buffer or flow-control signal, the upstream operators keep producing and accumulating un-emitted records in memory. The heap grows until the job hits an `OutOfMemoryError` and crashes — with no graceful slowdown and often no clear warning beforehand. Backpressure converts that silent memory blowout into a controlled throttle plus an observable lag/backpressure metric.
+
+</details>
+
+<details><summary><b>23.</b> What is a bounded buffer and why is it central to backpressure?</summary>
+
+A bounded buffer is a queue with a fixed maximum size between producer and consumer. When it fills, the producer must wait rather than enqueue more, which is exactly the signal that propagates backpressure upstream. Bounding the buffer is what prevents unbounded memory growth — an unbounded buffer "absorbs" the imbalance until it exhausts memory, whereas a bounded one forces the slowdown to be felt and handled.
+
+</details>
+
+<details><summary><b>24.</b> Why is consumer lag the "early-warning signal" for backpressure?</summary>
+
+Consumer lag — the gap between the latest offset produced and the offset a consumer has committed — grows whenever consumption falls behind production, which is the leading indicator that a stage is becoming a bottleneck. It rises before memory exhaustion or job failure, giving you time to scale, fix, or alert. Watching lag trend rather than just its instantaneous value lets you catch a slow degradation early.
+
+</details>
+
+<details><summary><b>25.</b> What is the difference between high-but-stable lag and steadily rising lag?</summary>
+
+High-but-stable lag means the consumer is keeping pace with production but at a fixed offset distance behind — annoying but not deteriorating. Steadily rising lag means consumption is strictly slower than production, so the gap is unbounded and the system will eventually fall over or trigger sustained backpressure. The slope, not the level, is the danger signal; alert on a rising trend, not just a threshold crossing.
+
+</details>
+
+<details><summary><b>26.</b> What is Flink's credit-based flow control?</summary>
+
+Credit-based flow control is Flink's mechanism for managing data exchange between subtasks across the network. Each downstream `RemoteInputChannel` advertises the number of free network buffers it has — its credits — to the upstream sender, and the sender may only transmit as many buffers as it has been granted credit for. This guarantees no buffer is ever sent that the receiver cannot accept, so data never piles up on the network wire.
+
+</details>
+
+<details><summary><b>27.</b> In Flink credit-based flow control, what does one "credit" correspond to?</summary>
+
+One credit corresponds to one free network buffer on the receiving side. The downstream task grants credits equal to its available buffers, and the upstream task may send exactly that many buffers and no more. When the downstream stops having free buffers it stops granting credits, which is how the throttle engages.
+
+</details>
+
+<details><summary><b>28.</b> Walk through how backpressure propagates upstream in Flink under credit-based flow control.</summary>
+
+When a downstream subtask processes slowly, its input buffers fill and it stops granting credits to its upstream sender. The upstream sender, holding no credits, cannot transmit, so its output buffers fill; once full, that subtask cannot emit and is itself forced to slow processing. This chain repeats stage by stage all the way back to the source operator, which then throttles its intake.
+
+</details>
+
+<details><summary><b>29.</b> Why does Flink's credit-based scheme "propagate backpressure without dropping data"?</summary>
+
+Because a sender is forbidden from transmitting buffers it has no credit for, records are never discarded to relieve pressure — they simply wait in bounded buffers until credit is granted. The slowdown is communicated as withheld credit, not as dropped packets. This preserves exactly-once and at-least-once guarantees, which matter intensely for financial records where a dropped trade or NAV update is unacceptable.
+
+</details>
+
+<details><summary><b>30.</b> What problem with TCP-based flow control did Flink's credit-based scheme fix?</summary>
+
+With pure TCP-based flow control, multiple logical channels share one physical TCP connection, so a single slow channel blocking the connection backpressured all the other channels sharing it — including healthy ones, and even the checkpoint barriers. Credit-based flow control operates per input channel above TCP, so only the genuinely slow channel is throttled. This decouples flow control from the physical connection and prevents one slow task from stalling unrelated ones.
+
+</details>
+
+<details><summary><b>31.</b> How does Flink decide that a subtask is "back pressured" internally?</summary>
+
+Internally Flink judges backpressure on the availability of output buffers: if a subtask has no free output buffer to write its result into, it is considered back pressured because it cannot emit. This is distinct from idleness, which is judged on the availability of input. The two are mutually exclusive states along with "busy."
+
+</details>
+
+<details><summary><b>32.</b> What are the three Flink subtask metrics `busyTimeMsPerSecond`, `backPressuredTimeMsPerSecond`, and `idleTimeMsPerSecond`, and how do they relate?</summary>
+
+`busyTimeMsPerSecond` is the milliseconds per second the subtask spent doing actual work, `backPressuredTimeMsPerSecond` is the time it spent blocked waiting for free output buffers, and `idleTimeMsPerSecond` is the time it spent waiting for input. At any moment the three add up to approximately 1000ms, so they partition each second of a subtask's life. They are the precise, quantitative replacement for guessing at backpressure.
+
+</details>
+
+<details><summary><b>33.</b> If a Flink subtask shows `busyTimeMsPerSecond` near 1000, what does that indicate about where the bottleneck is?</summary>
+
+A subtask pinned near `busyTimeMsPerSecond` of 1000 is the bottleneck itself — it is doing real work the entire second and is not waiting on anyone, so it cannot go faster without more resources or a code change. Upstream of it you would typically see high `backPressuredTimeMsPerSecond` (they are blocked sending to it), and the busy one is where you scale parallelism or optimize. The busy task is the root cause; the back-pressured ones are victims.
+
+</details>
+
+<details><summary><b>34.</b> A Flink operator shows high `backPressuredTimeMsPerSecond`. Is it the bottleneck? Explain.</summary>
+
+No — a high `backPressuredTimeMsPerSecond` means the operator is being held back by something downstream that will not grant it credits, so it spends its time waiting to emit rather than working. To find the actual bottleneck you follow the backpressure downstream until you reach the operator that is `busy` (near 1000ms busy) rather than back-pressured. The back-pressured operator is a symptom, not the cause.
+
+</details>
+
+<details><summary><b>35.</b> Since which Flink version can you spot backpressure directly in the Web UI job graph, and what does the colouring show?</summary>
+
+From Flink 1.13 onward the Web UI colours each task in the job graph by its busy/backpressured ratio, so you can see at a glance which operator is busy (the bottleneck) and which are merely back-pressured. Earlier versions relied on stack-trace sampling, which was coarser. The colour-coded job graph is built on the `busyTimeMsPerSecond` and `backPressuredTimeMsPerSecond` metrics.
+
+</details>
+
+<details><summary><b>36.</b> Why is "point to backpressure in a running Flink job and explain why it is not dropping data" a Done-when criterion?</summary>
+
+Because the architect must be able to demonstrate, on a live system, that backpressure is the designed-in throttle rather than a malfunction — showing the Web UI colouring or the metrics, and explaining that credit-based flow control means records are buffered and waited on, never discarded. It proves understanding that backpressure is healthy load-shedding-without-loss, not an error to be eliminated. It connects the concept to observable reality.
+
+</details>
+
+<details><summary><b>37.</b> What is the danger of "fixing" Flink backpressure by simply increasing buffer sizes?</summary>
+
+Larger buffers only delay the onset of backpressure; they do not increase the downstream's throughput, so the imbalance is still there and you have merely added latency and memory pressure. The records sit longer before being processed, end-to-end latency climbs, and checkpoint alignment can suffer. The real fix is to address the bottleneck — scale parallelism, optimize the slow operator, or speed up the sink.
+
+</details>
+
+<details><summary><b>38.</b> At what two thresholds should the architect set DLQ-related alerts, per the lesson?</summary>
+
+The lesson calls for alerting on consumer lag and on DLQ depth. Lag thresholds catch a consumer falling behind (the backpressure early warning), while DLQ-depth thresholds catch records being parked faster than they are being triaged. Each threshold must also state who it pages so the right person responds.
+
+</details>
+
+<details><summary><b>39.</b> Why must an alert threshold "name who it pages" rather than just firing?</summary>
+
+An alert that fires into a shared channel with no named owner becomes noise that everyone assumes someone else will handle. Naming the on-call role or person establishes accountability and a guaranteed response, which is the whole point of paging. The lesson's goal — a 2am poison pill that pages no one but is replayable at 9am — depends on thresholds being tuned so only the right severity reaches the right person.
+
+</details>
+
+<details><summary><b>40.</b> Restate the lesson's headline success criterion for the DLQ-plus-backpressure design.</summary>
+
+A poisoned message arriving at 2am should page no one and be replayable at 9am with no data loss. This means the DLQ silently and durably captures the bad record, alerting is tuned so a single poison pill is not a page-worthy incident, and the documented idempotent replay procedure recovers it during business hours. It encodes the philosophy: isolate, observe, recover calmly.
+
+</details>
+
+<details><summary><b>41.</b> Why should a single poison pill at 2am ideally NOT page anyone?</summary>
+
+A single parked record is a bounded, non-urgent condition — the pipeline keeps running, the data is safely captured in the DLQ, and nothing is lost. Paging a human for it would cause alert fatigue and burn out on-call engineers for a problem that waits perfectly well until morning. You reserve paging for systemic conditions — a DLQ-depth spike or rising lag — where delay actually causes harm.
+
+</details>
+
+<details><summary><b>42.</b> What DLQ-depth behaviour SHOULD page someone immediately, even at 2am?</summary>
+
+A rapidly rising DLQ depth — many records parked in a short window — should page, because it signals a systemic failure (schema break, sink outage) that is actively shedding real-time data and will worsen until fixed. Unlike a lone poison pill, this is unbounded and time-sensitive. The alert design distinguishes the two by rate, not by mere presence of any DLQ record.
+
+</details>
+
+<details><summary><b>43.</b> How does idempotent processing interact with Kafka's at-least-once delivery during replay?</summary>
+
+Kafka and Connect generally provide at-least-once delivery, meaning a record can be delivered more than once, and DLQ replay adds further re-delivery. Idempotent processing — upserts keyed on a stable identifier, or dedup tables — makes those duplicates harmless because applying the same record twice yields the same state. Without idempotency, at-least-once plus replay equals double-application, which in a fund context could mean a position booked twice.
+
+</details>
+
+<details><summary><b>44.</b> For a CDC pipeline feeding a settlement system, why is DLQ design especially critical?</summary>
+
+CDC streams carry ordered change events whose meaning depends on sequence, so a single poison-pill change event without a DLQ stalls the whole stream and freezes every downstream consumer of settlement data. A DLQ lets the healthy change stream continue while the malformed event is parked, preserving timeliness for the rest. The architect must ensure the parked event can be corrected and replayed in order, or with idempotent keys, so settlement state stays correct.
+
+</details>
+
+<details><summary><b>45.</b> A malformed settlement message poison-pills a CDC pipeline. Without a DLQ, what is the blast radius?</summary>
+
+Without a DLQ the consumer hits the bad record, fails, and retries the same offset endlessly, so that partition never advances and every downstream consumer of those changes starves — the failure of one record stops the entire flow. The blast radius is the whole pipeline and all its consumers, not just the one bad message. This is exactly the "one malformed message takes down the flow" scenario the lesson warns against.
+
+</details>
+
+<details><summary><b>46.</b> In a fund-administration NAV pipeline, why might `errors.tolerance = all` with a DLQ be the wrong default for some feeds?</summary>
+
+For a feed that directly drives NAV, silently routing a failed record to a DLQ and committing past it can mean a published NAV is computed on incomplete data — a regulatory and client-impacting error. There, `errors.tolerance = none` (fail fast and halt) may be correct so the missing record is impossible to ignore. The architect chooses per-feed: tolerate-and-park for resilient enrichment streams, fail-fast for NAV-critical ones.
+
+</details>
+
+<details><summary><b>47.</b> How can a malformed ISIN in an incoming security-reference message become a poison pill?</summary>
+
+If a downstream operator deserializes or validates the ISIN and throws on a record whose ISIN fails the format or check-digit validation, that record fails every time it is read, so without tolerance and a DLQ it blocks the consumer. Routing it to the DLQ with diagnostic headers lets the security-reference stream keep flowing while a data steward corrects the ISIN. The corrected record is then replayed idempotently on the security's key.
+
+</details>
+
+<details><summary><b>48.</b> An EMT or EPT file feed produces records that consistently fail a schema check after a vendor format change. Is this a poison pill or a systemic failure?</summary>
+
+It is a systemic failure, not a lone poison pill, because every record from the new format fails the same way — a uniform exception across a flood of messages. The fix is upstream: update the schema or the parser to the new EMT/EPT layout, then replay. Letting `errors.tolerance = all` silently DLQ the whole feed would mean losing the day's EMT data, which is why DLQ-depth alerting must catch the spike.
+
+</details>
+
+<details><summary><b>49.</b> Why does transfer-agency order processing demand idempotent replay specifically?</summary>
+
+A subscription or redemption order replayed without idempotency could book the investor's order twice, creating phantom units or duplicate cash movements that are painful to unwind and may breach client-money rules. Idempotent handling — keyed on the order reference — guarantees that replaying a DLQ'd order produces exactly one booking regardless of how many times it is re-injected. This is why the runbook must state the idempotency precondition before anyone replays TA orders.
+
+</details>
+
+<details><summary><b>50.</b> How would a SWIFT message that fails parsing be handled to avoid a poison-pill stall?</summary>
+
+It would be routed to a DLQ with headers capturing the parse exception, the source topic/offset, and the stage, so the SWIFT ingestion stream keeps moving while operations investigates the malformed message. SWIFT messages are highly structured (e.g. MT or ISO 20022), so a single non-conforming message should never block the queue. Once corrected — or confirmed as a true reject — it is replayed or formally rejected per the runbook.
+
+</details>
+
+<details><summary><b>51.</b> Why is a stable, natural key (like an order id, trade id, or LEI-plus-date) essential for safe DLQ replay?</summary>
+
+A stable natural key lets the consumer perform an idempotent upsert, so replaying a record overwrites or matches the existing row rather than inserting a duplicate. Without such a key the system cannot tell a replay from a genuinely new event, and replay becomes unsafe. Choosing the right idempotency key up front is a design decision that makes the entire DLQ-replay runbook viable.
+
+</details>
+
+<details><summary><b>52.</b> What is the difference between a DLQ topic and simply logging the error and skipping the record?</summary>
+
+Logging-and-skipping discards the record's data — you have a log line but nothing to replay, so the data is permanently lost. A DLQ topic durably retains the full record plus diagnostic headers, so it can be triaged and reprocessed. For regulated data where every record may need to be accounted for, the durable, replayable DLQ is mandatory; a log line alone is not recovery.
+
+</details>
+
+<details><summary><b>53.</b> Why might you give the DLQ topic a long or even infinite retention compared to the source topic?</summary>
+
+Triage and replay may not happen for hours or days, and in a regulated context you may need to demonstrate that no record was lost, so the DLQ must retain parked messages long enough to survive the incident-to-resolution window. If the DLQ inherited a short retention, messages could expire before anyone replays them — silent data loss. Sizing DLQ retention deliberately, separate from the source, is part of the design.
+
+</details>
+
+<details><summary><b>54.</b> How does a consumer-lag alert give you lead time that a "job crashed" alert does not?</summary>
+
+Lag rises gradually as a stage falls behind, so a lag-trend alert fires while the job is still running and recoverable — you can scale or fix before failure. A "job crashed" alert fires only after the outage has already happened, with data potentially stalled and a backlog to drain. Lag is leading; crash is lagging — the architect prefers the leading indicator.
+
+</details>
+
+<details><summary><b>55.</b> What is the relationship between Flink backpressure and Kafka consumer lag at the source?</summary>
+
+When backpressure propagates all the way to a Flink Kafka source, the source slows its reads from Kafka, so the consumer group's lag on the source topic grows. Thus rising Kafka source lag is often the externally visible symptom of internal Flink backpressure. Monitoring both — Flink's busy/backpressured metrics and Kafka source lag — gives you the internal cause and the external effect.
+
+</details>
+
+<details><summary><b>56.</b> Why can simply adding more consumers fail to relieve Kafka consumer lag?</summary>
+
+A Kafka consumer group can have at most one active consumer per partition, so adding consumers beyond the partition count leaves them idle and does nothing for lag. If the topic has fewer partitions than the parallelism you need, you must repartition (raise partition count) or speed up per-partition processing. Throwing consumers at a partition-bound bottleneck is a common ineffective fix.
+
+</details>
+
+<details><summary><b>57.</b> What does it mean to "dry-run" a DLQ runbook, and why is it required?</summary>
+
+Dry-running means deliberately injecting a poison message, then following your own written runbook step by step to triage and replay it without loss — proving the procedure actually works. It is required because runbooks written but never exercised tend to have missing steps, wrong commands, or unstated assumptions that only surface during a real 2am incident. The dry run converts a theoretical document into a tested, trustworthy recovery path.
+
+</details>
+
+<details><summary><b>58.</b> When dry-running the runbook, how do you confirm the replay happened "without loss"?</summary>
+
+You verify that the record's effect appears exactly once in the final state — the parked message is processed, the downstream record exists, and no duplicate was created — typically by checking the target store on the record's idempotency key before and after. You also confirm the DLQ depth returns to zero for that message. Only an end-state check, not just "the command ran," proves no-loss replay.
+
+</details>
+
+<details><summary><b>59.</b> Why is "the connector task is RUNNING" not sufficient evidence that error handling is working?</summary>
+
+A task can be `RUNNING` while quietly routing a flood of records to the DLQ under `errors.tolerance = all`, so health-checking only task state hides a systemic data-loss-into-DLQ situation. You must also watch DLQ depth and error rate. A green task plus a swelling DLQ is an outage in disguise — which is exactly why DLQ-depth is a first-class alert.
+
+</details>
+
+<details><summary><b>60.</b> What is the difference between a DLQ and a retry mechanism, and how do they compose?</summary>
+
+A retry mechanism re-attempts the same operation in place, appropriate for transient failures like a brief sink outage; a DLQ parks the record after retries are exhausted, appropriate for failures that won't resolve by retrying, like a malformed payload. They compose as a pipeline: retry transient errors a bounded number of times, then route to the DLQ. Sending non-transient errors straight to retries wastes time; sending transient errors straight to the DLQ creates needless triage work.
+
+</details>
+
+<details><summary><b>61.</b> Why should retries be bounded before a record goes to the DLQ?</summary>
+
+Unbounded retries on a non-transient failure recreate the poison-pill stall — the consumer loops forever on one record and never progresses. Bounding retries (a max attempt count, ideally with backoff) guarantees the record eventually moves to the DLQ and the partition advances. The bound is what turns "retry forever" into "retry a little, then park."
+
+</details>
+
+<details><summary><b>62.</b> What role does exponential backoff play between retries and the DLQ?</summary>
+
+Exponential backoff spaces out retry attempts so a transient downstream problem (e.g. a sink briefly unavailable) has time to recover, while avoiding a tight retry loop that hammers the failing system. After the backoff-governed retry budget is exhausted, the record is parked in the DLQ. Backoff thus maximizes the chance of recovering transient failures before declaring a record dead-lettered.
+
+</details>
+
+<details><summary><b>63.</b> How does the AMQP/RabbitMQ notion of a dead-letter exchange differ from a Kafka DLQ topic?</summary>
+
+In AMQP a dead-letter exchange (DLX) receives messages that are rejected, expire (TTL), or exceed queue length, and re-routes them to a dead-letter queue per binding rules; it is broker-native message routing. A Kafka DLQ is just another topic that a connector or application explicitly produces failed records to — there is no built-in "reject" verb at the broker. The patterns are analogous but Kafka's is application/connector-driven while AMQP's is broker-driven.
+
+</details>
+
+<details><summary><b>64.</b> Why can't you "reject" or "nack" a message in core Kafka the way you can in AMQP?</summary>
+
+Kafka is an append-only log, not a queue of individually acknowledged messages; consumers track position by committing offsets, so there is no per-message nack or redelivery primitive at the broker. To dead-letter a record you must explicitly produce it to a DLQ topic and then advance your offset past it. This is why DLQ handling in Kafka lives in the consumer or in Kafka Connect, not in the broker.
+
+</details>
+
+<details><summary><b>65.</b> What is the risk of replaying DLQ messages back onto the original source topic rather than reprocessing them directly?</summary>
+
+Re-producing parked records onto the original topic can reorder them relative to live traffic and, if the same failure condition persists, immediately re-park them — creating a loop. It also mixes diagnostic-stripped replays with normal flow, complicating ordering and idempotency. Many designs instead replay from the DLQ through a corrected path or with the root cause already fixed, rather than blindly re-injecting into the source.
+
+</details>
+
+<details><summary><b>66.</b> How do diagnostic headers help you decide between "fix the data and replay" versus "fix the code and replay"?</summary>
+
+The exception class and stage tell you the nature of the failure: a deserialization or validation exception on one record points to bad data (fix the data), while an exception shared across many records or originating in a transform points to a code or schema problem (fix the code). The headers let you triage cold and route to the correct remediation. Choosing wrong wastes effort and risks re-parking.
+
+</details>
+
+<details><summary><b>67.</b> Why is alert fatigue a design failure rather than just an annoyance?</summary>
+
+When alerts fire too often or for non-actionable conditions, on-call engineers start ignoring them, so a genuinely critical page gets missed amid the noise — the alerting system's core purpose fails. The lesson's "pages no one at 2am" goal is partly about preventing fatigue so the alerts that do fire are trusted and acted on. Tuning thresholds to actionable severity is therefore a reliability decision, not mere tidiness.
+
+</details>
+
+<details><summary><b>68.</b> What is the difference between alerting on DLQ depth (absolute) versus DLQ inflow rate (derivative)?</summary>
+
+DLQ depth is the current count of parked, un-triaged messages; inflow rate is how fast records are arriving. A high but flat depth might just mean triage is behind, while a steep inflow rate signals an active systemic failure that needs immediate attention. Alerting on both — rate for "act now," depth for "backlog growing" — distinguishes an unfolding incident from an accumulating chore.
+
+</details>
+
+<details><summary><b>69.</b> Why might you alert on DLQ depth being non-zero for "too long" rather than non-zero at all?</summary>
+
+A momentary single parked record is expected and self-resolving in the runbook's 9am triage, so paging on any non-zero depth would be noise. Alerting when depth stays non-zero beyond an SLA window (e.g. unprocessed by morning) catches the genuinely neglected case while letting routine poison pills wait. The time dimension encodes the "replayable at 9am, no page at 2am" intent.
+
+</details>
+
+<details><summary><b>70.</b> How does consumer lag differ from DLQ depth as signals, and what does each catch that the other misses?</summary>
+
+Consumer lag catches a healthy-but-slow consumer falling behind (a throughput/backpressure problem) where no records are failing. DLQ depth catches records that are actively failing and being parked (a correctness/poison problem) even if the consumer is otherwise keeping pace. A pipeline can have high lag with an empty DLQ, or a flowing stream with a swelling DLQ — you need both signals because each is blind to the other's failure mode.
+
+</details>
+
+<details><summary><b>71.</b> A Flink job's `backPressuredTimeMsPerSecond` is high on the source but the sink shows high `busyTimeMsPerSecond`. Where do you focus?</summary>
+
+Focus on the sink: it is `busy` near saturation, meaning it is the bottleneck doing all the work it can, and its slowness is back-pressuring everything upstream including the source. You scale the sink's parallelism, optimize its writes, or remove the constraint there. Fixing the source — which is merely back-pressured (a victim) — would do nothing.
+
+</details>
+
+<details><summary><b>72.</b> Why does a slow external sink (like an Iceberg or database writer) so commonly become the backpressure root cause?</summary>
+
+Sinks do synchronous external I/O — commits, network round-trips, file writes — which is often the slowest stage and cannot be sped up just by adding upstream parallelism. When the sink cannot drain records as fast as they arrive, its input buffers fill, credits stop flowing, and backpressure climbs the whole job. Sinks are the usual suspect precisely because their throughput is bounded by an external system, not by Flink.
+
+</details>
+
+<details><summary><b>73.</b> How can batching or async I/O at a sink relieve backpressure without dropping data?</summary>
+
+Batching amortizes per-record overhead (one commit for many records) and async I/O overlaps in-flight requests so the sink isn't idle waiting on each round-trip, both raising effective throughput. Higher sink throughput means it grants credits faster, relieving the backpressure chain. Crucially these speed up draining rather than discarding records, so no data is lost — the right way to fix backpressure.
+
+</details>
+
+<details><summary><b>74.</b> Why is "just drop records to relieve pressure" unacceptable in a fund-data pipeline?</summary>
+
+Dropping a record could lose a trade, an order, a price, or a NAV input, which is a correctness and regulatory failure — fund administration cannot silently omit data. Backpressure-by-design (credit-based, bounded buffers) deliberately slows producers instead of discarding, preserving every record. The acceptable response to overload is added latency or throttling, never data loss.
+
+</details>
+
+<details><summary><b>75.</b> What is the connection between backpressure and Flink checkpoint duration?</summary>
+
+Severe backpressure slows or stalls the flow of checkpoint barriers through the operator graph, because barriers travel in-band with the data and back-pressured channels delay them — so checkpoints take longer or time out. Long or failing checkpoints then threaten exactly-once guarantees and recovery. Thus persistent backpressure is not only a throughput issue but a reliability risk to the checkpointing that underpins data integrity.
+
+</details>
+
+<details><summary><b>76.</b> In Kafka Connect, what does the `__connect.errors.stage` header tell you and why is it useful?</summary>
+
+`__connect.errors.stage` records which phase of the connector pipeline failed — for example value conversion, a single-message transform, or the put-to-sink stage — so you immediately know whether to suspect the deserializer, a transform config, or the sink. This narrows triage from "something failed" to a specific component. Combined with the exception headers it often pinpoints the root cause without reproducing the failure.
+
+</details>
+
+<details><summary><b>77.</b> How do you avoid the DLQ itself becoming a poison pill for its consumer?</summary>
+
+The DLQ-triage/replay tooling must be tolerant: it should read DLQ records defensively (they are by definition malformed in some way), never deserialize them strictly in a way that crashes the triage consumer, and treat them as raw bytes plus headers. If the replay tool itself fails on a record, you have just created a second-order stall. Designing the triage path to never poison-pill on its own input is an easy oversight.
+
+</details>
+
+<details><summary><b>78.</b> What is a "compacted" or keyed DLQ strategy and when is it useful?</summary>
+
+Keying the DLQ topic by the record's natural key (and optionally compacting) means repeated failures of the same logical record collapse to the latest occurrence rather than accumulating duplicates. This is useful when a record keeps failing and being re-parked, so the DLQ shows the current state per key rather than a growing pile. It simplifies triage by deduplicating, at the cost of losing the full failure history per key.
+
+</details>
+
+<details><summary><b>79.</b> Why should the triage owner be a named role, not "the team," in a DLQ runbook?</summary>
+
+"The team" diffuses responsibility — everyone assumes someone else owns the triage, so it slips. Naming a specific on-call role (e.g. the platform on-call engineer) makes the handoff unambiguous and gives the alert a clear destination. Clear ownership is the difference between a DLQ that gets drained every morning and one that silently grows for weeks.
+
+</details>
+
+<details><summary><b>80.</b> How does setting `errors.tolerance = all` interact with offset commits in Kafka Connect?</summary>
+
+With `errors.tolerance = all`, a failed record that is routed to the DLQ is considered handled, so the source offset advances and is committed past it — the task does not get stuck re-reading the bad record. This is precisely what unblocks the partition. The data is preserved only because the DLQ copy exists; the committed offset means the original is no longer re-consumed.
+
+</details>
+
+<details><summary><b>81.</b> What could go wrong if the DLQ topic and the main topic share a consumer group or naming collision?</summary>
+
+A naming collision or shared group can cause the DLQ consumer to read the main topic (or vice versa), or cause offset confusion that re-processes or skips records. The DLQ must be a distinct topic with its own retention and its own triage consumer group. Treating the DLQ as a first-class, separately-named, separately-monitored topic avoids these footguns.
+
+</details>
+
+<details><summary><b>82.</b> Why is it important that DLQ alerting distinguishes severity by the kind of exception, not just count?</summary>
+
+A flood of identical exceptions signals one systemic root cause (one fix, high urgency), whereas a similar count of diverse exceptions signals scattered data-quality issues (many small fixes, lower urgency). Routing both as the same generic "DLQ growing" page loses that distinction and may misdirect the response. Exception-aware alerting helps the right person reach the right diagnosis faster.
+
+</details>
+
+<details><summary><b>83.</b> In Flink, what is the difference between an operator being "idle" and being "backpressured"?</summary>
+
+Idle (`idleTimeMsPerSecond`) means the operator is waiting because there is no input to process — it is starved from upstream. Backpressured (`backPressuredTimeMsPerSecond`) means the operator has input but cannot emit because downstream is not granting it output buffers/credits. Idle points upstream (or to low load); backpressured points downstream — opposite directions for diagnosis.
+
+</details>
+
+<details><summary><b>84.</b> If an entire Flink job shows mostly idle subtasks, what does that suggest about backpressure?</summary>
+
+Predominantly idle subtasks mean there is simply not enough input to keep them busy — the job is under-loaded, not back-pressured, so there is no bottleneck to chase. Backpressure investigation only applies when subtasks are busy or back-pressured. Misreading idleness as a problem leads to needless scaling of a job that is just lightly loaded.
+
+</details>
+
+<details><summary><b>85.</b> Why is consumer lag alone insufficient to diagnose where a streaming bottleneck lives?</summary>
+
+Lag tells you that consumption is behind production but not which internal stage is the constraint — the slow component could be a transform, a join with state, or the sink. You need per-operator signals like Flink's busy/backpressured metrics to localize it. Lag is the symptom at the boundary; the busy/backpressure metrics are the internal map to the root cause.
+
+</details>
+
+<details><summary><b>86.</b> How would you replay a DLQ message after fixing a schema mismatch, and what idempotency check confirms safety?</summary>
+
+After updating the schema/parser so the format now deserializes, you re-inject the parked records (from the DLQ) through the corrected pipeline, typically via a small consumer that reads the DLQ and produces to the input with diagnostic headers stripped. Safety is confirmed by the downstream upsert on the record's natural key, so a record that was partially processed before failing ends in the same single state. You then verify the DLQ drains and the target shows each record exactly once.
+
+</details>
+
+<details><summary><b>87.</b> What is the consequence of replaying a DLQ before the root cause is fixed?</summary>
+
+Replaying into a still-broken pipeline simply reproduces the same failure and re-parks the records — at best wasted effort, at worst an infinite loop or doubled side effects if processing is non-idempotent. Triage order matters: diagnose and fix (data or code), then replay. The runbook should make "root cause resolved" a gate before the replay step.
+
+</details>
+
+<details><summary><b>88.</b> Why must the replay command be written down verbatim in the runbook rather than reconstructed from memory?</summary>
+
+During a real incident, especially at 2am, reconstructing the exact command — correct topic names, consumer group, offsets, idempotency flags — from memory is error-prone and slow, and a wrong flag could double-process or skip records. A verbatim, dry-run-tested command removes guesswork and makes recovery deterministic for whoever is on call. The runbook's value is that it works without the author present.
+
+</details>
+
+<details><summary><b>89.</b> How does the choice of `errors.tolerance` differ between an enrichment connector and a NAV-critical connector?</summary>
+
+An enrichment connector that adds nice-to-have context can use `errors.tolerance = all` with a DLQ so a few bad records don't stop enrichment, accepting deferred triage. A NAV-critical connector should often use `errors.tolerance = none` so any failure halts and is impossible to ignore, because computing NAV on incomplete data is unacceptable. The architect tunes tolerance per data criticality, not globally.
+
+</details>
+
+<details><summary><b>90.</b> What is the purpose of attaching the source offset header to a DLQ message even when you also have the payload?</summary>
+
+The source offset (`__connect.errors.offset`, with topic and partition) lets you locate the exact original record in the source topic — useful for re-reading it in its original byte form, confirming ordering, or replaying from source rather than from the DLQ copy. The payload may have been partly transformed before failing, so the offset is the authoritative pointer back to the untouched original. It anchors the record in its source-of-truth position.
+
+</details>
+
+<details><summary><b>91.</b> Why is replay idempotency easier to guarantee for upsert-style sinks than for append-only ledgers?</summary>
+
+Upsert sinks match on a key and overwrite, so replaying the same keyed record converges to one row regardless of repetition — idempotent by construction. Append-only ledgers add a new entry every time, so naive replay duplicates entries and you must add explicit dedup (e.g. a unique constraint on an idempotency key, or a processed-ids table). The sink's write semantics determine how much extra work idempotent replay requires.
+
+</details>
+
+<details><summary><b>92.</b> What early-warning value does watching the trend of `backPressuredTimeMsPerSecond` over time provide?</summary>
+
+A rising `backPressuredTimeMsPerSecond` trend shows a bottleneck developing before it causes lag blowups, checkpoint timeouts, or a crash, giving you time to scale or optimize proactively. A sudden jump can correlate with a load spike or a degraded downstream system. Trending the metric turns backpressure from a post-mortem finding into a predictive signal.
+
+</details>
+
+<details><summary><b>93.</b> Why should DLQ-depth and consumer-lag dashboards sit next to each other for an architect's mental model?</summary>
+
+Together they cover the two orthogonal failure modes — correctness (records failing into the DLQ) and throughput (consumers falling behind) — so an architect can instantly tell whether an incident is "bad data" or "too slow." Seeing both at once prevents misdiagnosis, like scaling consumers when the real problem is a schema break filling the DLQ. The pairing reflects the lesson's dual focus on DLQs and backpressure.
+
+</details>
+
+<details><summary><b>94.</b> How does at-least-once delivery in Flink influence DLQ and replay design?</summary>
+
+At-least-once means records (and replayed DLQ records) can be processed more than once after recovery, so any sink or downstream must be idempotent to avoid duplicate effects — the same precondition the DLQ replay runbook requires. Flink's checkpointing provides exactly-once state internally, but end-to-end exactly-once additionally needs transactional/idempotent sinks. The architect aligns DLQ replay idempotency with the job's delivery semantics so the two reinforce rather than contradict.
+
+</details>
+
+<details><summary><b>95.</b> What happens to backpressure when you increase parallelism on the bottleneck operator?</summary>
+
+Raising the parallelism of the truly busy (bottleneck) operator spreads its work across more subtasks, increasing throughput so it drains its input faster, grants credits sooner, and relieves the backpressure propagating upstream. The key is to scale the busy operator, not a back-pressured victim. If the bottleneck is an external sink, you may also need to scale that external system, since Flink parallelism alone cannot exceed the sink's capacity.
+
+</details>
+
+<details><summary><b>96.</b> Why is "scale everything" a poor response to backpressure?</summary>
+
+Backpressure has a single localized cause — the busy operator or slow sink — so scaling the whole job wastes resources on stages that were never the constraint while possibly not fixing the real one. It also increases cost and operational complexity. The disciplined approach is to find the busy operator via the metrics/Web UI and scale exactly there.
+
+</details>
+
+<details><summary><b>97.</b> What does it mean that backpressure metrics for a subtask "sum to approximately 1000ms per second"?</summary>
+
+Each second of a subtask's life is partitioned into busy, backpressured, and idle time, so `busyTimeMsPerSecond + backPressuredTimeMsPerSecond + idleTimeMsPerSecond` is about 1000. This means you can read the three as a percentage breakdown of where the subtask's time goes. The one near 1000 tells you the subtask's dominant state — busy means bottleneck, backpressured means downstream-bound, idle means starved.
+
+</details>
+
+<details><summary><b>98.</b> How would you set a DLQ-depth threshold for a transfer-agency order pipeline so a single failed order doesn't page but a systemic break does?</summary>
+
+Set the page threshold above the count of a normal handful of one-off rejects and tie it to inflow rate or sustained depth, so one parked order at 2am stays below it and waits for 9am triage, while a sudden batch of failing orders (a format or schema break) crosses it and pages. Pair the page with a named TA-platform on-call owner. This realizes the "no page for one poison pill, page for systemic" intent in a fund-specific flow.
+
+</details>
+
+<details><summary><b>99.</b> A connector is RUNNING, lag is flat, but stakeholders report missing data downstream. What should you check first given this lesson?</summary>
+
+Check the DLQ depth and the connector's error rate first: with `errors.tolerance = all` the task can be silently routing records to the DLQ while looking perfectly healthy, which exactly produces "running, no lag, missing data." The missing records are likely parked, not lost — inspect the DLQ headers to find why they failed. This is the canonical "green task hiding a DLQ outage" scenario.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the architect's end-to-end design that satisfies all of this lesson's Done-when criteria.</summary>
+
+Configure connectors with the right per-feed `errors.tolerance` and a durable, diagnostically-headered DLQ topic; set lag and DLQ-depth/rate alerts tuned so a lone poison pill at 2am pages no one while a systemic spike pages a named owner; write and dry-run an idempotent replay runbook that names the triage owner, the verbatim replay command, and the idempotency precondition; and run Flink with credit-based flow control so backpressure throttles without dropping data and is observable via the busy/backpressured metrics and Web UI. The result is a pipeline where a 2am poison pill is captured silently, no record is lost, and recovery at 9am is a documented, tested, no-loss replay.
+
+</details>
+
+
+## Phase 4 · 2.4.2 Message brokers vs logs — 100 self-test questions
+
+<details><summary><b>1.</b> At the highest level, what is the core difference between a message broker like RabbitMQ and a log like Kafka?</summary>
+
+A broker is queue-oriented: it pushes each message to one of the competing consumers and deletes it once acknowledged, so the message is gone after processing. A log is an append-only ordered record where consumers track their own position (offset) and the data stays for a retention window, so many independent readers can replay it. Picking the wrong model is expensive both ways — Kafka fights you for per-message request/reply, and RabbitMQ cannot give auditors replay.
+
+</details>
+
+<details><summary><b>2.</b> What does "competing consumers" mean in RabbitMQ?</summary>
+
+Competing consumers is the pattern where several consumers subscribe to the same queue and the broker hands each message to exactly one of them, spreading the workload. RabbitMQ dispatches in round-robin-style fashion across the consumers attached to that queue, so adding consumers increases throughput on a single task stream. It is the canonical way to scale out task distribution where each job must be done once.
+
+</details>
+
+<details><summary><b>3.</b> How does Kafka's consumer-group model differ from competing consumers on a single queue?</summary>
+
+In a consumer group, parallelism is bounded by partitions: each partition is assigned to exactly one consumer in the group, so a partition's messages are processed by a single consumer, not freely shared. You scale by adding partitions and consumers together, not by piling consumers onto one stream. This gives per-partition ordering but means you cannot have more useful consumers in a group than partitions.
+
+</details>
+
+<details><summary><b>4.</b> In Kafka, what happens if a consumer group has more consumers than the topic has partitions?</summary>
+
+The extra consumers sit idle because each partition can be assigned to only one consumer within a group. If a topic has 4 partitions and the group has 6 consumers, 2 consumers receive no assignment until a partition frees up. This is a frequent gotcha — people add consumers expecting more throughput but are capped by the partition count.
+
+</details>
+
+<details><summary><b>5.</b> What is a partition in Kafka and why does it matter for parallelism?</summary>
+
+A partition is one ordered, append-only segment of a topic's log; a topic is split into one or more partitions spread across brokers. Partitions are the unit of parallelism and ordering: ordering is guaranteed only within a partition, and consumer parallelism in a group is capped at the partition count. Choosing too few partitions limits scale; choosing too many adds overhead and rebalance cost.
+
+</details>
+
+<details><summary><b>6.</b> What is a partition key and what does it control?</summary>
+
+A partition key is a value attached to a produced message that Kafka hashes to decide which partition the message lands in (default partitioner hashes the key modulo partition count). All messages with the same key go to the same partition, preserving their relative order. For example, keying by ISIN keeps every event for one instrument in order on one partition.
+
+</details>
+
+<details><summary><b>7.</b> In RabbitMQ, what is a routing key and how is it different from a partition key?</summary>
+
+A routing key is a label on a published message that an exchange uses, together with bindings, to decide which queues receive the message — it is about routing/filtering, not ordering or placement. A Kafka partition key, by contrast, deterministically maps a message to a partition for ordering and load spread. One selects destinations via exchange logic; the other selects a log shard via hashing.
+
+</details>
+
+<details><summary><b>8.</b> What is an exchange in RabbitMQ?</summary>
+
+An exchange is the entry point a publisher sends to; it never stores messages but routes them to bound queues according to its type and the bindings. Publishers publish to an exchange with a routing key, and the exchange applies its matching rules to fan the message out to zero or more queues. Queues, not exchanges, hold messages until consumed.
+
+</details>
+
+<details><summary><b>9.</b> What is a binding in RabbitMQ?</summary>
+
+A binding is a rule that links an exchange to a queue, optionally carrying a binding key that acts as a filter. When a message arrives at the exchange, the exchange compares the message's routing key (and exchange type) against the bindings to decide delivery. Without a binding, a message published to an exchange is simply dropped (or returned, if mandatory).
+
+</details>
+
+<details><summary><b>10.</b> Name the four standard AMQP 0-9-1 exchange types.</summary>
+
+The four standard exchange types are direct, fanout, topic, and headers. There is also the default exchange, a pre-declared nameless direct exchange. Each type defines a different rule for matching a message's routing key (or headers) against bindings to select destination queues.
+
+</details>
+
+<details><summary><b>11.</b> How does a direct exchange route messages?</summary>
+
+A direct exchange delivers a message to the queues whose binding key exactly equals the message's routing key (K = R). Multiple queues may bind with the same key and each receives a copy. It is the right choice for simple point-to-point or selective routing by an exact label, such as routing by message type.
+
+</details>
+
+<details><summary><b>12.</b> How does a fanout exchange route messages?</summary>
+
+A fanout exchange ignores the routing key entirely and delivers a copy of every message to all bound queues. It is the broadcast primitive — useful when several independent consumers each need the full stream. For example, a fanout could deliver every NAV-published event simultaneously to a reporting queue and an alerting queue.
+
+</details>
+
+<details><summary><b>13.</b> How does a topic exchange route messages?</summary>
+
+A topic exchange matches the message routing key against the binding patterns using wildcards: `*` matches exactly one word and `#` matches zero or more words, with words separated by dots. So a binding `fund.lux.*` matches `fund.lux.nav` but not `fund.lux.nav.error`. It enables flexible multicast routing by hierarchical topic, e.g. subscribing to `fund.lux.#` for all Luxembourg-fund events.
+
+</details>
+
+<details><summary><b>14.</b> How does a headers exchange route messages, and what is `x-match`?</summary>
+
+A headers exchange ignores the routing key and instead matches on message header attributes. The binding's `x-match` argument controls the logic: `any` means the message matches if at least one specified header matches, and `all` means every specified header must match. It is useful when routing depends on multiple structured attributes rather than a single dotted string.
+
+</details>
+
+<details><summary><b>15.</b> What is the default exchange in RabbitMQ and why is it convenient?</summary>
+
+The default exchange is a pre-declared direct exchange with an empty-string name to which every queue is automatically bound using its own name as the routing key. So publishing to the default exchange with routing key equal to a queue name delivers straight to that queue. It is convenient for simple point-to-point sending without declaring your own exchange or bindings.
+
+</details>
+
+<details><summary><b>16.</b> What does it mean to acknowledge (ack) a message in RabbitMQ?</summary>
+
+Acknowledging tells the broker the consumer has successfully taken responsibility for a message so the broker can remove it from the queue. With manual acks the consumer calls `basic.ack` after processing; only then is the message considered done. This per-message acknowledgement is what guarantees a job is not lost if a consumer crashes mid-processing.
+
+</details>
+
+<details><summary><b>17.</b> What is the difference between automatic-ack and manual-ack mode in RabbitMQ?</summary>
+
+In automatic-ack mode the broker considers the message delivered (and removes it) as soon as it sends it to the consumer, before processing. In manual-ack mode the broker keeps the message until the consumer explicitly sends `basic.ack`. Automatic ack is faster but risks message loss on a crash; manual ack is the safe default for work that must not be lost.
+
+</details>
+
+<details><summary><b>18.</b> What happens to an unacknowledged RabbitMQ message if its consumer disconnects?</summary>
+
+If a consumer disconnects (closes the channel/connection) without acking, the broker treats the message as undelivered and redelivers it — to another consumer if one is available, otherwise it waits until a consumer registers for that queue. This is automatic redelivery and is the mechanism behind at-least-once processing. The flip side is the message may be processed twice, so consumers should be idempotent.
+
+</details>
+
+<details><summary><b>19.</b> What is the difference between `basic.reject` and `basic.nack`?</summary>
+
+`basic.reject` lets a consumer negatively acknowledge a single message and choose whether to requeue it or discard it. `basic.nack` is a RabbitMQ extension that does the same but can reject multiple messages at once (with the `multiple` flag), which `basic.reject` cannot. Both signal processing failure rather than success.
+
+</details>
+
+<details><summary><b>20.</b> What does the `requeue` flag do when rejecting a RabbitMQ message?</summary>
+
+When rejecting via `basic.reject` or `basic.nack`, setting `requeue=true` puts the message back on the queue for redelivery; setting `requeue=false` discards it (or dead-letters it if a dead-letter exchange is configured). Blindly requeuing a message that always fails creates a poison-message loop. The safe pattern is `requeue=false` after N attempts so it lands in a dead-letter queue.
+
+</details>
+
+<details><summary><b>21.</b> What is the prefetch count (`basic.qos`) in RabbitMQ and why does it matter?</summary>
+
+Prefetch count, set via `basic.qos`, limits how many unacknowledged messages the broker will send a consumer before it must ack some. RabbitMQ supports channel-level prefetch-count (not connection or size-based prefetch). A low prefetch spreads work fairly across competing consumers; an unbounded prefetch lets one fast-grabbing consumer hoard the queue while others starve.
+
+</details>
+
+<details><summary><b>22.</b> A RabbitMQ consumer grabs far more messages than its peers and they sit idle — what is the likely cause?</summary>
+
+The likely cause is a high or unset prefetch count, so the broker pushed a large batch of unacked messages to that one consumer up front. Set a modest prefetch via `basic.qos` (often 1 for slow, uneven tasks) so the broker round-robins fairly and only sends more after acks. This is the standard fix for unbalanced competing consumers.
+
+</details>
+
+<details><summary><b>23.</b> What is an offset in Kafka?</summary>
+
+An offset is a monotonically increasing integer that uniquely identifies a message's position within a single partition. It is permanent — the offset of a given message never changes — so it serves as a stable cursor. Consumers track which offset they have processed; reading is just advancing that cursor, which is what makes replay possible.
+
+</details>
+
+<details><summary><b>24.</b> How does offset tracking differ fundamentally from RabbitMQ acknowledgement?</summary>
+
+RabbitMQ acks are per-message and destructive: acking removes the message so it cannot be re-read. Kafka offset tracking is positional and non-destructive: committing an offset only records how far a group has read, and the messages stay in the log until retention expires. That is precisely why Kafka can replay and RabbitMQ cannot.
+
+</details>
+
+<details><summary><b>25.</b> Where does Kafka store committed consumer-group offsets?</summary>
+
+Kafka stores committed offsets in an internal compacted topic called `__consumer_offsets`. The group coordinator (chosen from the leaders of that topic's partitions, keyed by the group id hash) manages these commits and group membership. Because offsets live server-side, a restarted consumer resumes from its last committed position rather than the start.
+
+</details>
+
+<details><summary><b>26.</b> What does it mean that a Kafka consumer can "replay" a topic?</summary>
+
+Replay means a consumer can reset its offset backward (or to the earliest available offset) and re-read messages that are still within the retention window, because the log retains them rather than deleting on consumption. This is invaluable for reprocessing — for example re-running a corrected NAV calculation over last week's events. A queue cannot do this once the messages have been acked and removed.
+
+</details>
+
+<details><summary><b>27.</b> What is a consumer-group rebalance in Kafka and what triggers it?</summary>
+
+A rebalance is the process of reassigning a topic's partitions among the consumers in a group so each partition has exactly one owner. It is triggered when group membership changes (a consumer joins, leaves, or is deemed dead) or when subscribed topic metadata changes, such as adding partitions. During a rebalance, processing typically pauses briefly while assignments settle.
+
+</details>
+
+<details><summary><b>28.</b> Why can frequent Kafka rebalances hurt throughput?</summary>
+
+During a rebalance, consumers may stop fetching while partitions are reassigned and reset to the last committed offset, causing stop-the-world pauses. Frequent rebalances — often caused by slow processing exceeding `max.poll.interval.ms` or flaky network heartbeats — mean the group spends time reshuffling instead of consuming. Tuning poll intervals, session timeouts, and using cooperative/incremental rebalancing reduces the impact.
+
+</details>
+
+<details><summary><b>29.</b> What is log compaction in Kafka and when would you use it?</summary>
+
+Log compaction is a cleanup policy (`cleanup.policy=compact`) that retains at least the latest message for each key and removes older messages with the same key, rather than deleting purely by time. It keeps a compacted topic as an evolving snapshot of the latest value per key. Use it for changelog-style data, e.g. the current reference record per ISIN, where you want the latest state retained indefinitely but not the full history.
+
+</details>
+
+<details><summary><b>30.</b> Does log compaction reorder messages in Kafka?</summary>
+
+No. Compaction only removes superseded messages for a key; it never reorders. Ordering at the key and partition level is always preserved, and the offset of any surviving message never changes. So a compacted partition is still a valid ordered log, just with stale duplicates per key pruned away.
+
+</details>
+
+<details><summary><b>31.</b> What is a tombstone in a compacted Kafka topic?</summary>
+
+A tombstone is a message with a key and a null value, signalling that the key should be deleted from the compacted view. After compaction processes it, the key's earlier records are removed; the tombstone itself is later purged once `delete.retention.ms` elapses, freeing space. Tombstones let a compacted changelog represent deletions, not just updates.
+
+</details>
+
+<details><summary><b>32.</b> What does Kafka's `retention.ms` control, and how does it relate to replay?</summary>
+
+`retention.ms` sets how long messages are kept on a (delete-policy) topic before they are eligible for deletion, regardless of whether they were consumed. It directly bounds how far back you can replay — you can only reset to offsets still on disk. For audit-reprocessing needs you size retention (or compaction) to cover the longest reprocessing window you must support.
+
+</details>
+
+<details><summary><b>33.</b> Summarise: when does a queue win over a log?</summary>
+
+A queue wins for task distribution among competing consumers, request/reply, per-message routing, and per-message lifecycle features such as TTL, priority, and dead-lettering. These are workloads where each message is a job consumed once and you want fine-grained per-message control. RabbitMQ or Azure Service Bus fit these naturally.
+
+</details>
+
+<details><summary><b>34.</b> Summarise: when does a log win over a queue?</summary>
+
+A log wins when you need replay, fan-out to many independent consumers, strong per-partition ordering, and long retention. These are integration-backbone and event-streaming workloads where multiple teams read the same stream at their own pace and may reprocess history. Kafka is the natural fit.
+
+</details>
+
+<details><summary><b>35.</b> Why is request/reply awkward on Kafka?</summary>
+
+Request/reply needs a specific reply routed back to one waiting caller, but Kafka has no per-message addressing — consumers read partitions positionally, and a reply must be correlated and filtered out of a shared topic. You end up bolting correlation ids, dedicated reply topics, and consumer-side filtering onto a model that was not built for it. A broker with direct routing and per-message delivery does this far more naturally.
+
+</details>
+
+<details><summary><b>36.</b> Why is a replayable integration backbone awkward on RabbitMQ?</summary>
+
+RabbitMQ deletes messages once acked, so there is no retained history to re-read; once consumed, the message is gone. Building replay means re-architecting around external storage or stream plugins, fighting the broker's destructive consumption model. Auditors and reprocessing jobs that depend on re-reading past events need a log's retained offsets, which is Kafka's home turf.
+
+</details>
+
+<details><summary><b>37.</b> What is per-message TTL and which side of the line offers it cleanly?</summary>
+
+Per-message TTL is the ability to expire an individual message after a set time so it is dropped (or dead-lettered) if not consumed in time. Queues offer this cleanly: RabbitMQ supports per-message and per-queue TTL, and Azure Service Bus supports message TTL. A log expires data by retention policy on the whole topic, not per message, so TTL is a queue strength.
+
+</details>
+
+<details><summary><b>38.</b> What is Azure Service Bus and where does it sit in this comparison?</summary>
+
+Azure Service Bus is Microsoft's enterprise-grade managed message broker — the corp-native queue analogue to RabbitMQ, built on AMQP. It offers queues and topics/subscriptions with sessions, dead-lettering, TTL, and peek-lock delivery. In the fund platform's Azure estate it is the default choice for queue semantics, just as RabbitMQ is the FOSS hands-on equivalent.
+
+</details>
+
+<details><summary><b>39.</b> What protocol does Azure Service Bus use, linking it to RabbitMQ?</summary>
+
+Azure Service Bus speaks AMQP 1.0 as its primary wire protocol. While RabbitMQ's core model is AMQP 0-9-1 (a different, earlier version), both share the broker/queue mental model of exchanges-or-topics, queues, and per-message acknowledgement. Knowing AMQP concepts transfers conceptually between the two even though the wire versions differ.
+
+</details>
+
+<details><summary><b>40.</b> What is a Service Bus topic/subscription and how does it compare to RabbitMQ exchanges?</summary>
+
+A Service Bus topic is a one-to-many entity: publishers send to the topic and each subscription (with optional filter rules) gets its own copy of matching messages, which subscribers consume like a queue. It plays the role RabbitMQ's exchanges-plus-bound-queues play — fan-out with filtering — but packaged as topic + subscriptions. Subscriptions give each consumer group an independent, filterable stream.
+
+</details>
+
+<details><summary><b>41.</b> What is the peek-lock receive mode in Azure Service Bus?</summary>
+
+Peek-lock is the default settlement mode: the broker locks a message for the receiver for a lock duration, hands it over, and waits for the receiver to complete (ack), abandon, or dead-letter it. If the lock elapses without settlement, the message becomes visible again for redelivery. It is Service Bus's equivalent of unacked-then-redeliver and the safe default versus receive-and-delete.
+
+</details>
+
+<details><summary><b>42.</b> What is the dead-letter queue (DLQ) in Azure Service Bus?</summary>
+
+Every Service Bus queue and topic subscription has an associated dead-letter sub-queue where messages are moved when they cannot be delivered normally. Common triggers are exceeding the max delivery count or having the message TTL expire (with dead-lettering on expiration enabled). The DLQ isolates poison and expired messages for inspection and reprocessing instead of losing or endlessly retrying them.
+
+</details>
+
+<details><summary><b>43.</b> What is the max delivery count in Azure Service Bus and its default?</summary>
+
+Max delivery count is the number of times a message may be delivered (released/abandoned or lock-expired) before Service Bus automatically dead-letters it. It is configurable from 1 to 2147483647, with a default of 10. When `DeliveryCount` exceeds it, the message moves to the DLQ with reason code `MaxDeliveryCountExceeded`, preventing an endless redelivery loop on a poison message.
+
+</details>
+
+<details><summary><b>44.</b> What are Service Bus sessions and what problem do they solve?</summary>
+
+Sessions group related messages by a session id and lock them together to a single receiver, guaranteeing ordered, exclusive, FIFO-like processing of that group. This gives ordered handling on a broker that otherwise distributes messages across competing consumers — useful when, say, all events for one subscription transaction must be processed in order by one worker. It is Service Bus's answer to the per-partition ordering Kafka gets from partitions.
+
+</details>
+
+<details><summary><b>45.</b> How does message TTL behave for a session in Azure Service Bus?</summary>
+
+For session-enabled entities, messages are locked at the session level, and if the TTL of any message in the session expires, the system either drops or dead-letters the affected messages based on the entity's dead-lettering-on-expiration setting. So expiration is evaluated per message but interacts with the session's grouped, ordered handling. This matters when an ordered session must not silently skip an expired step.
+
+</details>
+
+<details><summary><b>46.</b> What is the default/maximum message TTL on Azure Service Bus standard and premium tiers?</summary>
+
+On the standard and premium tiers the default expiration time is the largest value of a signed 64-bit integer, effectively unlimited unless you set a shorter TTL. On the basic tier the default (and maximum) is 14 days. You normally set an explicit, shorter TTL appropriate to the business meaning of the message rather than relying on the near-infinite default.
+
+</details>
+
+<details><summary><b>47.</b> Why is "ack/redelivery vs offsets" the crux of choosing broker vs log for audit-reprocessing?</summary>
+
+Ack/redelivery is destructive — once a message is acked it is removed, so there is nothing left to reprocess. Offset tracking is positional and non-destructive, so a reprocessing job can rewind to an earlier offset and replay the retained log. An audit-reprocessing use case therefore needs the log's offset replay, not the queue's at-least-once delivery.
+
+</details>
+
+<details><summary><b>48.</b> An audit team needs to re-derive last quarter's NAVs from the original input events. Broker or log, and why?</summary>
+
+A log, because re-deriving requires replaying the original events, which a queue has already discarded on ack. With Kafka you set retention (or compaction) to cover the quarter and reset a consumer group's offsets to re-read the inputs. A RabbitMQ queue would have deleted those messages the moment they were first processed.
+
+</details>
+
+<details><summary><b>49.</b> You need to distribute thousands of independent valuation tasks across a worker pool. Broker or log, and why?</summary>
+
+A broker (RabbitMQ or Service Bus), because this is classic competing-consumers task distribution where each task is done once and you scale by adding workers to one queue. A log would tie parallelism to partition count and give you no per-message ack or redelivery for individual failed tasks. The queue's round-robin dispatch and per-message ack fit the workload exactly.
+
+</details>
+
+<details><summary><b>50.</b> A downstream service must reply to each enrichment request with a result for that specific request. Broker or log, and why?</summary>
+
+A broker, because request/reply needs per-message delivery and a routed reply back to the caller, which direct exchanges or Service Bus reply queues handle naturally. On Kafka you would have to bolt on correlation ids and filter a shared topic, fighting the consumer-group model. The queue's addressable, per-message semantics are the right fit.
+
+</details>
+
+<details><summary><b>51.</b> Five independent teams each need the full stream of trade events, read at their own pace. Broker or log, and why?</summary>
+
+A log, because fan-out to many independent consumers that each keep their own offset is exactly what Kafka consumer groups provide. Each team runs its own group, reads the whole topic independently, and can replay if it falls behind or needs to reprocess. Doing this on a queue would mean duplicating messages into many queues and losing replay.
+
+</details>
+
+<details><summary><b>52.</b> Per-instrument event ordering (all events for one ISIN in order) is required. Broker or log, and how?</summary>
+
+A log handles this cleanly: key the messages by ISIN so they land on the same partition, where Kafka guarantees order within that partition. Each partition is consumed by one consumer in the group, preserving the per-ISIN sequence. On a broker you would lean on Service Bus sessions or a single-consumer queue to get ordering, which limits parallelism.
+
+</details>
+
+<details><summary><b>53.</b> Why is "use Kafka for request/reply" called out as a mistake the architect must stop making?</summary>
+
+Because Kafka's model is positional log consumption by partition-bound consumers, not addressed per-message delivery, so request/reply forces awkward correlation-id filtering and dedicated reply topics. You spend effort fighting the consumer-group model for something a broker does out of the box. The done-when criterion explicitly is to never propose Kafka for request/reply again.
+
+</details>
+
+<details><summary><b>54.</b> Why is "use RabbitMQ for a replayable integration backbone" called out as a mistake?</summary>
+
+Because RabbitMQ deletes messages on ack, so there is no retained history for auditors or reprocessing to replay — the very capability an integration backbone in a regulated shop needs. You would lose replay and end up re-engineering around external stores. The done-when criterion is to never propose RabbitMQ for replayable integration again.
+
+</details>
+
+<details><summary><b>55.</b> What is the transactional-enqueue advantage of a Postgres-native queue like pgmq?</summary>
+
+Because pgmq lives inside Postgres, enqueueing a message and committing the business row can happen in the same database transaction, so they succeed or fail atomically. This eliminates the dual-write problem where you commit a row but the message send fails (or vice versa). An external broker cannot share your DB transaction, so you need patterns like the transactional outbox to get the same guarantee.
+
+</details>
+
+<details><summary><b>56.</b> What is pgmq and what is it modelled on?</summary>
+
+pgmq is a lightweight message queue implemented as a Postgres extension, modelled on AWS SQS (and RSMQ), giving SQS-style queue semantics inside your database. You create a queue, `send` messages, `read` them with a visibility timeout, and then `delete` or `archive` them. It is attractive when you already run Postgres and want one system to operate, secure, and back up.
+
+</details>
+
+<details><summary><b>57.</b> What is the visibility timeout (`vt`) in pgmq?</summary>
+
+The visibility timeout is the period a message becomes invisible to other consumers after one consumer reads it, set via the `vt` argument to `pgmq.read`. It should exceed the expected processing time so a second worker does not pick up an in-flight message. If processing finishes in time the worker calls `delete` or `archive`; if it crashes, the message reappears after `vt` for retry.
+
+</details>
+
+<details><summary><b>58.</b> In pgmq, what is the difference between `pgmq.delete` and `pgmq.archive`?</summary>
+
+After successful processing, `pgmq.delete` removes the message from the queue entirely, while `pgmq.archive` moves it to a per-queue archive table (prefixed `a_`, e.g. `a_my_queue`) for retention and later inspection. Archiving keeps an auditable record of processed messages instead of discarding them. Delete is for fire-and-forget jobs; archive suits cases where you want history.
+
+</details>
+
+<details><summary><b>59.</b> What delivery guarantee does pgmq advertise, and with what caveat?</summary>
+
+pgmq advertises exactly-once delivery within a visibility timeout — while a message is invisible under its `vt`, no other consumer will receive it. The caveat is "within the visibility timeout": if processing outruns `vt`, the message becomes visible again and can be delivered to another worker, so set `vt` generously and keep handlers idempotent. It is not a global exactly-once guarantee across all time.
+
+</details>
+
+<details><summary><b>60.</b> What is `LISTEN`/`NOTIFY` in Postgres and how does it relate to messaging?</summary>
+
+`LISTEN` and `NOTIFY` are Postgres commands implementing a lightweight publish/subscribe mechanism: a session issues `NOTIFY channel, payload` and any session that issued `LISTEN channel` receives the notification. It gives in-database, low-latency event signalling without a separate broker. It suits low-volume pub/sub and cache-invalidation signals, but is fire-and-forget with no persistence or replay.
+
+</details>
+
+<details><summary><b>61.</b> When is the Postgres-native messaging alternative (pgmq + `LISTEN`/`NOTIFY`) the better choice?</summary>
+
+It is better when you already run Postgres, volumes are low-to-moderate, and you value transactional enqueue, fewer moving parts, and a single system to secure and back up. You avoid operating a separate broker cluster and get the message committing atomically with your data. For a modest fund-ops workload already on Postgres this can be the pragmatic, lower-risk choice.
+
+</details>
+
+<details><summary><b>62.</b> When should you reach for RabbitMQ or Kafka instead of the Postgres-native option?</summary>
+
+Reach out when you need high-throughput fan-out, topic routing or exchanges, very long retention with replay, or a broker-protocol ecosystem — capabilities a single Postgres struggles to provide. RabbitMQ shines for rich routing; Kafka shines for a replayable log at scale. The Postgres approach trades those advanced capabilities for operational simplicity.
+
+</details>
+
+<details><summary><b>63.</b> What is the key trade-off summary between RabbitMQ and Kafka in one sentence?</summary>
+
+RabbitMQ gives smart per-message routing and destructive, acked delivery for task distribution and request/reply, while Kafka gives a dumb-but-durable ordered log with offset-based replay and fan-out for streaming and reprocessing. You choose RabbitMQ when the message is a job to be done once and Kafka when the message is a fact to be retained and replayed.
+
+</details>
+
+<details><summary><b>64.</b> What does it mean that "the broker is smart, the consumer is dumb" for RabbitMQ versus the reverse for Kafka?</summary>
+
+In RabbitMQ the broker does the work — routing via exchanges, tracking acks, redelivering — so consumers stay simple. In Kafka the broker is a simple append-and-serve log, and the consumer is smart: it tracks its own offset, decides what to read, and manages replay. This architectural inversion explains why Kafka scales reads cheaply and RabbitMQ scales routing logic.
+
+</details>
+
+<details><summary><b>65.</b> How do RabbitMQ and Kafka differ in what happens to a message after it is consumed?</summary>
+
+In RabbitMQ a consumed-and-acked message is removed from the queue and is gone. In Kafka a consumed message stays in the log until retention or compaction removes it, and only the consumer's offset advances. This single difference — destructive vs non-destructive consumption — underlies replay, fan-out, and audit capabilities.
+
+</details>
+
+<details><summary><b>66.</b> Can multiple independent applications each get every message in RabbitMQ, and how?</summary>
+
+Yes, but not from one queue — you bind multiple queues (one per application) to a fanout or topic exchange so each queue receives its own copy. Each application then consumes its own queue independently. This contrasts with Kafka, where multiple consumer groups read the same topic without duplicating storage.
+
+</details>
+
+<details><summary><b>67.</b> In Kafka, how do two different consumer groups reading the same topic behave?</summary>
+
+Each consumer group has its own independent set of committed offsets, so both groups read every message at their own pace without affecting each other. The topic stores the data once; groups are just separate cursors over it. This is native fan-out — adding a new group means a new reader, not new copies of the data.
+
+</details>
+
+<details><summary><b>68.</b> What is at-least-once delivery and which mechanisms produce it?</summary>
+
+At-least-once means a message is delivered one or more times — never lost, possibly duplicated. RabbitMQ produces it via manual ack plus redelivery of unacked messages; Kafka produces it when you process before committing the offset, so a crash re-reads uncommitted messages. The practical consequence is consumers must be idempotent.
+
+</details>
+
+<details><summary><b>69.</b> What is at-most-once delivery and when does it arise?</summary>
+
+At-most-once means a message is delivered zero or one times — never duplicated, but possibly lost. It arises with automatic-ack in RabbitMQ (acked before processing) or committing the Kafka offset before processing. It is acceptable only when losing the occasional message is tolerable, such as some metrics streams.
+
+</details>
+
+<details><summary><b>70.</b> Why is exactly-once delivery hard, and how do these systems approach it?</summary>
+
+Exactly-once is hard because crashes can happen between processing and acking/committing, forcing a choice between possible duplication or possible loss. Kafka offers exactly-once semantics for stream processing via idempotent producers and transactions tying reads, processing, and offset commits together; pgmq offers exactly-once within a visibility timeout. In practice most systems target at-least-once plus idempotent consumers, which is simpler and robust.
+
+</details>
+
+<details><summary><b>71.</b> What is a poison message and how does each system handle it?</summary>
+
+A poison message is one that repeatedly fails processing and would loop forever if endlessly requeued. RabbitMQ handles it by rejecting with `requeue=false` after retries so it dead-letters via a dead-letter exchange; Azure Service Bus dead-letters automatically once max delivery count is exceeded. Kafka has no built-in DLQ, so you typically route failures to a separate error topic in application code.
+
+</details>
+
+<details><summary><b>72.</b> What is a dead-letter exchange (DLX) in RabbitMQ?</summary>
+
+A dead-letter exchange is an exchange to which messages are republished when they are rejected with `requeue=false`, expire via TTL, or exceed a queue length limit. Configuring a queue with a DLX routes such messages to a dead-letter queue for later inspection or retry. It is RabbitMQ's mechanism for not silently losing messages that cannot be processed normally.
+
+</details>
+
+<details><summary><b>73.</b> How does ordering differ between a single RabbitMQ queue with one consumer and with many consumers?</summary>
+
+With a single consumer, a RabbitMQ queue delivers messages in FIFO order. With multiple competing consumers, messages are dispatched round-robin and processed concurrently, so overall completion order is not guaranteed even though dispatch order is FIFO. If you need ordering and parallelism together, you partition by key (e.g. consistent-hash to per-key queues) — analogous to Kafka partitions.
+
+</details>
+
+<details><summary><b>74.</b> How does Kafka guarantee ordering and what is its scope?</summary>
+
+Kafka guarantees ordering only within a single partition, where messages have strictly increasing offsets. Across partitions there is no global ordering. So you preserve order for a logical entity by keying it to one partition; total ordering across a high-volume topic would require a single partition and thus no parallelism.
+
+</details>
+
+<details><summary><b>75.</b> Why might keying every message to the same partition be a bad idea in Kafka?</summary>
+
+Keying everything to one partition forces all messages through a single partition and thus a single consumer, eliminating parallelism and creating a hot partition that bottlenecks throughput. You get total ordering but lose scale. The right approach is to key by the entity whose order matters (e.g. ISIN), spreading distinct entities across partitions while preserving per-entity order.
+
+</details>
+
+<details><summary><b>76.</b> What is consumer lag in Kafka and why monitor it?</summary>
+
+Consumer lag is the difference between the latest offset produced to a partition and the offset a consumer group has committed — i.e. how far behind the consumer is. Growing lag means consumers cannot keep up with producers, risking breached SLAs or, if it exceeds retention, data loss before consumption. Monitoring lag is the primary health signal for a Kafka pipeline.
+
+</details>
+
+<details><summary><b>77.</b> If Kafka consumer lag keeps growing, what are the first things to check?</summary>
+
+First confirm whether consumers are alive and not stuck in repeated rebalances; then check whether parallelism is capped (consumers equal to or fewer than partitions, idle consumers). Also inspect per-message processing time and downstream slowness, and whether a single hot partition is the bottleneck. The fix is usually more partitions plus more consumers, faster processing, or rebalance tuning.
+
+</details>
+
+<details><summary><b>78.</b> A RabbitMQ queue's depth keeps climbing while consumers look healthy — what do you investigate?</summary>
+
+Check whether consumers are actually acking (unacked-but-not-processed messages hold the queue), whether prefetch is throttling them too aggressively, and whether processing is simply slower than the publish rate. Also verify consumers are connected to the right queue and not erroring out and redelivering in a loop. The remedy may be more consumers, higher prefetch, faster handlers, or fixing a redelivery loop.
+
+</details>
+
+<details><summary><b>79.</b> How would you build a fan-out where one publish reaches three independent processors in RabbitMQ?</summary>
+
+Declare a fanout exchange, declare three queues, and bind each queue to that exchange; publishing once to the exchange delivers a copy to all three queues, each consumed by its processor. Each processor acks its own copy independently. This achieves with explicit queues what Kafka does with three consumer groups over one topic.
+
+</details>
+
+<details><summary><b>80.</b> How would you achieve selective routing — only Luxembourg NAV events to one queue — in RabbitMQ?</summary>
+
+Use a topic exchange and bind the target queue with a pattern like `nav.lux.#`, publishing NAV events with routing keys such as `nav.lux.<isin>`. Only matching messages reach that queue, while other queues bind their own patterns. This gives content-based routing without the consumer filtering everything itself.
+
+</details>
+
+<details><summary><b>81.</b> How would you achieve the same selective routing on Kafka?</summary>
+
+Kafka has no server-side content routing, so you either dedicate a topic to Luxembourg NAV events at produce time, or consume a broader topic and filter client-side (or use a stream processor to derive a filtered topic). The routing decision moves to the producer or to stream-processing code rather than the broker. This is a concrete case where RabbitMQ's exchange routing is more convenient than Kafka.
+
+</details>
+
+<details><summary><b>82.</b> Why might a regulated fund administrator prefer a log over a queue for its core event backbone?</summary>
+
+Because regulators and auditors expect to be able to reconstruct and re-examine what happened, which requires retained, replayable, ordered events — exactly a log's strengths. With retention or compaction covering the required window, the firm can replay the canonical event stream for audits, reprocessing, and lineage. A queue that deletes on consumption cannot provide that evidentiary replay.
+
+</details>
+
+<details><summary><b>83.</b> For a transfer-agency subscription/redemption order pipeline, which model fits and why?</summary>
+
+A broker fits the task-execution side: each order is a unit of work distributed to processors with per-message ack, retry, and dead-lettering for failures, which Service Bus or RabbitMQ provide. If you also need an auditable, replayable record of all order events, you publish those events to a log alongside. Many real pipelines pair a queue for work with a log for the event of record.
+
+</details>
+
+<details><summary><b>84.</b> Why is per-message dead-lettering valuable in a transfer-agency context?</summary>
+
+Subscription and redemption orders can fail validation (bad ISIN, missing LEI, sanctions hold), and dead-lettering isolates each failed order for an operator to inspect and remediate without blocking the healthy flow. Service Bus dead-letters automatically on max delivery count or TTL expiry; RabbitMQ via a DLX. This per-message lifecycle control is a queue strength a bare log lacks.
+
+</details>
+
+<details><summary><b>85.</b> Where would EMT/EPT file processing sit — broker, log, or both?</summary>
+
+The ingestion and processing of each EMT/EPT file is a task — parse, validate, distribute — which suits a queue with per-file ack and dead-lettering for malformed files. The resulting normalized cost-and-target-market events, which downstream teams and auditors may need to replay, suit a log. So both: queue the work, log the facts.
+
+</details>
+
+<details><summary><b>86.</b> Why might SWIFT message handling lean toward queue semantics?</summary>
+
+SWIFT financial messages are typically discrete instructions to be processed exactly once with strict per-message handling, acknowledgement, ordering for related messages, and dead-lettering on failure — all queue strengths. Service Bus sessions can preserve ordering for a related message group. The transactional, instruction-like nature maps to a broker more than to a streaming log.
+
+</details>
+
+<details><summary><b>87.</b> How does LEI or ISIN reference data fit the log-with-compaction pattern?</summary>
+
+Reference data is changelog-like: you care about the latest record per identifier, with updates over time. A compacted Kafka topic keyed by LEI or ISIN retains the latest value per key indefinitely while pruning superseded versions, acting as a queryable, replayable snapshot store. New consumers can rebuild full current reference state by replaying the compacted topic.
+
+</details>
+
+<details><summary><b>88.</b> A new analytics team must build a derived dataset from two years of historical events — broker or log?</summary>
+
+A log, because they need to replay two years of history, which requires retention (or compaction) spanning that window and the ability to read from the earliest offset. They run their own consumer group and read independently without disturbing existing consumers. A queue would have discarded that history on first consumption, making the build impossible.
+
+</details>
+
+<details><summary><b>89.</b> What is the practical difference between Kafka retention by time and by compaction for a fund event store?</summary>
+
+Time retention (`retention.ms`) keeps the full ordered history for a fixed window then deletes everything older — good for bounded audit/replay windows like "last 13 months". Compaction keeps the latest record per key forever — good for current-state reference data. You pick (or combine) based on whether you need full history or just latest-per-key.
+
+</details>
+
+<details><summary><b>90.</b> Why is idempotency emphasised regardless of broker or log choice?</summary>
+
+Because both common models deliver at-least-once in practice — RabbitMQ redelivers unacked messages, Kafka re-reads uncommitted offsets after a crash, pgmq re-shows messages after `vt` — so duplicates are expected. An idempotent consumer (e.g. dedup by message id or upsert by natural key) makes reprocessing safe. Without idempotency, a redelivery could double-post a transaction.
+
+</details>
+
+<details><summary><b>91.</b> What is the dual-write problem and how do brokers versus pgmq address it?</summary>
+
+The dual-write problem is writing to your database and sending a message as two separate operations that can partially fail, leaving them inconsistent. With an external broker you solve it with the transactional outbox pattern (write the message to an outbox table in the same DB transaction, then relay it). pgmq sidesteps it because the enqueue is part of the same Postgres transaction as the business write.
+
+</details>
+
+<details><summary><b>92.</b> What is the transactional outbox pattern and when do you need it?</summary>
+
+The outbox pattern writes intended messages into an outbox table within the same transaction as the business change, and a separate relay process reads the outbox and publishes to the broker, marking rows sent. You need it whenever an external broker must stay consistent with a database commit and you cannot enlist both in one transaction. It converts an unreliable dual-write into a reliable single-write plus relay.
+
+</details>
+
+<details><summary><b>93.</b> Why is "the broker is dumb, the log is durable" a useful design heuristic for retention decisions?</summary>
+
+It reminds you that a log's value is durable, replayable retained history, so retention/compaction settings are first-class design decisions tied to audit and reprocessing requirements. A broker's value is delivery and routing, so its design decisions are around acks, prefetch, routing, and DLQs. Framing each system by its strength prevents misusing one for the other's job.
+
+</details>
+
+<details><summary><b>94.</b> How do you decide partition count for a Kafka topic carrying fund events?</summary>
+
+Base it on target throughput and the maximum consumer parallelism you will need (consumers in a group cannot exceed partitions), while keeping per-key ordering intact by choosing a stable key like ISIN. Over-partitioning adds rebalance and metadata overhead and more open files; under-partitioning caps scale. You size for headroom because increasing partitions later changes key-to-partition mapping and disrupts ordering.
+
+</details>
+
+<details><summary><b>95.</b> Why does adding partitions to an existing keyed Kafka topic risk ordering problems?</summary>
+
+Because the default partitioner maps a key to a partition by hashing modulo the partition count, so changing the count remaps keys to different partitions. Messages for the same key may then split across old and new partitions, breaking the previously guaranteed per-key order during the transition. This is why you size partitions generously up front rather than expanding casually.
+
+</details>
+
+<details><summary><b>96.</b> How does Service Bus's session ordering compare to Kafka's partition ordering?</summary>
+
+Both deliver ordered processing for a related group: Service Bus locks a session id's messages to one receiver for FIFO handling, while Kafka pins a key's messages to one partition consumed by one consumer. The difference is Service Bus sessions are a per-group lock within a queue, whereas Kafka partitions are persistent ordered shards of a retained log. Service Bus gives ordering with queue semantics; Kafka gives ordering with replayable-log semantics.
+
+</details>
+
+<details><summary><b>97.</b> When would RabbitMQ's routing be decisive over Kafka even ignoring replay?</summary>
+
+When you need rich, server-side content-based routing — multiple destinations selected by exchange type, routing keys, and binding patterns or headers — without pushing filtering logic into every consumer. Topic and headers exchanges let the broker decide who gets what. Kafka would force producer-side topic splitting or consumer-side filtering, which is more code and coupling.
+
+</details>
+
+<details><summary><b>98.</b> Build a one-line decision rule for "queue vs log" you could defend to an architect.</summary>
+
+If the message is a unit of work to be done once, routed, possibly replied to, and discarded — use a queue; if it is a fact to be retained, ordered, fanned out, and replayed by independent and future consumers — use a log. The deciding questions are: does anyone need to re-read it later, and does anyone need it routed/replied per-message. Those two questions place almost every fund-platform need on the right side.
+
+</details>
+
+<details><summary><b>99.</b> For a corporate-actions workflow needing replay of every state change for audit, which side wins and what setting enforces it?</summary>
+
+The log wins, and you enforce auditability with retention long enough to cover the audit window (or compaction keyed by the corporate-action id to keep latest state) so the events remain replayable. Auditors can then reset offsets and re-read the exact sequence of state changes. A queue would have deleted those events on consumption, defeating the audit requirement.
+
+</details>
+
+<details><summary><b>100.</b> Final synthesis: name three queue-only capabilities and three log-only capabilities.</summary>
+
+Queue-only: competing-consumers task distribution with per-message ack, request/reply with routed replies, and per-message lifecycle features like TTL and dead-lettering. Log-only: replay from arbitrary retained offsets, native fan-out to many independent and future consumer groups over a single stored copy, and long-retention with strong per-partition ordering. Matching each fund need to the list it falls in is the architect's core decision in this lesson.
+
+</details>
+
+
+## Phase 4 · 5.6.4 Durable execution (Temporal) — 100 self-test questions
+
+<details><summary><b>1.</b> What problem does "durable execution" solve that plain application code does not?</summary>
+
+Durable execution guarantees that a long-running, stateful workflow runs to completion despite crashes, restarts, and infrastructure failures, without you hand-rolling retry, timeout, and state-persistence logic. The engine persists every step so that after a process dies the workflow resumes from exactly where it stopped, with local variables and call stack intact. For fund workflows like a corporate-action or KYC process, this means a worker crash mid-run does not leave the business in an unknown half-applied state.
+
+</details>
+
+<details><summary><b>2.</b> In Temporal terminology, what is a Workflow?</summary>
+
+A Workflow is your business-logic orchestration expressed as a function in a general-purpose language (Workflow-as-Code), describing the sequence of steps and their control flow. The Workflow function itself must be deterministic and never perform side effects directly; instead it issues Commands that Temporal records as Events. Temporal replays this function against its Event History to reconstruct state, which is why determinism is mandatory.
+
+</details>
+
+<details><summary><b>3.</b> In Temporal terminology, what is an Activity?</summary>
+
+An Activity is a single unit of work that performs side effects — API calls, database writes, file I/O, sending a SWIFT message — the things that can fail or be slow. Activities are where all non-deterministic and external work belongs, because Temporal runs an Activity once, records its result in the Event History, and reuses that recorded result on replay rather than re-executing it. This separation is the heart of Temporal's model: deterministic Workflow code orchestrates, side-effecting Activities do the risky work.
+
+</details>
+
+<details><summary><b>4.</b> Why must Workflow code be deterministic but Activity code need not be?</summary>
+
+Workflow code is re-executed (replayed) from the start every time state is reconstructed, so it must produce the identical sequence of Commands given the same Event History — otherwise the replay diverges from history and the Workflow fails. Activities are never replayed; their results are recorded once and read back from history, so an Activity is free to call the network, read the clock, or generate randomness. The mental rule is: orchestration is deterministic and replayable, side effects are isolated into Activities.
+
+</details>
+
+<details><summary><b>5.</b> What is the Temporal Event History?</summary>
+
+The Event History is the durable, append-only log of Events (Workflow started, Activity scheduled, Activity completed, Timer fired, Signal received, and so on) that the Temporal Service persists for each Workflow Execution. It is the single source of truth for a Workflow's progress and the input to replay. Because every meaningful state transition is an Event, the history is what lets a brand-new Worker recreate the exact in-memory state of a Workflow after a crash.
+
+</details>
+
+<details><summary><b>6.</b> Explain event-history replay in your own words.</summary>
+
+Replay is the mechanism by which a Worker reconstructs a Workflow's state: it re-runs the Workflow function from the beginning, and each time the code would have produced a Command, Temporal feeds back the already-recorded result Event instead of doing the work again. Timers that already fired do not wait again, Activities that already completed return their stored result, and so on, so the code fast-forwards deterministically to the point just before the crash and then continues live. This is why a worker can die mid-Workflow and a replacement resumes seamlessly.
+
+</details>
+
+<details><summary><b>7.</b> A Worker crashes while a Workflow is running. What happens when a new Worker picks it up?</summary>
+
+The new Worker pulls the Workflow's Event History from the Temporal Service and replays the Workflow function against it, reusing every recorded Activity result and timer outcome to rebuild local variables and execution position. Once replay reaches the last recorded Event, execution continues live from that point as if nothing happened. No business step is re-done or skipped, which is exactly the guarantee you want when a corporate-action saga is interrupted halfway.
+
+</details>
+
+<details><summary><b>8.</b> Why can you not call `random.random()` or generate a UUID directly inside Workflow code?</summary>
+
+A direct random call would return a different value on replay than on the original run, so the replayed code would take a different branch or produce different Commands and diverge from the recorded Event History, failing with a non-determinism error. You must instead use the SDK's deterministic randomness (a workflow-safe seeded API) or generate the value inside an Activity and pass it back. The same logic forbids any source of fresh, unrecorded variation in Workflow code.
+
+</details>
+
+<details><summary><b>9.</b> Why can you not call `datetime.now()` directly in Workflow code, and what do you use instead?</summary>
+
+The system clock would return a different timestamp on replay than at first execution, breaking the determinism replay depends on, so a direct `datetime.now()` is forbidden in Workflow code. You read time through the deterministic Workflow API (for example `workflow.now()` in the Python SDK), which returns the time as recorded in the Event History so it matches on every replay. Anything genuinely needing wall-clock side effects belongs in an Activity.
+
+</details>
+
+<details><summary><b>10.</b> Why must Workflow code never make a network or database call directly?</summary>
+
+A direct network or database call is a side effect whose result is not recorded as an Event, so on replay it would either run again (duplicating the effect) or return a new value that diverges from history. All such I/O must be wrapped in an Activity, whose single execution and result are recorded once and replayed deterministically. Keeping I/O out of the Workflow body is the practical rule that keeps replay safe.
+
+</details>
+
+<details><summary><b>11.</b> Why is spawning OS threads or relying on wall-clock `sleep` inside Workflow code a determinism hazard?</summary>
+
+Native threads and real `sleep` introduce timing and ordering that the engine cannot record or reproduce, so replay cannot reconstruct the same interleaving and the Workflow becomes non-deterministic. Temporal provides deterministic equivalents — durable Timers via the SDK's sleep API and the SDK's own concurrency primitives — which are recorded as Events and replay correctly. The principle: every wait or concurrency decision in a Workflow must be expressed through Temporal so it lands in the Event History.
+
+</details>
+
+<details><summary><b>12.</b> What is a Worker in Temporal and where does it run?</summary>
+
+A Worker is a process you run as part of your own application, embedding the Temporal SDK, that polls the Temporal Service for tasks and executes your Workflow and Activity code. Workers are stateless and horizontally scalable — the durable state lives in the Temporal Service, not the Worker — which is precisely why a Worker can be killed and replaced freely. You register your Workflow and Activity definitions with a Worker and point it at a Task Queue.
+
+</details>
+
+<details><summary><b>13.</b> What is a Task Queue and why does it matter?</summary>
+
+A Task Queue is the named queue the Temporal Service uses to hand Workflow Tasks and Activity Tasks to Workers; Workers poll a specific Task Queue and only receive work routed to it. It is the routing and load-balancing mechanism that decouples the Temporal Service from your Workers, letting you scale Workers independently and isolate workloads (for example a heavy NAV-calculation queue separate from a lightweight notification queue). Workflow and Activity options specify which Task Queue to dispatch to.
+
+</details>
+
+<details><summary><b>14.</b> What is the difference between the Temporal Service (Cluster) and your application?</summary>
+
+The Temporal Service is the separate backend infrastructure that persists Event History, schedules tasks, enforces timeouts, and coordinates retries; your application is the Workers and SDK code that contain your actual Workflow and Activity logic. This split is the core of the architecture: durable state and orchestration guarantees live in the Service, while your business code stays in your deployable. You operate (or buy as Temporal Cloud) the Service; you write and deploy the Workers.
+
+</details>
+
+<details><summary><b>15.</b> Name the four Activity timeout types in Temporal.</summary>
+
+They are Schedule-To-Close, Start-To-Close, Schedule-To-Start, and Heartbeat. Schedule-To-Close and Start-To-Close are the two commonly set; Schedule-To-Start and Heartbeat are for specific cases. Together with the Retry Policy these timeouts give fine control over how long an Activity may take and when it is considered failed.
+
+</details>
+
+<details><summary><b>16.</b> What does the `StartToCloseTimeout` on an Activity limit?</summary>
+
+`StartToCloseTimeout` caps the maximum duration of a single Activity attempt — from when a Worker starts executing it to when that attempt completes. If an attempt exceeds it, that attempt is timed out and, subject to the Retry Policy, a new attempt may be scheduled. It is the most important timeout to set because it bounds how long any one execution of your side-effecting code may run.
+
+</details>
+
+<details><summary><b>17.</b> How does `ScheduleToCloseTimeout` differ from `StartToCloseTimeout`?</summary>
+
+`ScheduleToCloseTimeout` bounds the total wall-clock time for the entire Activity including all retry attempts and any time spent waiting in the queue, whereas `StartToCloseTimeout` bounds only a single attempt. So Schedule-To-Close is the overall deadline ("give up on this Activity entirely after N") while Start-To-Close is the per-try deadline. Setting Start-To-Close without Schedule-To-Close lets retries continue indefinitely as long as each attempt is fast enough.
+
+</details>
+
+<details><summary><b>18.</b> What is the `ScheduleToStartTimeout` for, and what is its default?</summary>
+
+`ScheduleToStartTimeout` limits how long an Activity Task may sit in the Task Queue waiting for a Worker to pick it up, before it ever starts executing; its default is infinity. You set it when you want to detect that no Worker is available to drain the queue — for example to fail fast if your Activity Worker fleet is down — rather than letting tasks back up silently. It does not bound execution time, only the queue wait.
+
+</details>
+
+<details><summary><b>19.</b> What is an Activity Heartbeat and why use it?</summary>
+
+A Heartbeat is a periodic ping from the Worker executing a long-running Activity back to the Temporal Service, signalling that the Activity is still making progress and the Worker has not crashed. If the Service does not receive a Heartbeat within the `HeartbeatTimeout`, the Activity is considered failed and may be retried, so Heartbeats let Temporal detect a dead or stuck Worker quickly instead of waiting for a long Start-To-Close timeout. Heartbeats can also carry checkpoint details so a retried attempt resumes from where the last one left off.
+
+</details>
+
+<details><summary><b>20.</b> How can a heartbeating Activity resume from where it stopped after a Worker failure?</summary>
+
+When an Activity heartbeats it can include details (a checkpoint payload) that the Temporal Service stores; if that attempt fails and is retried, the new attempt receives those last-reported details and can pick up from that point rather than restarting from scratch. This is valuable for an Activity processing a large file — say a multi-megabyte EMT delivery — so a crash near the end does not force reprocessing the whole file. Without heartbeat checkpointing, each retry of an Activity starts from its initial state.
+
+</details>
+
+<details><summary><b>21.</b> What is a Retry Policy in Temporal and when does it apply by default?</summary>
+
+A Retry Policy controls how a failed Activity (or Workflow) is retried: the initial backoff interval, the backoff coefficient, the maximum interval, and the maximum number of attempts. Activities are automatically given a default Retry Policy if you do not specify one, so transient failures are retried with exponential backoff out of the box. You tune it per Activity — for example fewer retries on a non-idempotent external call, more on a flaky read.
+
+</details>
+
+<details><summary><b>22.</b> What do `initialInterval`, `backoffCoefficient`, `maximumInterval`, and `maximumAttempts` control in a Retry Policy?</summary>
+
+`initialInterval` is the delay before the first retry; `backoffCoefficient` multiplies the interval after each attempt to produce exponential backoff; `maximumInterval` caps how large that backoff can grow; and `maximumAttempts` limits the total number of attempts (0 meaning unlimited). Together they shape the retry curve, letting you start fast, back off under sustained failure, and eventually give up. A coefficient of 2.0 with a 1s initial interval yields roughly 1s, 2s, 4s, 8s delays up to the maximum interval.
+
+</details>
+
+<details><summary><b>23.</b> Why should Activities be idempotent in Temporal?</summary>
+
+Because Temporal may retry an Activity after a timeout or a Worker crash even if the original attempt actually completed its side effect, so the same logical operation can run more than once. If the Activity is idempotent — for example keyed on an order ID so a duplicate "place subscription order" is a no-op — these retries are safe. Non-idempotent Activities risk double-charging, double-booking, or sending a duplicate SWIFT instruction, so you design idempotency keys in deliberately.
+
+</details>
+
+<details><summary><b>24.</b> What is a Signal in Temporal?</summary>
+
+A Signal is a message sent into a running Workflow Execution that delivers data asynchronously and is recorded as an Event in the Event History, so it can alter the Workflow's course. Signals are fire-and-forget from the sender's perspective and durable — they survive replay because they live in history. You use a Signal to, say, deliver an external approval or a late-arriving price into a Workflow that is waiting on it.
+
+</details>
+
+<details><summary><b>25.</b> What is a Query in Temporal, and how does it differ from a Signal?</summary>
+
+A Query reads the current state of a running Workflow synchronously and returns a value to the caller; unlike a Signal it must be read-only — it must not mutate Workflow state or perform side effects. Crucially Queries are not recorded in the Event History, whereas Signals are, because a Query is just inspecting state rather than changing it. You use a Query to ask "what stage is this subscription saga in right now?" without disturbing it.
+
+</details>
+
+<details><summary><b>26.</b> Why must a Query handler never mutate Workflow state or have side effects?</summary>
+
+A Query runs against the replayed Workflow state purely to report it, and because Queries are not part of the Event History, any mutation a Query made would not be durably recorded and would vanish on the next replay — corrupting consistency between live state and history. Keeping Queries strictly read-only preserves the invariant that Event History is the sole source of state changes. If you need to change a running Workflow, use a Signal (or an Update), not a Query.
+
+</details>
+
+<details><summary><b>27.</b> What does a Temporal Update provide beyond Signals and Queries?</summary>
+
+An Update combines sending input into a running Workflow with receiving a response, and supports an optional validator that can reject the request before it is admitted. It is effectively a tracked, request/response interaction — like a Signal that returns a result and can be validated — whereas a Signal is one-way and a Query is read-only. Updates are useful when a caller must both change Workflow state and get an acknowledgement, for example submitting a correction and confirming it was accepted.
+
+</details>
+
+<details><summary><b>28.</b> What is "versioning a running Workflow" and why is it hard?</summary>
+
+It is the problem of deploying changed Workflow code while executions started under the old code are still in flight — because those in-flight Workflows will be replayed against history produced by the old logic, naive changes cause the replay to diverge and fail with a non-determinism error. You cannot simply edit the Workflow function and redeploy. Temporal therefore provides explicit versioning mechanisms so old histories keep replaying correctly while new executions use the new code.
+
+</details>
+
+<details><summary><b>29.</b> How do the `GetVersion`/patch APIs version Workflow code, and what is the recommended use?</summary>
+
+The patch API (`GetVersion` in some SDKs, `patched`/`workflow.patched` in others) lets you branch within the Workflow code: it writes a marker into the Event History the first time it runs so all future replays of that execution take the same branch, while new executions take the patched branch. Because these APIs clutter code and are easy to misuse, Temporal recommends them mainly for fixing bugs that would otherwise block a Workflow, and prefers Worker Versioning where possible. On replay, a mismatch between the code's patch marker and the recorded history triggers a Workflow-task failure.
+
+</details>
+
+<details><summary><b>30.</b> What is Worker Versioning (Build IDs) and when should you prefer it over patching?</summary>
+
+Worker Versioning pins each Workflow Execution to the Worker Deployment Version (identified by a Build ID plus deployment name) that started it, so in-flight executions keep running on Workers with their original code while new executions go to the new version — no in-code branching needed. For teams that can run versioned Worker deployments, Temporal recommends it as the default way to ship Workflow changes, reserving patching for cases where you cannot version deployments. It avoids the code clutter and replay risk of manual patch branches.
+
+</details>
+
+<details><summary><b>31.</b> What is a non-determinism error in Temporal, and what typically causes it?</summary>
+
+A non-determinism error occurs when, during replay, the Commands the Workflow code produces do not match the Events already recorded in history — for example a different order of Activity calls, a changed branch, or a removed step. Common causes are editing Workflow logic without versioning, using a forbidden non-deterministic operation (clock, random, direct I/O), or upgrading code so an existing history no longer lines up. The fix is to either version the change (patch or Worker Versioning) or remove the offending non-deterministic construct.
+
+</details>
+
+<details><summary><b>32.</b> When does Temporal beat a BPM engine?</summary>
+
+Temporal beats a BPM engine when the orchestration logic is complex, code-driven, developer-owned, and benefits from a general-purpose language — heavy branching, dynamic fan-out, tight integration with services, and rapid iteration. BPM's visual model adds overhead and friction for that style of logic. Temporal shines where engineers, not business analysts, own the process and need maximum expressiveness and testability.
+
+</details>
+
+<details><summary><b>33.</b> When does a BPM engine beat Temporal?</summary>
+
+A BPM engine wins when the process must be readable and auditable by non-developers — a compliance officer signing off a settlement or onboarding flow can read and approve a BPMN diagram in a way they never could read Temporal code. BPM also fits human-task-heavy workflows with formal review queues and model-driven governance. In regulated fund administration that auditability is often the deciding factor even when Temporal would be technically cleaner.
+
+</details>
+
+<details><summary><b>34.</b> When does a plain message queue suffice instead of Temporal?</summary>
+
+A plain queue (or pub/sub) suffices when each unit of work is a short, stateless, independently retryable task with no long-lived multi-step state to coordinate — fire a message, a consumer processes it, done. The moment you need durable cross-step state, compensation, timers spanning days, signals into a running process, or guaranteed run-to-completion of a multi-stage saga, a queue forces you to hand-build exactly what Temporal provides. Temporal is the upgrade when "orchestrate many steps reliably over time" replaces "process one message."
+
+</details>
+
+<details><summary><b>35.</b> What is Azure Durable Functions and how does it relate to Temporal conceptually?</summary>
+
+Azure Durable Functions is Microsoft's durable-execution analogue: an extension of Azure Functions where you write orchestrator functions (deterministic, replayed via event sourcing) and activity functions (side-effecting), with the runtime managing state, checkpoints, retries, and recovery. The orchestrator/activity split and the determinism-via-replay model mirror Temporal's Workflow/Activity design. It is the Azure-native option an architect evaluates when the estate is already serverless on Azure rather than running a Temporal cluster.
+
+</details>
+
+<details><summary><b>36.</b> Why must Azure Durable Functions orchestrator code also avoid `DateTime.Now`, randomness, and direct I/O?</summary>
+
+Because Durable Functions replays the orchestrator function using event sourcing exactly as Temporal replays a Workflow, so any non-deterministic call would produce different results on replay and break the reconstruction of state. The same constraints apply: read time and randomness through the durable context APIs and push all I/O into activity functions. It is the same determinism contract under a different vendor's branding.
+
+</details>
+
+<details><summary><b>37.</b> Name two common application patterns supported by Azure Durable Functions.</summary>
+
+Common patterns include function chaining (run activities in sequence, each feeding the next), fan-out/fan-in (run many activities in parallel then aggregate), human interaction (wait, possibly for days, for an external approval), and the monitor pattern (recurring polling with state). These map directly onto Temporal idioms — sequential Activities, parallel Activity fan-out with aggregation, waiting on a Signal, and durable timers. Recognising the shared patterns helps an architect translate a design between the two engines.
+
+</details>
+
+<details><summary><b>38.</b> What is DBOS and how does it differ architecturally from Temporal?</summary>
+
+DBOS is durable execution delivered as a library rather than a separate cluster: you annotate functions as durable workflows and steps, and DBOS persists their execution state in PostgreSQL, recovering by reading that state back after a crash. The key difference is operational — there is no Temporal Service to run, because the durable state lives in a Postgres database you already operate. That makes DBOS far lighter to run while Temporal offers a richer standalone platform.
+
+</details>
+
+<details><summary><b>39.</b> Why is DBOS attractive when you already run PostgreSQL?</summary>
+
+Because DBOS stores its workflow and queue state in the same Postgres you use for business data, the workflow's state changes can commit transactionally alongside your application writes, eliminating the dual-system consistency problem and the latency of talking to a separate orchestrator. You get durable workflows without operating or paying for a Temporal cluster — fewer moving parts, lower latency, and one database to back up. For a team standardised on Postgres this is a major operational simplification.
+
+</details>
+
+<details><summary><b>40.</b> When does Temporal win over a Postgres-native option like DBOS?</summary>
+
+Temporal wins at scale and breadth: massive parallel fan-out, very long-lived workflows, rich Signals/Queries and mature visibility tooling, and multi-language or multi-region deployments. In those cases a single Postgres instance backing DBOS becomes a bottleneck, and Temporal's purpose-built, horizontally scalable Service plus its ecosystem and operational maturity pay off. The trade is operational weight for headroom and features.
+
+</details>
+
+<details><summary><b>41.</b> Name two Postgres-native durable-execution tools mentioned as alternatives to Temporal.</summary>
+
+DBOS is the primary one — durable execution as a library with workflow and queue state in Postgres — and the syllabus also names Hatchet and pgflow as Postgres-backed alternatives. They share the appeal of keeping orchestration state in a database you already run rather than operating a separate cluster. They sit on the lighter-ops end of the spectrum, with Temporal at the heavier, higher-scale end.
+
+</details>
+
+<details><summary><b>42.</b> In the orchestration trichotomy, what is the headline trade-off between Temporal and a scheduler like Airflow?</summary>
+
+A scheduler like Airflow is built for time- or dependency-triggered batch DAGs (run this pipeline at 02:00, then these downstream tasks), whereas Temporal is built for event-driven, long-lived, stateful business workflows with fine-grained retries, signals, and compensation. Use the scheduler when work is periodic batch orchestration; use Temporal when work is a durable saga reacting to events over time. They overlap rarely once you frame the workload correctly.
+
+</details>
+
+<details><summary><b>43.</b> How would you reimplement a subscription-order saga as a Temporal Workflow?</summary>
+
+Write a deterministic Workflow function that calls one Activity per step of the saga — validate order, check compliance, reserve units, confirm allocation, settle — passing results between steps, and configure each Activity with timeouts and a Retry Policy. Put all side effects (database writes, external calls) in the Activities and keep branching and orchestration in the Workflow body. The Workflow then becomes a durable, resumable description of the whole order lifecycle.
+
+</details>
+
+<details><summary><b>44.</b> How do you add a compensation path for a step-2 failure in a Temporal saga?</summary>
+
+You implement the saga pattern: if a later step's Activity fails, the Workflow code explicitly invokes compensating Activities that undo the effects of the steps already completed (for example release reserved units after a failed allocation). Temporal does not auto-rollback side effects, so you express compensation as ordinary Workflow logic catching the failure and running the inverse Activities. The Workflow's durability guarantees the compensation itself runs to completion even across crashes.
+
+</details>
+
+<details><summary><b>45.</b> You kill the Temporal Worker mid-run. What do you expect to observe on restart?</summary>
+
+You expect the Workflow to resume from its Event History on the new (or restarted) Worker, re-using all already-completed Activity results and not re-executing them, then continue from the exact point of interruption to completion. The business outcome should be identical to an uninterrupted run, demonstrating run-to-completion durability. If instead you saw an Activity re-run with a duplicate side effect, that points to a non-idempotent Activity, not a Temporal failure.
+
+</details>
+
+<details><summary><b>46.</b> A Workflow that worked yesterday now fails with a non-determinism error after a deploy. First thing to check?</summary>
+
+First check whether the Workflow code was changed in a way that affects the sequence of Commands — added, removed, or reordered Activity calls, timers, or branches — for in-flight executions that still have old histories. The fix is to either version the change with a patch (`GetVersion`/`patched`) or Worker Versioning, or revert the structural change. The error means replay of an old history no longer matches the new code's Commands.
+
+</details>
+
+<details><summary><b>47.</b> An Activity keeps timing out with `StartToCloseTimeout`. What should you investigate first?</summary>
+
+First confirm the timeout is realistic for how long the Activity genuinely takes — a too-short `StartToCloseTimeout` will time out healthy work and trigger needless retries. Then check whether the Activity is actually slow (a slow downstream API, a large payload) or stuck, and whether it should be heartbeating so the Service can distinguish progress from a hang. Raising the timeout blindly without understanding the cause just hides a real performance or hang problem.
+
+</details>
+
+<details><summary><b>48.</b> A long-running Activity is occasionally retried even though it eventually succeeds. What is likely missing?</summary>
+
+It is likely missing Heartbeats together with a `HeartbeatTimeout`, so the Temporal Service cannot tell the difference between a Worker that is making slow progress and one that has died, and a coarse timeout fires. Adding regular Heartbeats lets the Service see continuous progress and avoid premature retries, while a sensible `HeartbeatTimeout` still catches a genuine crash quickly. Heartbeat details can also let any retry resume from a checkpoint rather than restarting.
+
+</details>
+
+<details><summary><b>49.</b> Why does keeping a Workflow function "thin" (orchestration only) make testing and replay easier?</summary>
+
+A thin Workflow that only orchestrates and delegates all side effects to Activities is deterministic and pure with respect to its inputs and recorded results, so it replays reliably and can be unit-tested by mocking Activity results. Heavy logic or hidden I/O in the Workflow body invites non-determinism and makes both replay and testing brittle. The discipline of "decisions in the Workflow, effects in Activities" is what keeps durable execution sound.
+
+</details>
+
+<details><summary><b>50.</b> How does Temporal handle an Activity that fails transiently versus one that fails permanently?</summary>
+
+Transient failures are retried automatically according to the Retry Policy with exponential backoff until success or `maximumAttempts`, so flaky network blips self-heal. For permanent failures you raise a non-retryable application error (or configure non-retryable error types) so Temporal stops retrying immediately and surfaces the failure to the Workflow, which can then compensate or escalate. Distinguishing the two is a design decision you encode in the Activity and its policy.
+
+</details>
+
+<details><summary><b>51.</b> What is the practical meaning of "exactly-once" semantics in the context of a durable Workflow?</summary>
+
+It means the Workflow's overall logic executes to completion once and its recorded decisions are applied once, even though the underlying Workers and Activities may crash and retry — the durable Event History deduplicates progress on replay. It does not magically make a non-idempotent external side effect happen exactly once; that still requires idempotent Activities. So "exactly-once" is a guarantee about workflow progress, paired with your responsibility to make Activity effects idempotent.
+
+</details>
+
+<details><summary><b>52.</b> Why is hand-rolled retry-and-timeout logic across microservices considered the thing durable execution replaces?</summary>
+
+Because spreading retry, timeout, backoff, and state-tracking across many services produces scattered, inconsistent, hard-to-reason-about reliability code that rots and leaves processes in unknown states after partial failures. Durable execution centralises those primitives into the engine and makes the workflow itself the durable unit, so a crash resumes cleanly instead of stranding a half-applied corporate action. The architect's job is recognising when that centralisation is worth adopting.
+
+</details>
+
+<details><summary><b>53.</b> For a multi-day KYC workflow that waits on an external reviewer, what Temporal feature carries the wait durably?</summary>
+
+A durable Timer (the SDK's workflow-safe sleep) combined with a Signal: the Workflow can sleep for days awaiting input and resume exactly when a Signal delivers the reviewer's decision, all recorded in Event History so a crash during the wait loses nothing. Real `sleep` or in-memory waits would be lost on restart; Temporal's durable timers and signals are not. This is the canonical "human interaction" pattern in durable execution.
+
+</details>
+
+<details><summary><b>54.</b> Why is running Temporal OSS in Docker Compose a reasonable way to learn it?</summary>
+
+Compose lets you stand up the Temporal Service, its dependency (a database) and the Web UI alongside your own Worker container in one declarative file, so you can run, inspect, and kill components locally without cloud setup. It mirrors the real architecture — separate Service plus your Worker — at laptop scale. You can then exercise the full loop: start a Workflow, watch the Event History in the UI, kill the Worker, and watch it resume.
+
+</details>
+
+<details><summary><b>55.</b> What would you look for in the Temporal Web UI to confirm a Workflow resumed correctly after a crash?</summary>
+
+You inspect the Workflow Execution's Event History and confirm there is no duplicate Activity execution for steps that completed before the crash — completed Activities show a single completed Event and were reused on replay, not re-run. You also confirm the Workflow reached its final completed Event. Seeing continuous history across the kill, with the same Run ID and no re-executed side effects, is the evidence of clean resumption.
+
+</details>
+
+<details><summary><b>56.</b> How does Temporal's model help a corporate-actions workflow specifically?</summary>
+
+Corporate actions (dividends, splits, mergers) are long-running, multi-step, and retry-heavy, often spanning days with external confirmations — exactly the stateful saga durable execution is built for. Temporal keeps the whole process durable so a Worker crash mid-event does not leave holdings half-adjusted, retries transient feed failures automatically, and lets the workflow wait durably on confirmations via signals and timers. The alternative — hand-rolled cross-service state — is where these processes historically rot.
+
+</details>
+
+<details><summary><b>57.</b> What is the difference between a Workflow Type and a Workflow Execution?</summary>
+
+A Workflow Type is the definition — the named Workflow function and its logic — while a Workflow Execution is a single running (or completed) instance of that type, identified by a Workflow ID and a Run ID. One Workflow Type can have many concurrent Executions, just as one class has many instances. The Event History belongs to a specific Execution, not to the type.
+
+</details>
+
+<details><summary><b>58.</b> What roles do the Workflow ID and Run ID play?</summary>
+
+The Workflow ID is the business identifier you assign (for example the subscription order number) and is used for deduplication and addressing a Workflow, while the Run ID uniquely identifies a particular run of that Workflow ID, changing when a Workflow continues-as-new or is retried at the Workflow level. You signal or query by Workflow ID; the system tracks history by Run ID. Reusing a Workflow ID lets you enforce that only one active Execution exists for a given business entity.
+
+</details>
+
+<details><summary><b>59.</b> Why might you set a Workflow ID equal to a fund order number?</summary>
+
+Setting the Workflow ID to a natural business key like the order number gives you idempotent Workflow starts — attempting to start a second Workflow with the same ID can be rejected or reused, preventing duplicate sagas for the same order. It also makes the Workflow directly addressable by that key for Signals and Queries. This is a common pattern for enforcing one-active-process-per-entity in fund operations.
+
+</details>
+
+<details><summary><b>60.</b> What is Continue-As-New and what problem does it solve?</summary>
+
+Continue-As-New atomically completes the current Workflow Execution and starts a fresh one with the same Workflow ID but a new Run ID and a fresh, empty Event History, carrying forward whatever state you pass. It solves the problem of an ever-growing Event History in very long-lived or looping Workflows, which would otherwise become huge and slow to replay. You use it for entity workflows that run effectively forever, periodically resetting their history.
+
+</details>
+
+<details><summary><b>61.</b> Why can an unbounded Event History become a problem, and how is it mitigated?</summary>
+
+A history that grows without bound (a Workflow that loops forever accumulating Events) increases replay time, storage, and the risk of hitting size limits, hurting performance. It is mitigated by Continue-As-New, which periodically starts a fresh Execution with a clean history while preserving logical continuity via the same Workflow ID. Designing long-running Workflows to continue-as-new on a sensible boundary keeps replay cheap.
+
+</details>
+
+<details><summary><b>62.</b> What is a Workflow Task (as distinct from an Activity Task)?</summary>
+
+A Workflow Task is the unit of work a Worker pulls to advance the Workflow's own logic — it replays the Workflow function up to the latest history and produces the next batch of Commands (schedule an Activity, start a timer, complete). An Activity Task, by contrast, is the unit that executes your side-effecting Activity code. Workflow Tasks drive orchestration decisions; Activity Tasks do the actual external work.
+
+</details>
+
+<details><summary><b>63.</b> Why are Activity results, but not the Activity's internal logic, what replay depends on?</summary>
+
+Replay reconstructs Workflow state by reading recorded Activity result Events, so it only needs the outcome each Activity already produced, never to re-run the Activity's body. This is exactly why Activities can be non-deterministic and do I/O: their internals are invisible to replay, only their recorded result matters. It cleanly isolates the messy, side-effecting world from the deterministic orchestration that must replay.
+
+</details>
+
+<details><summary><b>64.</b> How does Temporal differ from a Saga library you might write yourself on top of a queue?</summary>
+
+A hand-built saga on a queue forces you to persist step state, implement compensation tracking, manage retries and timeouts, and reconstruct state after crashes — all yourself, usually with bugs. Temporal provides durable state, replay-based recovery, built-in retries and timeouts, and signals/queries as platform primitives, so you write the saga as ordinary code and the engine handles durability. The trade is operating the Temporal Service versus carrying your own reliability code.
+
+</details>
+
+<details><summary><b>65.</b> What determinism risk arises from iterating over an unordered collection in Workflow code?</summary>
+
+If the iteration order of, say, a hash map can differ between the original run and replay, the Workflow may issue Commands in a different order than recorded in history, causing a non-determinism error. You must use deterministically ordered structures or sort before iterating in Workflow code. It is a subtle pitfall because the code looks innocent but its ordering is implicitly non-deterministic.
+
+</details>
+
+<details><summary><b>66.</b> Why is upgrading a library that changes serialization or ordering risky for in-flight Workflows?</summary>
+
+Such an upgrade can change how data is serialized or how collections are ordered during replay, making the replayed Workflow produce Commands that no longer match the recorded Event History and failing with non-determinism. Even a dependency bump can silently break in-flight executions. This is why Workflow code and its determinism-affecting dependencies must be versioned carefully, often via Worker Versioning to pin executions to their original build.
+
+</details>
+
+<details><summary><b>67.</b> How does Temporal's approach to timeouts differ from a cron job that simply re-runs on failure?</summary>
+
+A cron re-run restarts the whole job from the top with no memory of prior progress, so completed steps re-execute and partial side effects can duplicate. Temporal's timeouts apply per Activity and per Workflow with replay preserving completed steps, so only the failed unit is retried and prior work is reused. You get fine-grained, stateful recovery instead of coarse, stateless re-execution.
+
+</details>
+
+<details><summary><b>68.</b> For a NAV-calculation pipeline, when is Temporal overkill versus a good fit?</summary>
+
+It is overkill if the NAV calc is a simple scheduled batch that either succeeds or is re-run wholesale — a scheduler handles that fine. It is a good fit when the NAV process is a long, multi-step, stateful flow with external dependencies, partial-completion concerns, manual checks, and compensation needs (for example a multi-source pricing and reconciliation saga). The deciding question is whether you need durable per-step state and run-to-completion, not just periodic triggering.
+
+</details>
+
+<details><summary><b>69.</b> What does "the workflow itself is durable" mean compared to making each service durable?</summary>
+
+It means the orchestration — the sequence, the local variables, the position in the process — is what Temporal persists and resumes, rather than asking each downstream service to remember the overall progress. Individual services and Activities stay stateless and replaceable while the durable thread of the business process lives in the Event History. This inverts the usual burden: durability is a property of the workflow, not bolted onto every participant.
+
+</details>
+
+<details><summary><b>70.</b> Why can you not catch a non-determinism error inside the Workflow and "handle" it?</summary>
+
+A non-determinism error is detected by the framework during replay because the code's Commands diverge from recorded history; it is not an ordinary application exception you can catch and recover from in business logic. The only real fixes are to make the code match history again (revert) or to version the change so old histories take the old path. Treating it as a catchable error misunderstands that replay integrity, not your logic, is what failed.
+
+</details>
+
+<details><summary><b>71.</b> How do Signals get delivered to a Workflow that is currently being replayed or not yet loaded?</summary>
+
+Signals are durably recorded as Events by the Temporal Service as soon as they arrive, independent of whether a Worker currently has the Workflow in memory, so they are not lost if no Worker is active. When a Worker next processes the Workflow, the Signal Event is part of the history and is delivered in order during replay/execution. This durability is why Signals are reliable for external input even across crashes and quiet periods.
+
+</details>
+
+<details><summary><b>72.</b> Why are Queries safe to run against a Workflow without affecting its history?</summary>
+
+A Query causes the Worker to replay the Workflow to its current state purely to evaluate the read-only query handler and return a value — it produces no Commands and writes no Events, so the history is untouched. That is what makes Queries a non-intrusive way to inspect live state. The cost is that a Query forces a replay, so very frequent queries on huge histories can be expensive.
+
+</details>
+
+<details><summary><b>73.</b> What is the difference between a Workflow failing and a Workflow timing out at the Workflow level?</summary>
+
+A Workflow failure means the Workflow logic raised an unhandled error (or hit a non-determinism error) and ended in a failed state, whereas a Workflow-level timeout (such as a Workflow Execution Timeout) means the whole Execution exceeded its allowed wall-clock duration and was terminated by the Service. Both end the Execution, but for different reasons — application/logic versus an outer time budget. You set Workflow timeouts to bound total lifetime, separate from per-Activity timeouts.
+
+</details>
+
+<details><summary><b>74.</b> Why might you isolate heavy Activities onto a dedicated Task Queue?</summary>
+
+Routing CPU- or memory-heavy Activities (for example bulk EMT/EPT file parsing) to their own Task Queue lets you run a Worker fleet sized and tuned specifically for that load, without starving lightweight Activities sharing a pool. It gives independent scaling, resource isolation, and the ability to apply different concurrency limits per queue. This is standard capacity-management practice once different Activities have very different cost profiles.
+
+</details>
+
+<details><summary><b>75.</b> How does Temporal support running the same Workflow logic in different languages?</summary>
+
+Temporal provides SDKs in multiple languages (including Python, Go, Java, TypeScript, .NET) that all speak the same Service protocol and Event-History model, so different services can host Workers in different languages against the same Temporal Service. This multi-language reach is one reason Temporal scales across a heterogeneous estate where a single-language library would not. An architect weighs this against a Postgres-native library that may be tied to fewer languages.
+
+</details>
+
+<details><summary><b>76.</b> In Temporal, what is the consequence of an Activity that is not registered with any running Worker?</summary>
+
+If no Worker polls the Task Queue for that Activity, the Activity Task sits in the queue undispatched; with the default infinite `ScheduleToStartTimeout` it can wait indefinitely without erroring, leaving the Workflow stalled. Setting a finite `ScheduleToStartTimeout` makes Temporal fail the Activity when no Worker picks it up in time, surfacing the missing-Worker problem. The first thing to check when a Workflow hangs at an Activity is whether a Worker for that Task Queue is actually running.
+
+</details>
+
+<details><summary><b>77.</b> Why is "replay" cheaper than re-doing the actual work?</summary>
+
+Replay re-executes only the deterministic Workflow function and substitutes recorded Event results for every Activity, timer, and signal, so no external calls, no I/O, and no waiting actually occur — it is pure in-memory fast-forwarding. The expensive side effects happened once and are read back from history. That asymmetry is what makes resuming a crashed Workflow fast and side-effect-free.
+
+</details>
+
+<details><summary><b>78.</b> How would you justify Temporal over Azure Durable Functions for a particular platform?</summary>
+
+You would justify Temporal where you want a vendor-neutral, self-hostable (or Temporal Cloud) platform spanning multiple languages and clouds, with rich signals/queries/visibility and the freedom from Azure lock-in. Azure Durable Functions makes more sense when the estate is already committed to Azure Functions and you want the native, serverless, fully managed option. The decision is largely about existing platform commitment and portability requirements, since the durable-execution model is similar.
+
+</details>
+
+<details><summary><b>79.</b> Why are signals preferred over polling an external system inside a Workflow?</summary>
+
+Polling would require the Workflow to repeatedly invoke Activities that hit an external system, wasting work and complicating logic, whereas a Signal lets the external system push the event into the Workflow exactly when it happens, recorded durably in history. The Workflow can simply wait (via a durable timer or condition) until the Signal arrives. Push-via-Signal is cleaner, cheaper, and more responsive than poll-via-Activity.
+
+</details>
+
+<details><summary><b>80.</b> How does compensation in a Temporal saga differ from a database transaction rollback?</summary>
+
+A database rollback undoes uncommitted changes within one transaction automatically, whereas a Temporal saga's steps commit independently across services and cannot be rolled back atomically — so you must run explicit compensating Activities to semantically undo completed steps. Compensation is forward-recovery logic you write (release the reservation, reverse the booking), not an automatic rollback. Temporal makes running that compensation reliable; it does not make it automatic.
+
+</details>
+
+<details><summary><b>81.</b> What is the risk of putting a large blob directly into Workflow inputs, signals, or Activity results?</summary>
+
+Those payloads are stored in the Event History, so oversized blobs bloat history, slow replay, and can hit payload-size limits. The practice is to pass references (an object-store key, a database ID) through the Workflow and have Activities fetch the actual data. Keeping the durable history small keeps replay fast and storage manageable — relevant when processing large EMT/EPT or pricing files.
+
+</details>
+
+<details><summary><b>82.</b> How does the Temporal Service detect that a Worker has died mid-Activity without a heartbeat?</summary>
+
+Without heartbeating, the Service cannot distinguish a dead Worker from a slow one until the Activity's `StartToCloseTimeout` (or `ScheduleToCloseTimeout`) elapses, at which point the attempt is timed out and retried. That is why long-running Activities should heartbeat with a short `HeartbeatTimeout` — it gives the Service near-real-time crash detection instead of waiting out a long execution timeout. The choice of timeout strategy directly determines failure-detection latency.
+
+</details>
+
+<details><summary><b>83.</b> Why is Temporal described as a "modern saga orchestrator"?</summary>
+
+Because it directly supports the saga pattern — a sequence of local transactions across services with compensating actions on failure — but adds durable state, automatic retries, durable timers, and crash recovery as platform features rather than library plumbing. It modernises the saga by making the orchestration itself durable code you can read and test, instead of an event-choreography web that is hard to reason about. That is its core value proposition for trade-lifecycle and corporate-action workflows.
+
+</details>
+
+<details><summary><b>84.</b> What is the operational cost an architect accepts when choosing Temporal OSS over a Postgres-native library?</summary>
+
+Choosing Temporal OSS means operating a separate, stateful distributed system — the Temporal Service plus its persistence — including upgrades, scaling, monitoring, and backups, which is real ongoing work. A Postgres-native library like DBOS folds that into a database you already run. The architect must judge whether Temporal's scale and feature headroom justify the extra operational surface for the workloads at hand.
+
+</details>
+
+<details><summary><b>85.</b> For a transfer-agency subscription saga, why is durable run-to-completion important for regulatory correctness?</summary>
+
+In regulated fund administration, a half-applied subscription — units reserved but allocation not confirmed after a crash — can produce an inconsistent register and reconciliation breaks that auditors and regulators care about. Durable execution guarantees the saga either runs to a consistent completion or compensates, never silently stranding state, which supports accurate, auditable transfer-agency records. This reliability is part of meeting operational-resilience expectations such as those under DORA.
+
+</details>
+
+<details><summary><b>86.</b> How might durable execution support DORA-style operational-resilience requirements?</summary>
+
+DORA emphasises that critical financial processes withstand and recover from ICT disruptions; durable execution directly delivers crash-resilient, automatically recovering, retryable workflows with a complete Event History as an audit trail of every step. That recorded history and guaranteed recovery help demonstrate that a corporate-action or settlement process can survive component failures without manual reconstruction. It is a technical control that supports the resilience and traceability DORA expects.
+
+</details>
+
+<details><summary><b>87.</b> Why is the Event History also valuable as an audit artefact in a regulated context?</summary>
+
+Because it is a durable, ordered, immutable record of every decision and step — which Activities ran, what results they returned, when signals arrived — it provides a precise, replayable audit trail of how a workflow reached its outcome. In fund administration that traceability supports investigations, reconciliations, and regulatory inquiries far better than scattered logs. The same property that enables replay (a complete history) doubles as compliance evidence.
+
+</details>
+
+<details><summary><b>88.</b> What happens if you change an Activity's signature but not the Workflow that calls it, for in-flight Workflows?</summary>
+
+If a running Workflow's history expects the old Activity call and the new code now calls it differently, replay can diverge and the Workflow may fail with non-determinism, or the Activity may fail to bind. Activity changes that affect how the Workflow schedules them are determinism-affecting and need versioning just like Workflow changes. Safer changes keep the call shape stable or are guarded behind a patch/Worker Version.
+
+</details>
+
+<details><summary><b>89.</b> Why does Temporal recommend short Activities and short timeouts where feasible?</summary>
+
+Short Activities with tight timeouts mean failures and hangs are detected quickly, retries are cheap and granular, and progress is checkpointed frequently, so recovery is fast and little work is lost on a crash. Very long monolithic Activities delay failure detection and force large re-do on failure unless they heartbeat. Decomposing work into smaller Activities improves both responsiveness and resilience.
+
+</details>
+
+<details><summary><b>90.</b> How do durable Timers in Temporal survive a crash?</summary>
+
+A durable Timer is recorded as an Event when the Workflow schedules it, with its fire time stored in the Event History, so even if every Worker crashes the Timer's existence and deadline persist in the Service. On replay a Timer that already fired is not waited on again; one still pending resumes counting toward its recorded deadline. This is why Workflow `sleep` can safely span days where a real `sleep` could not.
+
+</details>
+
+<details><summary><b>91.</b> What is the danger of performing logging or metrics with side effects directly in Workflow code?</summary>
+
+Ordinary logging is usually fine because it does not change Commands, but anything that branches Workflow behaviour on an external or time-dependent value — or that performs real I/O — risks non-determinism on replay. Worse, logs will appear to "run" on every replay, which can confuse operators if not handled by the SDK's replay-aware logging. The safe stance is to keep side-effecting observability out of Workflow logic and rely on the SDK's replay-aware mechanisms.
+
+</details>
+
+<details><summary><b>92.</b> Why is "deterministic by construction" a better goal than "tested to be deterministic"?</summary>
+
+Because non-determinism can hide in rarely taken branches, dependency behaviour, or data-dependent ordering that tests miss, only surfacing as a production replay failure mid-workflow. Building Workflows from deterministic SDK primitives (workflow time, workflow random, durable timers, Activities for all I/O) removes whole classes of these bugs structurally. Replay tests against recorded histories help, but designing for determinism is the primary defence.
+
+</details>
+
+<details><summary><b>93.</b> How would you decide between Temporal and Camunda BPMN for a settlement-exception process?</summary>
+
+If the exception handling is human-task heavy and must be auditable and editable by operations and compliance staff, Camunda BPMN's visual, governable model is likely the better fit. If the exception flow is complex, code-driven, integration-heavy, and owned by engineers who need expressiveness and testability, Temporal fits better. The deciding lens is who owns and audits the process and how much human-readable governance the regulator and business demand.
+
+</details>
+
+<details><summary><b>94.</b> What does it mean that Activities can be invoked with both a Retry Policy and timeouts together?</summary>
+
+Timeouts decide when a given attempt (or the whole Activity) is considered failed, and the Retry Policy decides whether and how that failure is retried — they cooperate. For example a `StartToCloseTimeout` fires on a slow attempt, then the Retry Policy schedules the next attempt after its backoff interval up to `maximumAttempts`. Tuning them together lets you bound both per-attempt latency and total retry effort precisely.
+
+</details>
+
+<details><summary><b>95.</b> Why might a freshly started Worker briefly "replay" many Workflows on startup?</summary>
+
+When a Worker picks up Workflow Tasks for executions it has never held in memory — including after a deploy or a crash — it must replay each one's Event History to reconstruct state before continuing. This is normal and fast because replay does no real I/O, but a large fleet restart can cause a burst of replay activity. Sticky execution caches recently run Workflows on a Worker to avoid replaying from scratch on every task.
+
+</details>
+
+<details><summary><b>96.</b> What is sticky execution and what does it optimise?</summary>
+
+Sticky execution keeps a Workflow's reconstructed state cached on the Worker that last ran it, so subsequent Workflow Tasks for that execution can continue from the cached state instead of replaying the entire Event History each time. It optimises latency and CPU for active Workflows. If the sticky Worker is unavailable, another Worker simply replays from history — correctness is preserved, only the optimisation is lost.
+
+</details>
+
+<details><summary><b>97.</b> Why is durable execution a poor fit for ultra-low-latency, high-throughput stateless request handling?</summary>
+
+Durable execution adds the overhead of persisting Event History and round-tripping through the Service for each orchestration decision, which is the wrong trade for a hot path that just needs to process a request in microseconds and forget it. That workload belongs behind a plain service or queue. Temporal pays for itself when workflows are long-lived and stateful, not when they are short, stateless, and latency-critical.
+
+</details>
+
+<details><summary><b>98.</b> How does choosing idempotency keys per Activity interact with retries during a crash?</summary>
+
+An idempotency key (for example the order ID plus step name) lets a retried Activity recognise that the same logical operation already happened and skip or safely repeat it, so a crash-induced retry does not double-apply the side effect. Without a key, Temporal's retry — which may follow a partially completed attempt — can duplicate the effect. Designing the key around the business identity of the operation is what makes the retry-safe guarantee real.
+
+</details>
+
+<details><summary><b>99.</b> What is the first thing to verify if killing the Worker causes the Workflow to start over from step 1 instead of resuming?</summary>
+
+First verify that the Workflow's progress was actually being recorded as Events — that the steps were real Activities (whose results persist) rather than plain in-Workflow code with no recorded outcome, and that you are reusing the same Workflow ID/Run rather than starting a new Execution. If completed steps re-ran, also check the Activities are idempotent so any unavoidable retry is harmless. A "restart from step 1" usually signals a new Execution being started, not Temporal failing to resume.
+
+</details>
+
+<details><summary><b>100.</b> Summarise the architect's decision rule among Temporal, BPM, and a scheduler for a fund workflow.</summary>
+
+Use a scheduler when the workflow is periodic batch orchestration triggered by time or data dependencies; use BPM when the process must be human-readable, auditable, and editable by business and compliance, especially with human tasks; use Temporal (or a Postgres-native durable-execution library) when the workflow is a long-lived, code-driven, stateful saga needing fine-grained retries, durable timers, signals, and run-to-completion. The architect picks per workflow, with explicit reasons about ownership, auditability, statefulness, and scale — never one tool for everything.
+
+</details>
+
+
+## Phase 4 · 5.6.5 BPM / process orchestration (Camunda, BPMN/DMN) — 100 self-test questions
+
+<details><summary><b>1.</b> What does BPMN stand for and what is it?</summary>
+
+BPMN stands for Business Process Model and Notation, an OMG standard (current major version BPMN 2.0) for drawing executable business processes as flow diagrams. It defines a graphical notation plus an XML serialization, so the same model a compliance officer reads as a picture is also the artifact an engine like Camunda executes. That dual nature — human-readable diagram and machine-executable file — is exactly why regulated shops favour it.
+
+</details>
+
+<details><summary><b>2.</b> Why do banks and fund administrators run BPMN engines instead of writing all orchestration in code?</summary>
+
+A BPMN diagram is something a compliance officer or auditor can read and sign off, which they could never do with raw Temporal or Java code, so the model itself becomes the auditable contract. In regulated fund administration the auditability of settlement, onboarding, and exception-handling flows is a regulatory asset, not just developer convenience. The architect's job is to choose model-driven orchestration where that readability pays off and code-driven where it does not.
+
+</details>
+
+<details><summary><b>3.</b> What is the `.bpmn` file under the hood?</summary>
+
+It is an XML document conforming to the BPMN 2.0 schema, with elements like `<bpmn:serviceTask>`, `<bpmn:exclusiveGateway>`, and `<bpmn:sequenceFlow>` describing the process graph. Tools such as the Camunda Modeler or `bpmn.io` render that XML as a diagram and let you edit it visually, but the engine deploys and executes the XML directly. Because it is plain XML you can version it in Git and diff it like any other source artifact.
+
+</details>
+
+<details><summary><b>4.</b> What are the three broad categories of BPMN flow objects?</summary>
+
+Activities (things that get done, such as tasks and sub-processes), gateways (decision and merge points that route the token), and events (things that happen, such as start, timer, message, and error). Connecting objects called sequence flows wire them together into a directed graph. Mastering this small working subset — tasks, gateways, and events — is enough to model the great majority of real fund workflows.
+
+</details>
+
+<details><summary><b>5.</b> What is a "token" in BPMN execution semantics?</summary>
+
+A token is the conceptual marker that represents a single thread of control moving through the process; the engine advances tokens along sequence flows as activities complete and gateways route them. A process instance starts with one token at the start event, and parallel gateways can split one token into several and later join them back. Reasoning about where tokens are is how you reason about what state a running process instance is in.
+
+</details>
+
+<details><summary><b>6.</b> What is a BPMN service task?</summary>
+
+A service task (`<bpmn:serviceTask>`) is an automated step the engine hands off to software rather than a human — calling a microservice, running a calculation, or invoking a connector. In Camunda 8 the work is performed by an external job worker that polls for jobs of that task type, executes the logic, and reports completion. It is the workhorse for steps like "request NAV", "validate ISIN", or "post to the ledger".
+
+</details>
+
+<details><summary><b>7.</b> What is a BPMN user task and when do you use it?</summary>
+
+A user task (`<bpmn:userTask>`) is a step that pauses the process until a human completes it through a task list UI, used for manual review, approval, or data entry. In Camunda 8 it surfaces in Tasklist, where a reviewer claims and completes the item. You reach for it whenever a fund workflow needs a four-eyes check or a compliance officer's sign-off before continuing.
+
+</details>
+
+<details><summary><b>8.</b> What distinguishes a send task from a receive task?</summary>
+
+A send task actively dispatches a message out of the process (for example, emitting a SWIFT instruction), while a receive task suspends the instance until a matching incoming message arrives (for example, a settlement confirmation). Both deal with message flow, but send is outbound-and-continue whereas receive is wait-for-inbound. In Camunda 8 a receive task is correlated by a message name and a correlation key.
+
+</details>
+
+<details><summary><b>9.</b> What is a business rule task and why externalise the rule?</summary>
+
+A business rule task (`<bpmn:businessRuleTask>`) delegates a decision to a rule engine, typically by evaluating a DMN decision table, so the branching logic lives in a maintainable table rather than tangled into the flow. This keeps the process diagram clean and lets business analysts change thresholds without touching the process. In Camunda 8 you bind the task to a DMN decision by its decision id.
+
+</details>
+
+<details><summary><b>10.</b> What is a script task and what caution applies to it?</summary>
+
+A script task runs an inline script to do lightweight in-process work such as a small transformation. The caution is that embedding business logic in scripts hurts auditability and testability, so for anything non-trivial you prefer a service task with an external worker or a DMN rule task. In Camunda 8, expression evaluation generally uses FEEL rather than a general-purpose scripting language.
+
+</details>
+
+<details><summary><b>11.</b> What is a gateway in BPMN?</summary>
+
+A gateway is a diamond-shaped element that controls how tokens diverge and converge — it makes routing decisions or synchronizes parallel paths but performs no work itself. The marker inside the diamond tells you its type: an X for exclusive, a plus for parallel, a circle for event-based. Choosing the right gateway is the difference between a process that branches correctly and one that deadlocks or double-runs.
+
+</details>
+
+<details><summary><b>12.</b> What does an exclusive gateway (XOR) do?</summary>
+
+An exclusive gateway routes the token down exactly one outgoing path based on conditions evaluated on the sequence flows, taking the first flow whose condition is true. It models an either/or decision such as "compliance review required → yes vs no". You should provide a default flow so the token always has somewhere to go if no condition matches, otherwise the instance raises an error.
+
+</details>
+
+<details><summary><b>13.</b> What does a parallel gateway (AND) do?</summary>
+
+A parallel gateway splits one token into multiple tokens that run all outgoing paths simultaneously, and a matching parallel gateway later joins them, waiting until every incoming branch has arrived before continuing. It is unconditional — every path is taken. Use it when independent steps like "run AML screening" and "fetch custodian balances" can proceed at the same time.
+
+</details>
+
+<details><summary><b>14.</b> What does an inclusive gateway (OR) do?</summary>
+
+An inclusive gateway evaluates conditions on each outgoing path and activates every path whose condition is true — so anywhere from one to all branches may run. Its join waits only for the branches that were actually activated. It fits "send notifications to whichever of these parties is affected", where the number of active branches varies per instance.
+
+</details>
+
+<details><summary><b>15.</b> What is an event-based gateway?</summary>
+
+An event-based gateway routes based on which event happens first rather than on data conditions — the token waits, and whichever following catch event (a message, a timer, etc.) occurs first wins and the others are discarded. It is the classic pattern for "wait for the settlement confirmation, but time out after two days". This lets you model a race between an external response and a deadline cleanly.
+
+</details>
+
+<details><summary><b>16.</b> What is the difference between a start event, an intermediate event, and an end event?</summary>
+
+A start event triggers a new process instance and has no incoming flow; an intermediate event sits in the middle of the flow to catch or throw something as the token passes; an end event terminates that path of the process and has no outgoing flow. Each can carry a type marker such as message or timer. The position constrains what types are legal — for example, an error event is only thrown at the end or caught on a boundary.
+
+</details>
+
+<details><summary><b>17.</b> What is a timer event and give a fund example?</summary>
+
+A timer event fires based on time — a specific date, a duration, or a cycle — and is drawn with a clock icon. A timer start event could kick off the daily NAV-strike workflow at a fixed cut-off time, while a timer boundary event on a "await confirmation" task could escalate the case if no reply arrives within the SLA. In Camunda 8, durations are expressed in ISO 8601 form such as `PT24H` for 24 hours.
+
+</details>
+
+<details><summary><b>18.</b> What is a message event in BPMN?</summary>
+
+A message event represents communication crossing a process boundary — an incoming message wakes a waiting instance (catch) or an outgoing message is sent (throw), drawn with an envelope icon. A message start event can launch a new process when, say, a subscription order arrives, and a message intermediate catch event can pause until a payment confirmation lands. Correlation by message name and key is what ties an incoming message to the right instance.
+
+</details>
+
+<details><summary><b>19.</b> What is an error event and how does it differ from a message event?</summary>
+
+An error event signals that something went wrong inside the process and must be handled — it is thrown by an end event or a service task and caught by an error boundary event or error event sub-process, drawn with a lightning-bolt icon. Unlike a message, an error is an internal technical or business failure, not external communication. Errors interrupt the normal flow and divert the token to the handling path.
+
+</details>
+
+<details><summary><b>20.</b> What is a boundary event?</summary>
+
+A boundary event is attached to the edge of an activity and triggers when its event occurs while that activity is running — for example, a timer boundary event on a long-running task fires if the task overruns. Interrupting boundary events cancel the activity and take the token down the boundary path; non-interrupting ones spawn a parallel token and leave the activity running. They are the standard way to attach timeouts and error handling to a single step.
+
+</details>
+
+<details><summary><b>21.</b> What is the difference between an interrupting and a non-interrupting boundary event?</summary>
+
+An interrupting boundary event (solid border) cancels the activity it is attached to and routes the token out the exception path, used for timeouts and errors that should abort the step. A non-interrupting boundary event (dashed border) leaves the activity running and additionally emits a token down its path, used for "meanwhile, also do X" like sending a reminder while still waiting. Choosing the wrong one either kills work you wanted to keep or duplicates work you wanted to stop.
+
+</details>
+
+<details><summary><b>22.</b> What is a terminate end event?</summary>
+
+A terminate end event ends the entire process instance immediately, killing all remaining active tokens, not just the one that reached it. A plain end event only consumes its own token and lets other parallel branches finish. You use terminate when, for example, a hard validation failure should abort every in-flight branch of a subscription order at once.
+
+</details>
+
+<details><summary><b>23.</b> What is a sub-process and why use one?</summary>
+
+A sub-process is an activity that itself contains a BPMN process, letting you collapse detail behind a single box and reuse or scope behaviour. A call activity invokes a separately deployed process, while an embedded sub-process inlines it. Event sub-processes are a special form triggered by an event (such as an error or escalation) to handle cross-cutting concerns without cluttering the main flow.
+
+</details>
+
+<details><summary><b>24.</b> What is a pool in BPMN?</summary>
+
+A pool represents a participant or organization in a process — a self-contained business entity such as "Fund Administrator", "Transfer Agent", or "Custodian". Pools partition the diagram by who owns which part, and communication between pools happens through message flows, not sequence flows. They are the top-level unit for modelling responsibility boundaries across separate systems or companies.
+
+</details>
+
+<details><summary><b>25.</b> What is a lane in BPMN?</summary>
+
+A lane is a sub-division within a pool that assigns activities to a role, team, or system inside that single participant — for example lanes for "Operations", "Compliance", and "the Camunda engine" within the fund administrator's pool. Sequence flows can cross lanes freely because they are inside one pool. Lanes answer "who or what does this step" without implying a separate organization.
+
+</details>
+
+<details><summary><b>26.</b> How do you decide between a separate pool and a separate lane?</summary>
+
+Use a separate pool when the participant is an independent organization or system you communicate with by messages and whose internals you do not control — like the custodian or SWIFT network. Use a lane when the actor is a role or system inside your own process that you orchestrate directly with sequence flows. A common modelling error is putting an external counterparty in a lane, which wrongly implies you control its execution.
+
+</details>
+
+<details><summary><b>27.</b> Why can sequence flows not cross pool boundaries?</summary>
+
+Because a pool is an independent participant with its own control flow, so you cannot directly advance the token in someone else's process; you can only communicate across the boundary with message flows. A sequence flow implies "I make this happen next", which is only valid within your own orchestrated process. This restriction is what forces honest modelling of where you hand off to a counterparty.
+
+</details>
+
+<details><summary><b>28.</b> In a transfer-agency workflow, how might pools and lanes map to the real organizations?</summary>
+
+You would model the transfer agent, the fund administrator, the distributor, and the custodian as separate pools because they are distinct participants exchanging messages such as orders and confirmations. Within the fund administrator's pool, lanes might separate the dealing desk, the reconciliation team, the compliance reviewer, and the automated engine. The message flows between pools then map to the real interfaces — SWIFT messages, file drops, API calls.
+
+</details>
+
+<details><summary><b>29.</b> What is the value of modelling responsibility boundaries explicitly with pools and lanes?</summary>
+
+It makes accountability and hand-offs visible, so an auditor can see exactly which team or system owns each step and where work crosses an organizational line. In a regulated fund context this directly supports governance and the kind of segregation-of-duties evidence DORA-style operational-resilience reviews look for. It also surfaces integration points early, since every message flow between pools is a real interface to build and monitor.
+
+</details>
+
+<details><summary><b>30.</b> What does DMN stand for and what problem does it solve?</summary>
+
+DMN stands for Decision Model and Notation, an OMG standard for modelling business decisions as tables and decision requirement diagrams. It solves the problem of business logic — thresholds, eligibility rules, classifications — being buried in code or scattered through a process diagram. By externalising the rule into a decision table, analysts can read and change it without redeploying the process, which is decisive for auditable, frequently-tuned fund rules.
+
+</details>
+
+<details><summary><b>31.</b> What is a DMN decision table?</summary>
+
+A DMN decision table is a grid where each row is a rule: input columns hold the conditions and output columns hold the result, with a hit policy governing how matching rows combine. It reads like a spreadsheet of "if these inputs, then this output", which is exactly the format business and compliance staff already think in. Camunda evaluates the table at runtime, typically from a business rule task.
+
+</details>
+
+<details><summary><b>32.</b> What is FEEL?</summary>
+
+FEEL is the Friendly Enough Expression Language defined by the DMN standard and used throughout Camunda 8 for conditions, input entries, output entries, and process expressions. It is designed to be readable by business users while still being precise and executable — for example `amount > 1000000` or `instrumentType = "equity"`. Camunda 8 uses FEEL not only inside DMN but also for gateway conditions and input/output mappings, so learning FEEL pays off across the whole model.
+
+</details>
+
+<details><summary><b>33.</b> Write a FEEL input entry that matches an order amount between 100000 and 1000000 inclusive.</summary>
+
+You would write `[100000..1000000]`, using FEEL's range syntax where square brackets are inclusive endpoints. An open interval uses parentheses, so `(100000..1000000)` would exclude both ends. FEEL ranges make threshold rules in a decision table compact and unambiguous, which matters when the cells must survive an audit.
+
+</details>
+
+<details><summary><b>34.</b> What does a hyphen `-` mean in a DMN decision table input cell?</summary>
+
+A hyphen is the "any" or "don't care" marker, meaning that input is irrelevant for that rule and always matches. It keeps rules concise by letting you specify only the inputs that matter for a given outcome. For example a rule that flags any non-EU domicile regardless of amount would put the amount column as `-`.
+
+</details>
+
+<details><summary><b>35.</b> What is the UNIQUE hit policy and what is its risk if violated?</summary>
+
+UNIQUE (the default) asserts that the rules do not overlap so at most one rule can match any given input, returning that single rule's output. Its risk is that if two rules can both match the same input, the table is logically inconsistent and Camunda will raise an evaluation error rather than silently picking one. It is the safest default for clear, mutually-exclusive decisions like a single review verdict.
+
+</details>
+
+<details><summary><b>36.</b> What is the FIRST hit policy?</summary>
+
+FIRST allows overlapping rules and returns the output of the first matching rule in row order, so rule ordering becomes meaningful. It is convenient for "first applicable wins" cascades, but it makes the table harder to audit because correctness now depends on sequence. Many modelling-best-practice guides discourage FIRST precisely because re-ordering rows silently changes behaviour.
+
+</details>
+
+<details><summary><b>37.</b> What is the COLLECT hit policy?</summary>
+
+COLLECT returns a list of the outputs of all matching rules, optionally aggregated with an operator such as sum, min, max, or count. It fits cases where multiple rules can apply and you want all results — for example collecting every compliance flag an order triggers. With an aggregator like COLLECT-SUM you can total numeric outputs across the matching rules.
+
+</details>
+
+<details><summary><b>38.</b> When modelling a "compliance review required?" rule, why put it in DMN rather than an exclusive gateway?</summary>
+
+Because the criteria — amount thresholds, investor type, domicile, instrument class — are numerous, change often, and must be auditable, a DMN table captures them as readable rows a compliance analyst can verify and edit. An exclusive gateway with hand-coded conditions would bury that logic in the diagram and require a redeploy for every threshold tweak. The process stays stable while the rule evolves in the table.
+
+</details>
+
+<details><summary><b>39.</b> How does a BPMN process consume the result of a DMN decision?</summary>
+
+A business rule task evaluates the DMN decision and writes its output into a process variable, which a following exclusive gateway then branches on. So DMN decides "reviewRequired = true", and the gateway routes the token to the human review task or straight through. This separation keeps the decision logic in DMN and the routing logic in BPMN, each in its natural home.
+
+</details>
+
+<details><summary><b>40.</b> What is a Decision Requirements Diagram (DRD) in DMN?</summary>
+
+A DRD is the higher-level DMN view that shows decisions, their input data, and how decisions feed into one another, above the level of any single table. It lets you compose decisions — for example a "risk classification" decision feeding a "review required" decision. The DRD documents the dependency structure so reviewers see how a final verdict is built up from sub-decisions.
+
+</details>
+
+<details><summary><b>41.</b> Give a FEEL expression that checks an investor is a professional client domiciled outside the EU.</summary>
+
+Something like `investorType = "professional" and domicile != "EU"` works, combining string equality with the logical `and` and the inequality operator `!=`. FEEL's `and`/`or`/`not` keywords and standard comparison operators make such compliance predicates read close to plain English. You would typically place this as an input entry or rule condition in the relevant decision table.
+
+</details>
+
+<details><summary><b>42.</b> What process engine underlies Camunda 7 versus Camunda 8?</summary>
+
+Camunda 7 is built on the older Activiti-derived engine and stores process state in a relational database, executing the BPMN in the same JVM as your application (embeddable). Camunda 8 is built on Zeebe, a purpose-built, horizontally scalable, cloud-native engine that does not use a relational database for execution. This swap of execution core is the single biggest difference driving everything else about the two versions.
+
+</details>
+
+<details><summary><b>43.</b> Why was the relational database a scaling bottleneck in Camunda 7?</summary>
+
+In Camunda 7 every process step is a database transaction against shared tables, so under high throughput the relational store becomes a contention and locking bottleneck that is hard to scale horizontally. Zeebe was designed specifically to remove that constraint. The relational model that made Camunda 7 simple to embed is exactly what limited its throughput ceiling.
+
+</details>
+
+<details><summary><b>44.</b> How does Zeebe persist process state instead of a relational database?</summary>
+
+Zeebe is event-sourced: it appends every state change to a distributed, replicated commit log rather than mutating rows in a relational table. The current state is derived from that append-only log, which is what gives Zeebe its high write throughput and horizontal scalability. This is the same log-centric philosophy you see in Kafka-style systems applied to workflow state.
+
+</details>
+
+<details><summary><b>45.</b> What are partitions in Zeebe and why do they matter?</summary>
+
+A partition is a shard of Zeebe's data and processing; the broker cluster divides process instances across partitions so work runs in parallel, which is how Zeebe scales horizontally. Each partition is an independent ordered log with its own leader. More partitions means more throughput, but you fix the count at cluster setup because re-partitioning live is not a casual operation.
+
+</details>
+
+<details><summary><b>46.</b> What role does Raft play in a Zeebe cluster?</summary>
+
+Raft is the consensus protocol Zeebe uses to replicate each partition across several brokers and elect a leader for it. A record is only committed once a quorum (majority) of the partition's replicas has acknowledged it, which makes committed state durable even if an individual broker loses all its data. This is how Zeebe achieves high availability without a shared relational database.
+
+</details>
+
+<details><summary><b>47.</b> What does the Zeebe Gateway do?</summary>
+
+The Zeebe Gateway is the entry point clients connect to; it routes requests to the correct partition leaders and acts as a load balancer in front of the broker cluster. Clients and job workers talk to the gateway rather than to brokers directly, so the gateway hides the cluster topology. It speaks the Zeebe protocol (gRPC) and, in newer versions, an Orchestration Cluster REST API.
+
+</details>
+
+<details><summary><b>48.</b> How does Camunda 8 execute the work of a service task?</summary>
+
+Camunda 8 uses external job workers: the engine creates a "job" of the task's type, and an external worker process polls the gateway, activates available jobs, runs the business logic in its own service, then sends back a complete or fail command. The business logic therefore runs outside the engine, decoupled and independently scalable. This is a fundamental shift from Camunda 7, where Java delegates often executed inside the engine's transaction.
+
+</details>
+
+<details><summary><b>49.</b> What is "long polling" by a Zeebe job worker?</summary>
+
+Long polling means a worker's activate-jobs request is held open by the gateway while no jobs of that type are available, and returns as soon as a job appears, instead of the worker hammering the server with empty polls. This reduces latency and wasted requests. A worker configures things like `maxJobsActive` and a poll interval, and Zeebe streams activated jobs to it when they become available.
+
+</details>
+
+<details><summary><b>50.</b> How does a Camunda 7 Java delegate differ from a Camunda 8 job worker in coupling terms?</summary>
+
+A Camunda 7 Java delegate runs inside the engine's process and transaction, so the engine and your code are tightly coupled and deployed together, often in one monolith. A Camunda 8 job worker is a separate process communicating with the engine over the network (gRPC/REST), so business logic is decoupled, independently deployable, and language-agnostic. That decoupling is what lets Camunda 8 fit a microservices estate.
+
+</details>
+
+<details><summary><b>51.</b> What is an exporter in Zeebe and what is it commonly used for?</summary>
+
+An exporter streams the records from Zeebe's internal log out to an external system; the standard one ships records to Elasticsearch (or OpenSearch), which is what powers the Operate and Tasklist monitoring tools. Zeebe itself does not serve rich queries over historical data, so exporters externalise that concern. Exporters are a self-managed concept; in the SaaS offering Camunda runs them for you.
+
+</details>
+
+<details><summary><b>52.</b> What are Operate and Tasklist in Camunda 8?</summary>
+
+Operate is the operations dashboard for monitoring and inspecting running and completed process instances — seeing where instances are, diagnosing incidents, and resolving them. Tasklist is the UI where humans see and complete BPMN user tasks. Both read from the Elasticsearch index populated by the Zeebe exporter rather than from the engine's hot log directly.
+
+</details>
+
+<details><summary><b>53.</b> What is the licensing shift between Camunda 7 and Camunda 8 self-managed?</summary>
+
+Camunda 7 had a genuinely open-source community edition (Apache-licensed) usable in production for free, whereas Camunda 8's core components such as Zeebe, Operate, and Tasklist are now under the Camunda License (source-available, not OSI open source). Under the unified licensing introduced around Camunda 8.6, the free self-managed edition is for non-production use, and production self-managed use requires a paid or qualifying licence. This is a material change an architect must factor into total cost.
+
+</details>
+
+<details><summary><b>54.</b> Why does the Camunda 8 licensing change matter to an architecture decision in a regulated fund?</summary>
+
+Because "we can run it free in production like Camunda 7 community" is no longer true for the core components, so the architect must budget for a production licence or a qualifying non-commercial programme, and weigh that cost against alternatives. In a procurement-heavy, audited environment, licence terms and vendor lock-in are first-class architectural concerns. Getting this wrong surfaces as a surprise cost or a compliance finding late in delivery.
+
+</details>
+
+<details><summary><b>55.</b> Which Camunda 8 connector components are under Apache 2.0 rather than the Camunda License?</summary>
+
+The Connector SDK, the out-of-the-box REST connector, and the Connector Runtime and Connectors Bundle Docker images are licensed under Apache 2.0. The core orchestration components (Zeebe, Operate, Tasklist, Optimize, Identity) are under the source-available Camunda License. Knowing which piece is under which licence prevents incorrect assumptions about what you may freely run in production.
+
+</details>
+
+<details><summary><b>56.</b> Can you embed the engine in your own JVM application in Camunda 8 the way you could in Camunda 7?</summary>
+
+No — Camunda 7's embeddable engine ran inside your application's JVM and transaction, but Camunda 8's Zeebe is a separate distributed system you connect to as a client over the network. There is no embedded Zeebe engine; you talk to a cluster. Teams migrating from Camunda 7 must therefore rethink any design that relied on sharing the engine's database transaction with application code.
+
+</details>
+
+<details><summary><b>57.</b> In Camunda 7, what did sharing the engine's transaction with your code give you, and what replaces it in Camunda 8?</summary>
+
+In Camunda 7 a Java delegate ran in the same ACID transaction as the engine, so a step and its process-state update committed or rolled back together. Camunda 8 has no shared transaction; instead it relies on the job-worker model with at-least-once job delivery, idempotent workers, and the engine's own consistency via the replicated log. You design for retries and idempotency rather than for a single distributed transaction.
+
+</details>
+
+<details><summary><b>58.</b> What is a human-task workflow?</summary>
+
+A human-task workflow is a process that includes one or more BPMN user tasks requiring a person to act — review, approve, correct, or decide — before the token can advance. It blends automation with human judgement, which is essential where rules cannot fully decide an outcome or where regulation mandates a human in the loop. The engine tracks who owns each task and resumes automatically once it is completed.
+
+</details>
+
+<details><summary><b>59.</b> What is an exception queue in a process-orchestration context?</summary>
+
+An exception queue is the set of process instances that have hit a problem the automation cannot resolve and are parked for human handling — a work list of failures awaiting manual review. In BPMN you model this by routing the error or failure path to a user task that lands in Tasklist. It turns silent failures into visible, assignable, auditable work, which is critical for fund operations where a stuck NAV or order must not be lost.
+
+</details>
+
+<details><summary><b>60.</b> How do you route a failure to a human task in BPMN?</summary>
+
+You attach an error boundary event (or use an exclusive gateway on a failure flag) to the failing activity and direct its outgoing path to a user task for manual review. When the activity throws the error, the token leaves the automated path and lands in the reviewer's task list, where a human investigates, fixes the data, and completes the task to resume the flow. This is the canonical "happy path plus exception path to a human" pattern.
+
+</details>
+
+<details><summary><b>61.</b> After a human resolves an exception task, how does the process resume "correctly"?</summary>
+
+Completing the user task advances the token from that task down its outgoing sequence flow, typically rejoining the main flow or moving to a remediation branch, so the instance continues from a well-defined point rather than restarting. The reviewer may also set process variables (such as a corrected ISIN or an approval decision) that downstream steps read. Correct resumption means the model explicitly defines where control goes after the human acts.
+
+</details>
+
+<details><summary><b>62.</b> What is the difference between task assignment and task claiming in a human-task workflow?</summary>
+
+Assignment designates which user or group a task belongs to (often via a candidate group like "compliance reviewers"), while claiming is the act of a specific user taking ownership of a task from a shared group queue so others stop seeing it as available. This supports the common pattern of a team queue where any reviewer can pull the next item. Tracking assignee and claim is also part of the audit trail of who did what.
+
+</details>
+
+<details><summary><b>63.</b> Why is a human task valuable for a four-eyes (maker-checker) control in fund administration?</summary>
+
+A user task lets you enforce that a second person reviews and approves a sensitive step — like a manual NAV adjustment or a large redemption — before it proceeds, and the engine records the approver and timestamp. That recorded approval is exactly the segregation-of-duties evidence auditors and regulators expect. Modelling it as a BPMN user task makes the control explicit, enforced by the engine rather than by hope.
+
+</details>
+
+<details><summary><b>64.</b> How would you add an SLA/escalation to a human review task?</summary>
+
+Attach a timer boundary event to the user task; if the reviewer does not complete it within the configured duration (e.g. `PT4H` in ISO 8601), the timer fires and routes a token to an escalation path — reassigning, notifying a supervisor, or auto-rejecting. A non-interrupting timer can send a reminder while leaving the task open, whereas an interrupting one removes it. This turns "someone should look at this soon" into an enforced operational deadline.
+
+</details>
+
+<details><summary><b>65.</b> What does the "orchestration trichotomy" refer to in this lesson?</summary>
+
+It refers to the architect's core decision among three classes of orchestration tool: BPM engines (Camunda/BPMN), durable execution frameworks (Temporal), and schedulers/DAG tools (Airflow). Each is the right answer for a different shape of workflow, and the architect must choose per workflow with explicit reasons. The skill is matching workflow characteristics — human involvement, auditability, code complexity, scheduling — to the right tool, not defaulting to a favourite.
+
+</details>
+
+<details><summary><b>66.</b> When is a BPM engine like Camunda the right orchestration choice?</summary>
+
+When the workflow needs business-readable, auditable models, involves human tasks and approvals, and where compliance officers must review and sign off the process — classic for onboarding, settlement exceptions, and regulated reviews. The model-as-contract auditability and first-class human-task support are BPM's distinctive strengths. If those are not requirements, a lighter tool is often a better fit.
+
+</details>
+
+<details><summary><b>67.</b> When is Temporal (durable execution) the right orchestration choice?</summary>
+
+When the workflow is fundamentally code — complex, developer-owned logic, long-running, needing reliable retries and state across failures — and there is no need for a non-developer to read a diagram. Temporal lets engineers write workflows as durable code with automatic state persistence and replay, which is ergonomic for engineering-heavy sagas. Its weakness in this lesson's frame is that a compliance officer cannot read Temporal code the way they read a BPMN diagram.
+
+</details>
+
+<details><summary><b>68.</b> When is Airflow (or a scheduler/DAG tool) the right orchestration choice?</summary>
+
+When the work is batch data pipelines on a schedule — "run these dependent tasks daily in this order" — where the unit is a job in a DAG, not a long-lived stateful business process with human steps. Airflow excels at time-driven, data-engineering orchestration with retries and backfills. It is the wrong tool for human approvals or event-driven, instance-per-entity business processes.
+
+</details>
+
+<details><summary><b>69.</b> A daily batch that loads custodian files, computes NAV, and publishes it — which orchestration tool fits and why?</summary>
+
+A scheduler/DAG tool like Airflow fits best: it is a time-triggered batch pipeline of dependent data tasks with clear ordering, retries, and backfill needs, and no human-in-the-loop step. BPMN would be over-engineering a scheduled ETL, and Temporal's durable-code model adds little for a straightforward DAG. The deciding factors are time-driven scheduling and data-pipeline shape.
+
+</details>
+
+<details><summary><b>70.</b> An investor onboarding flow with KYC checks, document collection, and a compliance officer's approval — which tool fits and why?</summary>
+
+A BPM engine like Camunda fits, because the flow mixes automated steps with human review and approval, must be auditable, and benefits from a diagram a compliance officer can read and sign off. Human tasks, exception queues, and audit trails are exactly BPM's strengths. Temporal could run the logic but loses the business-readable, signable model; Airflow is simply the wrong shape for an instance-per-investor human workflow.
+
+</details>
+
+<details><summary><b>71.</b> A long-running settlement saga with intricate compensation logic owned entirely by engineers — which tool fits and why?</summary>
+
+Temporal (durable execution) fits well, because the logic is complex, code-centric, long-running, and needs reliable retries and compensation, with no requirement for a non-developer to read a diagram. Engineers express the saga as durable code that survives crashes via replay. BPMN could model it but the orchestration value here is engineering ergonomics and durability, not diagram auditability.
+
+</details>
+
+<details><summary><b>72.</b> What is the key trade-off between model-driven (BPMN) and code-driven (Temporal) orchestration?</summary>
+
+Model-driven orchestration buys you auditability and business-stakeholder readability at the cost of being clumsier for highly complex programmatic logic; code-driven orchestration buys you engineering expressiveness and durability at the cost of being opaque to non-developers. The lesson frames this as: a compliance officer can sign off a BPMN diagram but never Temporal code. The right choice depends on whether auditability-by-non-developers is a hard requirement.
+
+</details>
+
+<details><summary><b>73.</b> Why might a regulated fund administrator persist with BPM engines even when durable execution is technically elegant?</summary>
+
+Because regulatory and audit requirements value a process artifact that compliance and audit staff can read, review, and sign off, and that maps cleanly to controls and segregation of duties — a benefit Temporal code does not provide. The engine-enforced, diagrammed process becomes evidence for operational-resilience and governance obligations. The persistence of BPM in regulated shops is driven by auditability, not by raw technical superiority.
+
+</details>
+
+<details><summary><b>74.</b> What is `bpmn.io` and how does it relate to Camunda?</summary>
+
+`bpmn.io` is the open-source, browser-based toolkit (BPMN and DMN modelling libraries and a viewer/editor) maintained by Camunda for drawing and embedding diagrams. The Camunda Modeler and the web modeller are built on it. You can use `bpmn.io` to author the `.bpmn` and `.dmn` XML that you then deploy to a Camunda engine, or embed a diagram viewer in your own app.
+
+</details>
+
+<details><summary><b>75.</b> What is Zeebe's primary client protocol?</summary>
+
+Zeebe's native client protocol is gRPC, used by job workers and clients to deploy processes, create instances, and activate/complete jobs against the gateway. Newer Camunda 8 versions also expose an Orchestration Cluster REST API as an alternative for some operations. Choosing gRPC versus REST affects worker latency and the long-polling behaviour available.
+
+</details>
+
+<details><summary><b>76.</b> What is the deployment unit you push to a Camunda 8 engine, and how?</summary>
+
+You deploy BPMN and DMN resources (the `.bpmn` and `.dmn` files) to the cluster via the gateway, after which the engine can create instances of those process and decision definitions. A deployment is versioned, so deploying a changed model creates a new version while existing instances continue on their original version. This versioning is important when you must keep in-flight fund processes running on the model they started under.
+
+</details>
+
+<details><summary><b>77.</b> What happens to running instances when you deploy a new version of a process in Camunda?</summary>
+
+Existing instances continue running on the process version they were started with, while new instances use the newly deployed version, because each deployment is independently versioned. To move running instances onto a new version you must perform an explicit process-instance migration. This protects long-running cases — like a multi-day settlement — from being broken by a mid-flight model change.
+
+</details>
+
+<details><summary><b>78.</b> What is an incident in Camunda 8?</summary>
+
+An incident is the engine's record that a process instance is stuck due to an unhandled problem — a job that failed all its retries, an expression that could not be evaluated, or a missing variable — and it pauses that part of the instance until resolved. Operate surfaces incidents so operators can diagnose and retry or fix them. Incidents are how the platform makes failures explicit rather than silently dropping work.
+
+</details>
+
+<details><summary><b>79.</b> A service task keeps failing and creates an incident — what is the first thing to check?</summary>
+
+First check the incident details in Operate, which show the failing job type, the error message, and the variables, because the cause is usually a worker exception, a missing process variable, or bad input data. Confirm a worker for that task type is actually running and subscribed, since "no worker" looks like a stalled task. Once the root cause is fixed you resolve the incident and the job is retried.
+
+</details>
+
+<details><summary><b>80.</b> Your service task never executes and the instance just sits there with no incident — what is the likely cause?</summary>
+
+The most likely cause is that no job worker is subscribed for that task's type, so the job is created but never activated; without a worker there is no failure either, just a waiting job. Check that a worker process is running and configured with the exact task type string used in the model. A typo between the BPMN task type and the worker's registered type is a classic cause of this silent stall.
+
+</details>
+
+<details><summary><b>81.</b> How does at-least-once job delivery affect how you write a Camunda 8 worker?</summary>
+
+Because Zeebe guarantees a job is delivered at least once, a worker can occasionally receive the same job twice (for example after a timeout or restart), so the worker's logic must be idempotent. You design steps like "post to ledger" or "send SWIFT instruction" so that re-execution does not double-post or double-send. This is the price of the decoupled, crash-tolerant job model replacing Camunda 7's shared transaction.
+
+</details>
+
+<details><summary><b>82.</b> What is a message correlation key in Camunda 8 and why is it needed?</summary>
+
+A correlation key is the value (drawn from a process variable, e.g. an order id) that the engine uses to match an incoming message to the specific waiting instance it belongs to. Without it, an arriving settlement confirmation could not be tied to the right one of thousands of in-flight orders. You define the message name and the correlation key expression on the catch event so the engine routes the message precisely.
+
+</details>
+
+<details><summary><b>83.</b> What is a message buffering improvement in Camunda 8 compared to Camunda 7?</summary>
+
+Camunda 8 can buffer a message that arrives before its target process instance is ready to receive it, holding it (within a time-to-live) until the instance reaches the matching catch point, which reduces race conditions in distributed systems. In Camunda 7 a message arriving too early would simply not correlate. This makes event-driven fund flows more robust when confirmations can race ahead of the process.
+
+</details>
+
+<details><summary><b>84.</b> How would you model the subscription-order lifecycle in BPMN with a happy path and an error path to a human task?</summary>
+
+Start with a message start event for the incoming order, then automated service tasks (validate order, check ISIN, screen investor), a business rule task for "compliance review required", and an exclusive gateway that either continues to booking or routes to a user task for manual compliance review. Attach error boundary events on the automated tasks so technical failures also land in an exception user task. Completing the human task either resumes the booking path or rejects the order to an end event.
+
+</details>
+
+<details><summary><b>85.</b> In that subscription-order model, where does DMN fit?</summary>
+
+DMN fits at the business rule task that decides whether compliance review is required, evaluating a decision table on inputs like order amount, investor type, and fund domicile and outputting a `reviewRequired` flag. The following exclusive gateway branches on that flag — straight-through processing if false, human review task if true. This keeps the changeable compliance thresholds in an auditable table separate from the process flow.
+
+</details>
+
+<details><summary><b>86.</b> Why deliberately trigger the error path at least once when testing a BPMN process?</summary>
+
+Because the exception and human-task path is the part most likely to be wrong and least exercised by happy-path testing, so you must prove that a failure actually diverts to the review task and that completing it resumes the flow correctly. Untested error paths are where stuck or lost fund instances hide. Forcing the error validates the whole exception-queue mechanism end to end.
+
+</details>
+
+<details><summary><b>87.</b> What should a written comparison of the BPMN saga versus the Temporal saga emphasize?</summary>
+
+It should weigh auditability and business-readability (BPMN's edge — a signable diagram, first-class human tasks) against engineering expressiveness and durability for complex logic (Temporal's edge — durable code, retries, replay). It should conclude per workflow: pick BPMN when human review and compliance sign-off dominate, Temporal when intricate engineer-owned logic dominates. The deliverable is a reasoned recommendation, not a generic feature list.
+
+</details>
+
+<details><summary><b>88.</b> How do FEEL conditions appear on a BPMN sequence flow out of an exclusive gateway?</summary>
+
+Each conditional outgoing flow carries a FEEL boolean expression (a condition expression), and the gateway takes the first flow whose expression evaluates true, falling back to the default flow if none match. For example one flow's condition is `reviewRequired = true` and the default handles the rest. Because Camunda 8 uses FEEL here too, the same expression language spans gateways, DMN, and variable mappings.
+
+</details>
+
+<details><summary><b>89.</b> What are input and output variable mappings on a Camunda 8 task?</summary>
+
+Input mappings transform or rename process variables into the local variables a task sees, and output mappings map a task's results back into process variables, both expressed in FEEL. They let you keep a clean variable contract — a worker need only know its inputs, and its outputs are merged back under controlled names. This reduces coupling and avoids variable-name collisions across a large fund process.
+
+</details>
+
+<details><summary><b>90.</b> How does Camunda 8 support multi-instance activities, and where is that useful?</summary>
+
+A multi-instance marker on a task or sub-process runs it once per element of a collection, either sequentially or in parallel, gathering the results. It is useful when, say, a redemption order must run the same validation per underlying holding, or a corporate action applies per affected position. You configure the input collection and the per-item variable, typically with FEEL.
+
+</details>
+
+<details><summary><b>91.</b> What is the difference between a process variable's scope at instance level versus within a sub-process?</summary>
+
+Variables can be set at the top-level instance scope or local to a sub-process/activity scope; a local variable is visible within its scope and does not leak upward unless mapped out. This scoping prevents inner steps from clobbering shared instance variables and lets you reuse variable names safely. Misunderstanding scope is a common cause of "the value I set disappeared" bugs.
+
+</details>
+
+<details><summary><b>92.</b> Why might you choose a call activity over an embedded sub-process for a reusable fund check?</summary>
+
+A call activity invokes a separately deployed, independently versioned process, so a shared routine like "AML screening" or "ISIN validation" lives once and is reused across many parent processes. An embedded sub-process is inlined and not reusable elsewhere. The call-activity approach supports governance — one place to update and audit a shared control — at the cost of managing the separate definition.
+
+</details>
+
+<details><summary><b>93.</b> What is an escalation event and how does it differ from an error event?</summary>
+
+An escalation event signals a non-fatal "raise this up" condition — like notifying a supervisor — and can be non-interrupting so the activity keeps running, whereas an error event signals a failure that interrupts and is handled. Escalation is for "flag it but carry on / handle in parallel"; error is for "stop and divert". Choosing escalation for a soft alert avoids needlessly aborting a still-valid process branch.
+
+</details>
+
+<details><summary><b>94.</b> How does Camunda 8 give you an audit trail of a process instance?</summary>
+
+Zeebe's event-sourced log records every state transition, and via the exporter that history lands in Elasticsearch where Operate presents the full path each instance took, including which tasks ran, who completed user tasks, and when. This produces a defensible, queryable record of process execution. In a regulated fund context that trail is the evidence that controls actually executed as modelled.
+
+</details>
+
+<details><summary><b>95.</b> What is Optimize in the Camunda 8 stack?</summary>
+
+Optimize is the analytics and reporting component that builds dashboards and reports over process and decision data — cycle times, bottlenecks, SLA breaches, and decision outcomes. It reads the exported history rather than the live engine. For fund operations it can answer questions like "how long do compliance reviews take" or "how often does the error path fire", supporting continuous improvement and regulatory reporting.
+
+</details>
+
+<details><summary><b>96.</b> Why is idempotency especially important for a service task that emits a SWIFT instruction?</summary>
+
+Because at-least-once delivery means the worker could run twice, and accidentally sending a duplicate SWIFT settlement instruction has real financial consequences. The worker must therefore deduplicate — for example keying on a unique reference so a re-run is a no-op. Designing such steps to tolerate replay is mandatory when the side effect is a real money movement.
+
+</details>
+
+<details><summary><b>97.</b> A timer boundary event on a human review task is firing too early — first thing to check?</summary>
+
+Check the timer's duration definition: it must be a valid ISO 8601 duration such as `PT4H`, and a malformed or wrongly-unit value (minutes vs hours) is the usual culprit. Also confirm the timer is interrupting/non-interrupting as intended and that the engine's clock and timezone assumptions match expectations. A common mistake is writing the duration as a plain number instead of the ISO 8601 form.
+
+</details>
+
+<details><summary><b>98.</b> How do you decide BPM vs Temporal vs Airflow for three different fund workflows in an interview-defensible way?</summary>
+
+For each workflow you name the deciding characteristics — human tasks and auditability point to BPM, intricate engineer-owned durable logic points to Temporal, scheduled batch data pipelines point to Airflow — and give a concrete reason, not a preference. For example: NAV batch publish → Airflow (time-driven DAG); investor onboarding → Camunda (human approval, auditable); complex settlement compensation saga → Temporal (durable code). The defence is the mapping of workflow shape to tool strength with reasons.
+
+</details>
+
+<details><summary><b>99.</b> What is the single most important reason BPMN/DMN engines persist in regulated finance, summarised?</summary>
+
+Auditability: the BPMN diagram and DMN tables are artifacts that compliance and audit staff can read, review, and sign off, and the engine enforces and records exactly that modelled behaviour. This makes the process itself a control and a piece of evidence, aligning with governance and operational-resilience obligations. No equivalently business-readable, signable artifact exists for code-driven orchestration, which is why these engines endure.
+
+</details>
+
+<details><summary><b>100.</b> What does the FEEL `not()` negation look like when filtering a list of fund order statuses?</summary>
+
+FEEL offers a unary `not(...)` form for negating a value or test, so an input entry like `not("settled", "cancelled")` matches any status that is neither settled nor cancelled. This is more readable in a decision-table cell than spelling out every other status explicitly. It pairs naturally with list and range tests to express "everything except these" rules compactly.
+
+</details>
+
+
+## Phase 4 · 1.11.1 + 1.11.3 Data protocols & async API standards — 100 self-test questions
+
+<details><summary><b>1.</b> At the highest level, what is this lesson asking the architect to be able to do?</summary>
+
+It asks you to choose the right transfer mechanism for any interface across the estate — a BI extract, a microservice call, a market-data feed, a file drop — with numbers and named criteria rather than habit. The toolkit spans synchronous protocols (gRPC, REST, Arrow Flight/ADBC), push/queue transports (WebSocket, MQTT, AMQP), and the async documentation standards (AsyncAPI, CloudEvents) that make an event estate interoperable. The payoff is that you stop defaulting everything to REST/JDBC and instead defend each choice against payload size, latency, ordering, and schema needs.
+
+</details>
+
+<details><summary><b>2.</b> What is `gRPC` in one sentence?</summary>
+
+`gRPC` is a contract-first remote-procedure-call framework that runs over HTTP/2 and serialises messages with Protocol Buffers (`protobuf`) by default. You define services and messages in a `.proto` file, generate strongly-typed client and server stubs in many languages, and call remote methods as if they were local functions. Its appeal is low overhead and a strict, versioned contract, which suits internal microservice-to-microservice calls.
+
+</details>
+
+<details><summary><b>3.</b> Why does `gRPC` use HTTP/2 rather than HTTP/1.1?</summary>
+
+HTTP/2 gives `gRPC` multiplexing (many concurrent streams over one TCP connection without head-of-line blocking at the request level), binary framing, header compression, and bidirectional streaming. These let `gRPC` support four call styles — unary, server-streaming, client-streaming, and bidirectional — over a single long-lived connection. HTTP/1.1 could not express server-push streaming cleanly, which is why `gRPC` mandates HTTP/2 on the wire.
+
+</details>
+
+<details><summary><b>4.</b> What does "contract-first" mean for `gRPC`, and why does the architect care?</summary>
+
+Contract-first means the `.proto` interface definition is the single source of truth, and both client and server code are generated from it, so the contract cannot silently drift from the implementation. The architect cares because the contract is reviewable, version-controllable, and machine-checkable — a renamed or retyped field is caught at codegen, not in production. This discipline is what makes `gRPC` safer than ad-hoc JSON-over-REST for tightly-coupled internal services.
+
+</details>
+
+<details><summary><b>5.</b> What are the four `gRPC` method types?</summary>
+
+Unary (one request, one response — like a normal function call), server streaming (one request, a stream of responses), client streaming (a stream of requests, one response), and bidirectional streaming (both sides stream independently). HTTP/2's multiplexed streams make all four possible over one connection. A market-data subscription, for example, is a natural fit for server streaming.
+
+</details>
+
+<details><summary><b>6.</b> Why is `gRPC` often a poor choice for a public, browser-facing API?</summary>
+
+Browsers cannot speak raw `gRPC` because they do not expose the low-level HTTP/2 frame control `gRPC` needs, so you must front it with `gRPC-Web` and a proxy that translates. The payloads are binary `protobuf`, so they are not human-readable or curl-friendly, and tooling/caching infrastructure built around REST/JSON does not apply. For an internal service mesh these are non-issues, but for a public or partner-facing edge, REST is usually the pragmatic default.
+
+</details>
+
+<details><summary><b>7.</b> What is REST, and what does "maturity in practice" mean here?</summary>
+
+REST is an architectural style for HTTP APIs built on resources, URIs, the standard verbs (`GET`/`POST`/`PUT`/`DELETE`), and stateless requests, typically carrying JSON. "Maturity in practice" acknowledges that most real REST is pragmatic level-2 (resources plus verbs plus status codes) rather than fully hypermedia-driven (HATEOAS/level 3). The lesson's point is to know where REST is genuinely the right default and where its per-row, text-marshalling overhead makes it the wrong tool.
+
+</details>
+
+<details><summary><b>8.</b> Where is REST the pragmatic default, and where is it not?</summary>
+
+REST is the default for public/partner APIs, CRUD-style resources, broad client compatibility, human debuggability, and easy HTTP caching. It is the wrong default for high-throughput internal calls where `gRPC`'s binary contract wins, for streaming/push where WebSocket or `gRPC` streams fit, and above all for moving large analytical result sets where row-by-row JSON marshalling is the bottleneck and Arrow Flight wins. The skill is naming the deciding factor rather than reaching for REST reflexively.
+
+</details>
+
+<details><summary><b>9.</b> What is Apache Arrow, and how does it relate to Arrow Flight?</summary>
+
+Apache Arrow is a language-agnostic, in-memory columnar data format plus an IPC (inter-process communication) serialization of that format. Arrow Flight is an RPC framework that moves streams of Arrow record batches between services over the wire. Flight is built on top of `gRPC` and uses the Arrow IPC format as its payload, so data already in Arrow memory can be transmitted with minimal conversion.
+
+</details>
+
+<details><summary><b>10.</b> What problem does Arrow Flight solve that JDBC/ODBC do not?</summary>
+
+JDBC and ODBC return rows and force a costly row-by-row serialize/deserialize between the engine's columnar storage and the client, which can dominate transfer time for large analytical extracts. Arrow Flight moves columnar Arrow record batches end-to-end, avoiding that transpose and per-value conversion, and supports parallel streams from multiple endpoints. The result is dramatically higher throughput for bulk analytical transfer — the canonical "Arrow Flight beats JDBC" case.
+
+</details>
+
+<details><summary><b>11.</b> Why can Arrow Flight approach wire speed where row protocols cannot?</summary>
+
+Because the data is already columnar in Arrow memory on both ends, Flight can transmit Arrow IPC batches with little or no copying or reformatting — there is no row-to-column transpose and no per-cell type conversion. `gRPC`'s framing is also optimised so the Arrow batch bytes are placed onto the wire without extra intermediate copies. Published benchmarks show DoGet throughput in the gigabytes-per-second range with several parallel streams, which row marshalling fundamentally cannot reach.
+
+</details>
+
+<details><summary><b>12.</b> Name the core Arrow Flight RPC methods and what each does.</summary>
+
+`GetFlightInfo` returns metadata and the endpoints/tickets describing where to fetch a dataset; `DoGet(Ticket)` streams Arrow record batches down to the client; `DoPut` uploads a stream of Arrow record batches to the server. There are also `ListFlights`, `GetSchema`, and `DoAction`/`ListActions` for application-specific calls. This split lets a client discover endpoints first, then pull data in parallel from each.
+
+</details>
+
+<details><summary><b>13.</b> What is `FlightData`, the central Flight message type?</summary>
+
+`FlightData` is the `protobuf` message that carries one Arrow record batch (plus its metadata) across the wire in a Flight stream. Flight optimises the `gRPC` path so the Arrow batch bytes inside `FlightData` are written without an intermediate memory copy, which is part of why it is so fast. Because the methods and `FlightData` are defined in `protobuf`, clients that have `gRPC` and Arrow separately can interoperate even without a full Flight library.
+
+</details>
+
+<details><summary><b>14.</b> What is ADBC, and how does it differ from Arrow Flight?</summary>
+
+ADBC (Arrow Database Connectivity) is a columnar database API standard — the Arrow-native analogue of JDBC/ODBC — that lets an application talk to many databases through one Arrow-returning interface. Arrow Flight is a wire protocol for moving Arrow batches; ADBC is a client-side driver API a database driver implements, and one common ADBC driver transport is in fact Flight SQL. So ADBC is the "how the app calls the database" layer, Flight is one "how the bytes travel" layer beneath it.
+
+</details>
+
+<details><summary><b>15.</b> Is ADBC meant to replace JDBC/ODBC everywhere?</summary>
+
+No — ADBC is positioned as complementary, focused on bulk columnar retrieval and ingestion for analytical workloads. JDBC/ODBC remain valuable for their enormous driver coverage and for row-oriented transactional access, and an ADBC driver can even wrap ODBC. The architect uses ADBC where the source and sink are columnar/Arrow-native and the per-row conversion tax would otherwise dominate.
+
+</details>
+
+<details><summary><b>16.</b> When `gRPC` and Arrow Flight both ride on HTTP/2, what makes Flight the better choice for an analytical extract?</summary>
+
+Plain `gRPC` carries `protobuf` messages you design row- or object-shaped, so a million-row result still serialises element by element. Arrow Flight carries Arrow record batches — columnar, already-in-memory, transmitted with minimal copying — and supports parallel endpoint streams. So for moving large columnar result sets, Flight's payload model is the differentiator, even though both share the `gRPC`/HTTP-2 substrate.
+
+</details>
+
+<details><summary><b>17.</b> What is WebSocket, and where does it fit among these transports?</summary>
+
+WebSocket is a protocol that upgrades an HTTP connection into a persistent, full-duplex TCP channel so server and client can push messages to each other at any time. It fits browser-facing push and live-update use cases — a dashboard that needs server-initiated updates without polling. It is a transport for bidirectional messaging, not a contract or schema standard, so you still layer a message format on top.
+
+</details>
+
+<details><summary><b>18.</b> What is MQTT, and what use case is it designed for?</summary>
+
+MQTT is a lightweight publish/subscribe messaging protocol designed for constrained devices and unreliable, low-bandwidth networks — the classic IoT/telemetry transport. It has a tiny header, topic-based pub/sub, and configurable quality-of-service levels (0/1/2) for delivery guarantees. In a fund estate it is rarely the core, but you should recognise it for sensor/edge-style feeds rather than for high-volume trade events.
+
+</details>
+
+<details><summary><b>19.</b> What is AMQP, and how does it differ from a log like Kafka?</summary>
+
+AMQP (Advanced Message Queuing Protocol) is a broker protocol for message queues — the basis of RabbitMQ and Azure Service Bus — built around exchanges, queues, bindings, and per-message acknowledgement and redelivery. It excels at task distribution, routing, request/reply, and per-message TTL. Unlike a Kafka-style log, a consumed-and-acked message is removed, so AMQP does not give you the replayable, long-retention history that auditors and reprocessing depend on.
+
+</details>
+
+<details><summary><b>20.</b> Map each of WebSocket, MQTT, and AMQP to its best-fit role in one phrase each.</summary>
+
+WebSocket is for browser/server push over a persistent full-duplex web connection; MQTT is for IoT-style telemetry over constrained, lossy networks with QoS levels; AMQP is for enterprise message queues with routing, acks/redelivery, and per-message TTL. None of the three is a replayable log, so for fan-out, replay, and long retention you reach for Kafka instead. The architect's job is to place each transport need on the right one of these rather than forcing all messaging through one tool.
+
+</details>
+
+<details><summary><b>21.</b> What is AsyncAPI, in one sentence?</summary>
+
+AsyncAPI is a machine-readable specification for documenting message-driven and event-driven APIs — "OpenAPI for events" — describing the channels, messages, and schemas of an asynchronous estate in a protocol-agnostic way. It lets you publish a contract for your Kafka topics (or MQTT/AMQP/WebSocket endpoints) that humans and tooling can read, render, and validate against. It turns tribal knowledge about "what's on this topic" into a documented, versioned artefact.
+
+</details>
+
+<details><summary><b>22.</b> What are the top-level building blocks of an AsyncAPI document?</summary>
+
+The main objects are `servers` (broker connection details and protocol), `channels` (the topics/queues where messages flow), `operations` (whether your application sends or receives on a channel), and `messages` (the events themselves, with payload schemas). Reusable definitions live under `components`. Together these describe who connects where, which streams exist, what direction data flows, and what each message looks like.
+
+</details>
+
+<details><summary><b>23.</b> What is the headline structural change in AsyncAPI 3.0?</summary>
+
+AsyncAPI 3.0 decoupled `operations` from `channels` — operations are now standalone objects that reference a channel, rather than being nested inside it as in 2.x. This mirrors how OpenAPI separates concerns and removes the 2.x ambiguity about publish/subscribe perspective (whose viewpoint "publish" meant). The practical effect is clearer, reusable operation definitions and a less confusing spec.
+
+</details>
+
+<details><summary><b>24.</b> How is an AsyncAPI `server` object different from its OpenAPI equivalent?</summary>
+
+It is almost identical, but the field `scheme` is renamed `protocol`, and AsyncAPI adds `protocolVersion`, because async APIs are not limited to HTTP — a server might be `kafka`, `amqp`, `mqtt`, or `ws`. So AsyncAPI's server object names a broker and its protocol rather than just an HTTP base URL. This protocol-agnosticism is the whole point: one document can describe a Kafka estate or an MQTT fleet.
+
+</details>
+
+<details><summary><b>25.</b> Why is "OpenAPI is for request/response, AsyncAPI is for messages" the right mental model?</summary>
+
+OpenAPI assumes a client calls a URL path and synchronously waits for a response body, so it models paths, methods, and responses. AsyncAPI assumes producers and consumers exchange messages over channels asynchronously, possibly never replying, so it models servers, channels, operations, and messages. Using OpenAPI to document a Kafka topic would misrepresent the interaction; AsyncAPI exists precisely to fill that gap.
+
+</details>
+
+<details><summary><b>26.</b> What is CloudEvents, and what problem does it solve?</summary>
+
+CloudEvents is a vendor-neutral specification for a common event envelope — a standard set of metadata attributes wrapping any event payload — so that events are portable across producers, brokers, and clouds. Without it, every system invents its own envelope (header names, id placement, timestamp format), and integrating two event sources means writing bespoke adapters. CloudEvents standardises the envelope so routing, tracing, and tooling can work across heterogeneous systems.
+
+</details>
+
+<details><summary><b>27.</b> What are the four REQUIRED context attributes of a CloudEvent?</summary>
+
+`id`, `source`, `specversion`, and `type`. `id` plus `source` together must uniquely identify each distinct event; `type` describes the kind of occurrence (e.g. `com.fund.order.created`); and `specversion` states which CloudEvents version the envelope follows. Every compliant CloudEvent must carry all four — they are the minimum interoperable contract.
+
+</details>
+
+<details><summary><b>28.</b> Name several OPTIONAL CloudEvents attributes and what each conveys.</summary>
+
+`time` (when the occurrence happened), `subject` (the specific subject within the producer's context, e.g. a particular ISIN), `datacontenttype` (the media type of the payload, e.g. `application/json`), and `dataschema` (a URI to the schema the data follows). These add tracing, routing, and validation hooks without being mandatory. Using `subject` to carry the entity key, for instance, lets routers filter without parsing the body.
+
+</details>
+
+<details><summary><b>29.</b> What value does the `specversion` attribute currently carry, and why does it exist?</summary>
+
+Compliant producers set `specversion` to `1.0` (the CloudEvents 1.0 line; the spec document itself is at a 1.0.x revision). It exists so consumers know which set of attribute rules to apply and can evolve safely if the envelope spec changes. It is one of the four required attributes precisely because envelope interpretation depends on it.
+
+</details>
+
+<details><summary><b>30.</b> Explain CloudEvents binary content mode versus structured content mode.</summary>
+
+In binary content mode, the event payload sits in the transport message body while the CloudEvents attributes are mapped onto transport metadata (e.g. HTTP headers or Kafka headers), so non-CloudEvents receivers can still read the body. In structured content mode, the entire event — attributes and data together — is encoded in the message body using an event format such as JSON. Binary mode preserves compatibility with existing consumers; structured mode keeps the whole event self-contained for forwarding across hops.
+
+</details>
+
+<details><summary><b>31.</b> What is SOAP, and why must you have "legacy literacy" for it?</summary>
+
+SOAP is an older XML-based RPC/messaging protocol, usually over HTTP, with a strict envelope, a WSDL contract describing operations, and the WS-* extensions for security and transactions. You need literacy because regulated fund and banking estates still expose core systems (custody, transfer agency, SWIFT gateways) over SOAP, and you will integrate with them whether you like it or not. The architect's job is to wrap or bridge them cleanly, not to pretend they are gone.
+
+</details>
+
+<details><summary><b>32.</b> What is OData, and where will you meet it?</summary>
+
+OData (Open Data Protocol) is a REST-based convention for querying and updating data via URLs, with standard query options like `$filter`, `$select`, `$expand`, and `$top`. You meet it in Microsoft-centric estates and many enterprise products that expose entity sets as queryable REST feeds. Recognising OData means you know the source already speaks a queryable, paginated protocol rather than treating it as opaque REST.
+
+</details>
+
+<details><summary><b>33.</b> A team wants to pull a 200-million-row analytical extract into a notebook nightly. Which protocol, and why?</summary>
+
+Arrow Flight (or an ADBC driver over Flight SQL), because the data is columnar and Flight moves Arrow batches without the row-to-column transpose and per-cell conversion that JDBC/ODBC impose, and it supports parallel endpoint streams. REST/JSON would marshal each value as text and choke; JDBC would serialise row by row. The deciding factors are payload size and columnar shape — exactly where Flight's throughput advantage lives.
+
+</details>
+
+<details><summary><b>34.</b> Two internal services in the same cluster exchange small, frequent, strongly-typed calls. Which protocol, and why?</summary>
+
+`gRPC`, because its `protobuf` contract is strict and versioned, its binary framing over HTTP/2 keeps per-call overhead low, and codegen gives type-safe stubs on both sides. The calls are internal, so the browser-compatibility and human-debuggability advantages of REST do not apply. The deciding factors are low latency, high call rate, and a tight typed contract.
+
+</details>
+
+<details><summary><b>35.</b> A market-data feed must push live price ticks to many subscribers as they happen. Which transports are reasonable, and what is the deciding factor?</summary>
+
+A push-capable transport: `gRPC` server-streaming or WebSocket for a service/browser subscriber, or a Kafka topic if subscribers need replay and fan-out with retention. The deciding factor is that updates are server-initiated and continuous, so request/reply REST polling is the wrong model. If audit replay of the tick history matters, the Kafka log wins; if it is ephemeral live display, WebSocket/`gRPC` streaming suffices.
+
+</details>
+
+<details><summary><b>36.</b> A counterparty drops a daily EMT file onto an SFTP endpoint. Which "protocol" fits, and why is REST/gRPC the wrong frame?</summary>
+
+A file-drop/file-transfer mechanism (SFTP, or object-store upload) fits, because the unit of work is a whole file delivered on a schedule, not a per-request API call. `gRPC` and REST model fine-grained synchronous interactions and add no value for a batch file handoff; you would just be wrapping a file in an API. The deciding factor is that the interaction is batch and file-shaped, so you treat the drop as an event and ingest the file, rather than forcing a request/response protocol.
+
+</details>
+
+<details><summary><b>37.</b> For a fund-order Kafka topic, what does AsyncAPI let you document that a schema registry alone does not?</summary>
+
+The schema registry holds the per-subject message schema and its compatibility rules; AsyncAPI documents the whole interface around it — which servers/brokers, which channels (topics), the direction of flow (publish/subscribe), and a human-renderable description that references those schemas. So AsyncAPI is the API-level contract and documentation, while the registry is the runtime enforcement of one field-level schema. They are complementary: AsyncAPI can point at the registry-managed schema by reference.
+
+</details>
+
+<details><summary><b>38.</b> Why does wrapping fund events in CloudEvents help in a multi-system regulated estate?</summary>
+
+Because a vendor-neutral envelope means an `order.created` event carries the same `id`, `source`, `type`, and `time` whether it originated in the TA system, the order service, or a SWIFT bridge, so routers, tracers, and audit tooling treat them uniformly. Integrating a new producer becomes "emit the standard envelope" rather than "write another bespoke adapter". For audit and lineage, having a consistent, machine-readable event identity across systems is exactly what you want.
+
+</details>
+
+<details><summary><b>39.</b> Why is a `source` + `id` pair, not just `id`, what must be unique in CloudEvents?</summary>
+
+Because the same logical `id` value could be generated independently by two different producers, so uniqueness is only guaranteed within a producer's namespace. Combining `source` (which identifies the producer/context) with `id` yields a globally distinguishable event identity. This pair is what an idempotent consumer keys on to deduplicate safely when an event is redelivered.
+
+</details>
+
+<details><summary><b>40.</b> How does CloudEvents `subject` plus `id`/`source` support idempotent consumers in a fund pipeline?</summary>
+
+`source` + `id` uniquely identify the event for deduplication, so a consumer can record processed `(source,id)` pairs and skip replays without double-applying effects — critical when the effect is booking units or moving cash. `subject` carries the business key (e.g. the ISIN or order id) so routing and filtering can happen on metadata without parsing the payload. Together they let you build replay-safe, auditable consumers on a standard envelope.
+
+</details>
+
+<details><summary><b>41.</b> gRPC vs REST: give the one-line decision rule.</summary>
+
+Use `gRPC` for internal, high-frequency, strongly-typed, low-latency service-to-service calls where a binary contract and codegen pay off; use REST for public/partner APIs, CRUD resources, broad client reach, human debuggability, and HTTP caching. The split is essentially internal-mesh versus external-edge. When in doubt at the public edge, REST is the pragmatic default.
+
+</details>
+
+<details><summary><b>42.</b> Arrow Flight vs JDBC: give the one-line decision rule.</summary>
+
+Use Arrow Flight (or ADBC) when moving large columnar result sets between Arrow-native systems, because it avoids row marshalling and streams in parallel; use JDBC/ODBC for transactional, row-oriented access or where driver coverage forces it. The decisive factor is data shape and volume: columnar and big favours Flight, small/row/transactional favours JDBC. Flight's advantage grows with extract size.
+
+</details>
+
+<details><summary><b>43.</b> What does it mean that "Default everything to REST/JDBC and you marshal millions of rows one at a time"?</summary>
+
+It is the lesson's warning that the lazy default has a real cost: REST/JSON and JDBC are row-oriented and convert each value to and from a serialized form per row, so a million-row analytical pull pays a per-row tax that columnar transport avoids entirely. Choosing Arrow Flight moves the same data as columnar batches in a fraction of the time. The point is to choose with numbers (payload size, conversion cost) rather than habit.
+
+</details>
+
+<details><summary><b>44.</b> Why are AsyncAPI and CloudEvents framed as making an event estate "documentable and interoperable rather than tribal knowledge"?</summary>
+
+Without them, knowledge of which topics exist, what shape their messages are, and how events are framed lives in people's heads and scattered code, so onboarding and integration are guesswork. AsyncAPI gives a renderable, versioned API document for the channels and messages; CloudEvents gives a common envelope so any system can consume any producer's events the same way. Together they convert oral tradition into machine-readable contracts.
+
+</details>
+
+<details><summary><b>45.</b> What is HATEOAS, and why is full REST maturity rare in practice?</summary>
+
+HATEOAS (Hypermedia As The Engine Of Application State) is REST level 3, where responses embed links that tell the client which actions/transitions are available next, so the client navigates by following links rather than hard-coding URLs. It is rare because most teams find level-2 REST (resources, verbs, status codes) sufficient and far cheaper to build and consume. The lesson's "maturity in practice" point is to recognise that real-world REST is usually pragmatic level 2.
+
+</details>
+
+<details><summary><b>46.</b> What serialization format does `gRPC` use by default, and what does that buy you?</summary>
+
+By default `gRPC` uses Protocol Buffers (`protobuf`), a compact binary format with a schema defined in `.proto` and numbered fields. The binary encoding is small and fast to parse, and the field numbers give forward/backward-compatible evolution when you follow the rules. The trade-off is that payloads are not human-readable, which is fine internally but awkward at a public edge.
+
+</details>
+
+<details><summary><b>47.</b> How do `protobuf` field numbers relate to safe evolution, in the context of this lesson?</summary>
+
+`protobuf` identifies fields by their numbers, not names, on the wire, so you can rename a field freely and add new optional fields with new numbers without breaking existing consumers, which preserve unknown fields. Removing or reusing a number, or changing a field's type, breaks compatibility. This is the same evolution discipline the schema-registry lesson enforces, applied at the protocol layer.
+
+</details>
+
+<details><summary><b>48.</b> Why might you put CloudEvents attributes in Kafka record headers (binary mode) rather than in the message value?</summary>
+
+Putting the envelope attributes in Kafka headers (binary content mode) lets brokers, routers, and connectors filter and route on `type`, `source`, or `subject` without deserialising the payload, and lets non-CloudEvents consumers still read the raw value. Structured mode embeds everything in the value, which is simpler to forward intact across hops but forces a parse to inspect metadata. The choice is about who needs to see the envelope without reading the body.
+
+</details>
+
+<details><summary><b>49.</b> A junior proposes exposing the internal trade-booking microservice API as `gRPC` to an external fund-distributor partner. What is your first concern?</summary>
+
+That the partner is external and may be browser- or generalist-tooling-based, where raw `gRPC` is awkward (needs `gRPC-Web` and a proxy, binary payloads, less ubiquitous tooling). For a partner-facing edge, a REST/JSON API — or a documented async interface if it is event-driven — is usually the more pragmatic, widely-consumable choice. Keep `gRPC` for the internal mesh and translate at the boundary.
+
+</details>
+
+<details><summary><b>50.</b> How do Arrow Flight and `gRPC` relate architecturally?</summary>
+
+Arrow Flight is built on top of `gRPC`: its service methods and the `FlightData` message are defined in `protobuf`, and it uses `gRPC`/HTTP-2 as the transport. What Flight adds is the convention that payloads are Arrow IPC record batches plus optimisations so those batches are placed on the wire without extra copies, and a data-discovery model (`GetFlightInfo` → parallel `DoGet`). So Flight is a specialised, data-oriented layer over generic `gRPC`.
+
+</details>
+
+<details><summary><b>51.</b> Why does Flight's parallel-endpoint model matter for throughput?</summary>
+
+`GetFlightInfo` can return multiple endpoints, each with a ticket, so a client can open several `DoGet` streams in parallel against different servers/partitions and pull a large dataset concurrently. This horizontal parallelism is what lets aggregate throughput reach the multi-gigabyte-per-second range that benchmarks report, far beyond a single serial connection. Row protocols like JDBC have no comparable native parallel-fetch model.
+
+</details>
+
+<details><summary><b>52.</b> What is the risk of treating MQTT as a general enterprise message backbone?</summary>
+
+MQTT is optimised for lightweight, constrained, lossy telemetry, not for high-volume enterprise integration with rich routing, large payloads, or long-retention replay. Using it as your trade-event backbone means fighting its design and missing log-style replay and broker routing features. Recognise it as the IoT/edge transport and reach for Kafka (log) or AMQP (queue/routing) for core enterprise flows.
+
+</details>
+
+<details><summary><b>53.</b> Why is WebSocket a transport but not a contract, and what does that imply?</summary>
+
+WebSocket gives you a persistent full-duplex channel but says nothing about message format, schema, or semantics — you still choose JSON, `protobuf`, or anything else and define your own message contract on top. The implication is that for a documented, interoperable event interface you still layer something like AsyncAPI (to describe the messages) and possibly CloudEvents (to envelope them) over the WebSocket transport. The transport and the contract are separate decisions.
+
+</details>
+
+<details><summary><b>54.</b> How would you document a WebSocket-based push API so it is not tribal knowledge?</summary>
+
+Use AsyncAPI, which supports the `ws` protocol: define a `server` with `protocol: ws`, the `channels` clients connect to, the `operations` (send/receive) on each, and the `message` schemas. Optionally envelope the messages with CloudEvents for a standard identity. That gives a renderable, versioned contract for a transport that otherwise has no built-in schema story.
+
+</details>
+
+<details><summary><b>55.</b> gRPC streaming vs Kafka for a price feed — what is the key difference an architect must state?</summary>
+
+`gRPC` server-streaming is a point-to-point live connection: the server pushes to a connected subscriber, and if the subscriber is offline or wants history, there is nothing to replay. A Kafka topic is a durable, replayable log with fan-out and retention, so late or new subscribers can read history and many consumers share the same stream. The decision turns on whether you need replay/fan-out/audit (Kafka) or just an ephemeral live link (`gRPC` stream).
+
+</details>
+
+<details><summary><b>56.</b> Why does Arrow Flight need an Arrow-native source and sink to deliver its full benefit?</summary>
+
+Flight's speed comes from transmitting data that is already in Arrow columnar memory with minimal conversion; if your source must first transpose rows into Arrow and your sink must transpose back into rows, you pay the conversion you tried to avoid. The benefit is fully realised when both ends are Arrow-native (Arrow-based engine, ADBC driver, Arrow dataframe). Otherwise the columnar advantage is partly eaten by conversion at the edges.
+
+</details>
+
+<details><summary><b>57.</b> What does ADBC give an application that wants to query several different databases the Arrow way?</summary>
+
+ADBC is a single Arrow-returning driver API, so the application writes against one interface and swaps the underlying driver per database, always receiving columnar Arrow results instead of rows. This is the columnar analogue of how JDBC/ODBC give one API across many databases — but without the row-to-column conversion tax for engines that can speak Arrow. It standardises Arrow-native database access across sources.
+
+</details>
+
+<details><summary><b>58.</b> In the orchestration of an analytical extract, where do ADBC and Arrow Flight sit relative to each other?</summary>
+
+ADBC is the client-side database API the application calls; Arrow Flight (often via Flight SQL) can be the wire transport an ADBC driver uses to reach the server. So the app calls ADBC, the ADBC driver speaks Flight to the database, and Arrow batches flow back columnar end to end. ADBC is "what the code calls", Flight is "how the bytes move".
+
+</details>
+
+<details><summary><b>59.</b> Why is "numbers, not vibes" the explicit standard for protocol choice in this lesson?</summary>
+
+Because protocol decisions have measurable consequences — payload size, end-to-end latency, conversion cost, throughput — and the architect is expected to justify a choice with those figures rather than preference or habit. Saying "Arrow Flight because it moved the 200M-row extract in 40s vs JDBC's 12 min" is defensible in a design review; "REST because we always use REST" is not. The discipline is to attach a concrete deciding factor to each mapping.
+
+</details>
+
+<details><summary><b>60.</b> For the four canonical needs — BI extract, microservice call, market-data feed, file drop — give the default protocol for each.</summary>
+
+BI extract → Arrow Flight/ADBC (large columnar bulk transfer); microservice call → `gRPC` (typed, low-latency internal RPC); market-data feed → a push/streaming transport such as `gRPC` server-streaming, WebSocket, or a Kafka topic if replay/fan-out is needed; file drop → a file-transfer mechanism (SFTP/object-store) ingested as an event. Each is justified by a concrete factor — payload size, latency, ordering, or batch shape — not by default habit.
+
+</details>
+
+<details><summary><b>61.</b> What concrete factor would push a "microservice call" mapping away from `gRPC` toward REST?</summary>
+
+If the caller is external/partner-facing, browser-based, or must be broadly consumable with human-debuggable payloads and HTTP caching, REST becomes the pragmatic choice despite `gRPC`'s internal efficiency. Also if the team lacks `gRPC` tooling/operational familiarity and the call volume is low, the simplicity of REST may outweigh `gRPC`'s overhead savings. The deciding factor is audience and tooling reach, not raw performance.
+
+</details>
+
+<details><summary><b>62.</b> Why does a SWIFT/custody integration often force you into SOAP or fixed-format files rather than modern protocols?</summary>
+
+Because core financial-message systems were built on older standards — SWIFT MT/MX messaging, SOAP web services, fixed-width or XML file formats — and they change slowly under regulatory and operational risk constraints. The architect must integrate with what exists, typically by bridging: ingest the SOAP/file interface at the edge and translate into modern events internally. Legacy literacy is about reading and wrapping these, not replacing them on your timeline.
+
+</details>
+
+<details><summary><b>63.</b> How does OData's query model differ from a plain REST endpoint, and why does that matter?</summary>
+
+OData standardises URL query options — `$filter`, `$select`, `$expand`, `$orderby`, `$top`, `$skip` — so a client can shape and paginate results without a custom endpoint per query. That matters because you can push selection and projection to the source rather than pulling everything and filtering client-side, which reduces transfer. Recognising an OData source means you already have a queryable, paginated contract to exploit.
+
+</details>
+
+<details><summary><b>64.</b> A consumer must deduplicate replayed fund events. Which CloudEvents attributes do you key on, and why?</summary>
+
+Key on `source` + `id`, because that pair is defined to uniquely identify each distinct event regardless of which producer emitted it. The consumer records processed `(source,id)` pairs and skips any it has seen, making replays harmless even when the effect (booking units, moving cash) is non-idempotent at the business layer. This is the standard, envelope-level basis for idempotent consumption.
+
+</details>
+
+<details><summary><b>65.</b> Why would you reference, rather than inline, message payload schemas in an AsyncAPI document?</summary>
+
+Referencing (via `$ref` into `components` or out to a schema registry/`dataschema` URI) keeps a single source of truth for each schema, so the AsyncAPI doc and the runtime registry agree and evolve together. Inlining duplicates the schema and invites drift between documentation and enforcement. For Kafka topics, pointing AsyncAPI at the registry-managed Avro/Protobuf/JSON schema keeps doc and contract aligned.
+
+</details>
+
+<details><summary><b>66.</b> How does AsyncAPI's protocol-agnosticism show up when the same payload moves over Kafka and over MQTT?</summary>
+
+AsyncAPI lets you define the `message` (and its schema) once and bind it to multiple `servers`/`channels` with different `protocol` values — `kafka` for one, `mqtt` for another — reusing the message definition across bindings. So one document can describe the same logical event delivered over different transports, with protocol-specific binding details captured separately. This is why the server object uses `protocol`/`protocolVersion` rather than an HTTP-only `scheme`.
+
+</details>
+
+<details><summary><b>67.</b> What is the practical difference between "publish/subscribe" semantics in AsyncAPI 2.x and the operation model in 3.0?</summary>
+
+In 2.x, `publish`/`subscribe` were nested under a channel and their meaning depended on whose perspective you read (the API's vs the application's), which confused many users. In 3.0, operations are standalone objects with explicit `action` (`send`/`receive`) that reference a channel, removing the perspective ambiguity. The architect should author 3.0 with the `send`/`receive` model to avoid the classic publish-direction confusion.
+
+</details>
+
+<details><summary><b>68.</b> An auditor asks how you guarantee every order event across three producing systems is identifiable and traceable. How do the lesson's standards help?</summary>
+
+Wrapping every event in CloudEvents gives each a uniform, machine-readable identity (`source` + `id`, `type`, `time`), so events from all three systems are traceable and deduplicable by the same rule. AsyncAPI documents which channels carry which message types, giving the auditor a contract for the whole event surface. Together they let you show identity and structure as standards-compliant artefacts, not ad-hoc conventions.
+
+</details>
+
+<details><summary><b>69.</b> Why is `gRPC`'s strict contract both a strength and a coupling risk?</summary>
+
+The strength is that the `.proto` contract is precise, typed, and codegen-enforced, so mismatches are caught early. The coupling risk is that producer and consumer both depend on the same generated contract and must evolve it compatibly (add fields, never reuse field numbers); a careless change breaks both at once. This is why `gRPC` suits internal services you control end-to-end more than loosely-coupled external integrations.
+
+</details>
+
+<details><summary><b>70.</b> When is REST genuinely preferable to `gRPC` even for an internal call?</summary>
+
+When you need easy human debugging (curl, browser), broad polyglot client reach without codegen, HTTP-layer caching/CDN behaviour, or you are integrating with teams/tools that only speak REST/JSON. Also when the call is low-frequency and the operational simplicity of REST outweighs `gRPC`'s marginal performance gain. The decision is contextual, not a blanket "internal always means `gRPC`".
+
+</details>
+
+<details><summary><b>71.</b> What is the danger of representing a streaming subscription as repeated REST polling?</summary>
+
+Polling wastes resources (most polls return no change), adds latency equal to the poll interval, and scales badly as subscribers and frequency grow. A push transport — `gRPC` server-streaming, WebSocket, or a subscribed Kafka consumer — delivers updates as they happen with far less overhead. For a live market-data feed, polling is the classic wrong-tool choice the lesson warns against.
+
+</details>
+
+<details><summary><b>72.</b> Why does the lesson group gRPC, REST, and Arrow Flight together despite their different uses?</summary>
+
+Because they are the synchronous request/response and pull-style transports the architect chooses among for point-to-point interfaces: `gRPC` for typed RPC, REST for broad/pragmatic HTTP APIs, Arrow Flight for bulk columnar transfer. Grouping them frames the decision as "which synchronous transfer mechanism", while WebSocket/MQTT/AMQP and AsyncAPI/CloudEvents cover the push and async-documentation side. The architect needs both halves of the toolkit.
+
+</details>
+
+<details><summary><b>73.</b> What does CloudEvents deliberately NOT standardise, and why does that matter?</summary>
+
+CloudEvents standardises the envelope (metadata attributes) but deliberately leaves the `data` payload's schema and content to the producer, indicated by `datacontenttype`/`dataschema`. This matters because it keeps CloudEvents lightweight and universally applicable — it solves event identity and routing without dictating business schemas, which a schema registry handles. You combine CloudEvents (envelope) with a registry-managed payload schema (contents).
+
+</details>
+
+<details><summary><b>74.</b> How would you choose between `gRPC` server-streaming and WebSocket for a push feed?</summary>
+
+Use `gRPC` server-streaming when both ends are services with `gRPC` tooling and you want a typed `protobuf` contract and HTTP/2 multiplexing; use WebSocket when the consumer is a browser (which cannot speak raw `gRPC`) or you want a simple, widely-supported full-duplex web channel. The deciding factor is the consumer's nature (service vs browser) and whether you want a typed contract or a generic transport. Both are push; they differ in audience and contract.
+
+</details>
+
+<details><summary><b>75.</b> A nightly job currently pulls a fund-holdings extract via ODBC into pandas and is slow. What is the likely bottleneck and the fix?</summary>
+
+The likely bottleneck is the row-to-column serialization ODBC performs against a columnar source plus the per-row conversion into the dataframe, which can dominate transfer time. The fix is an ADBC driver (ideally over Flight SQL) so results arrive as Arrow batches and load into the dataframe near zero-copy. You would measure both to prove the speedup with numbers, as the lesson demands.
+
+</details>
+
+<details><summary><b>76.</b> Why is the file-drop case "not an API protocol problem" in the same way the others are?</summary>
+
+Because the interaction unit is a whole file delivered on a schedule via SFTP or object-store upload, not a fine-grained synchronous request, so the relevant mechanisms are file transfer and batch ingestion, possibly signalled by an event. Forcing `gRPC`/REST onto it just wraps a file in an API for no benefit. The architect recognises the batch/file shape and treats the drop as a trigger to ingest, rather than reaching for a synchronous RPC.
+
+</details>
+
+<details><summary><b>77.</b> What role does `protocolVersion` play in an AsyncAPI `server`, with a Kafka example?</summary>
+
+`protocolVersion` records the specific version of the protocol the server speaks — for Kafka it might capture the Kafka protocol/broker API level — so consumers and tooling know exactly what they are connecting to. It complements `protocol: kafka` by adding precision beyond just the protocol name. This level of detail is part of what makes AsyncAPI a usable connection contract, not just prose.
+
+</details>
+
+<details><summary><b>78.</b> Why might you envelope Kafka fund-order events in CloudEvents even though Kafka already has keys and headers?</summary>
+
+Kafka's key/headers are broker-specific and not portable; CloudEvents gives a vendor-neutral, standardised event identity (`id`, `source`, `type`, `time`) that survives when the event leaves Kafka for an HTTP webhook, a function, or another broker. So a CloudEvent stays interpretable across the whole multi-transport estate, not just inside Kafka. You typically map CloudEvents attributes into Kafka headers (binary mode) to keep the value as the raw payload.
+
+</details>
+
+<details><summary><b>79.</b> What is the relationship between AsyncAPI and a schema registry in a governed estate?</summary>
+
+AsyncAPI is the interface/documentation layer describing channels, operations, and which messages flow where; the schema registry is the runtime gate enforcing each message's payload schema and compatibility. AsyncAPI references the registry-managed schemas rather than redefining them, so documentation and enforcement stay aligned. One describes the API surface, the other enforces field-level contracts at produce/consume time.
+
+</details>
+
+<details><summary><b>80.</b> Why is Arrow Flight described as "wire-speed" in benchmarks, and what caveat applies?</summary>
+
+Because with columnar Arrow data on both ends and `gRPC`'s optimised framing, transfer can approach the network's raw throughput (multi-GB/s with parallel streams), since little CPU is spent converting data. The caveat is that this assumes Arrow-native producers and consumers and a fast network; if either end must transpose to/from rows, or the link is slow, the realised speed drops. "Wire-speed" is a best-case for Arrow-to-Arrow bulk transfer.
+
+</details>
+
+<details><summary><b>81.</b> What does it mean that Flight methods are defined in `protobuf`, for interoperability?</summary>
+
+Because Flight's RPC methods and `FlightData` are `protobuf`-defined and run over `gRPC`, a client that has generic `gRPC` and Arrow libraries — but no dedicated Flight library — can still implement the calls and parse the Arrow IPC payloads. This lowers the bar to interoperate and is why Flight can be adopted across language ecosystems. The `protobuf` definition is the shared contract.
+
+</details>
+
+<details><summary><b>82.</b> How do you decide whether a fund integration belongs on a log, a queue, or a synchronous protocol?</summary>
+
+Ask what the interaction is: replayable fan-out with retention and ordering → a log (Kafka); task distribution, routing, request/reply, per-message TTL with ack/redelivery → a queue (AMQP/RabbitMQ/Service Bus); a typed point-to-point call or bulk pull → a synchronous protocol (`gRPC`/REST/Arrow Flight). The lesson's transports each have a home, and miscategorising (e.g. log for request/reply) is the expensive mistake. Name the interaction first, then the transport.
+
+</details>
+
+<details><summary><b>83.</b> Why is "protocol literacy is the architect's interface-design toolkit" the framing of this lesson?</summary>
+
+Because every interface in the estate — extract, service call, feed, file, event — needs a transfer mechanism, and choosing well across all of them is a recurring architect responsibility, not a one-off. Literacy across gRPC/REST/Flight/ADBC, WebSocket/MQTT/AMQP, and AsyncAPI/CloudEvents lets you place each need correctly and document it. It is a toolkit precisely because no single protocol fits every interface.
+
+</details>
+
+<details><summary><b>84.</b> A partner sends `OData` query URLs against your holdings API and complains about slow pulls. What design lever do you check first?</summary>
+
+Whether the client is using OData query options (`$filter`, `$select`, `$top`, server-side paging) to push selection/projection to the source, or pulling whole entity sets and filtering client-side. If they are over-fetching, the fix is to apply the query options and pagination so far less data crosses the wire. The lever is "are we selecting and filtering at the source", which OData is designed to allow.
+
+</details>
+
+<details><summary><b>85.</b> When does it make sense to expose a SOAP wrapper in front of a modern event-driven system?</summary>
+
+When a regulated counterparty or legacy core can only consume SOAP/WS-* and cannot be changed, so you publish a SOAP/WSDL facade at the boundary that translates to/from your internal events. The internal estate stays event-driven and modern; the edge speaks the legacy dialect the partner mandates. This bridging is exactly what "legacy literacy" prepares you to design rather than resist.
+
+</details>
+
+<details><summary><b>86.</b> Why is `datacontenttype` useful even though CloudEvents does not mandate it?</summary>
+
+`datacontenttype` tells consumers how to interpret the `data` payload (e.g. `application/json`, `application/avro`, `application/protobuf`), so a generic consumer or router can pick the right deserializer without guessing. Omitting it forces out-of-band agreement on the format. It is optional but strongly recommended whenever the payload type is not implicit, which keeps the envelope self-describing.
+
+</details>
+
+<details><summary><b>87.</b> How would you justify, with a concrete factor, mapping the market-data feed to a Kafka topic rather than a `gRPC` stream?</summary>
+
+If subscribers need to replay history (e.g. recompute an intraday metric), if many independent consumers must fan out from the same feed, or if ordering and retention must be auditable, a Kafka topic provides those natively while a `gRPC` stream is an ephemeral point-to-point link with no replay. The concrete factor is "replay and fan-out with retention are required". Absent those, an ephemeral `gRPC`/WebSocket stream is lighter.
+
+</details>
+
+<details><summary><b>88.</b> What is the difference between a "transport" and a "standard/contract" in this lesson, and why keep them separate?</summary>
+
+A transport (gRPC, WebSocket, MQTT, AMQP, Kafka, HTTP) moves bytes; a standard/contract (AsyncAPI, CloudEvents, OpenAPI, a `.proto`, a registry schema) describes and constrains the messages. Keeping them separate clarifies that you choose a transport for delivery characteristics and a contract for documentation/interop, and that you often layer a contract over a transport. Confusing the two leads to thinking "we use WebSocket" is a complete interface design when it is only half.
+
+</details>
+
+<details><summary><b>89.</b> Why does the architect, not a single team, own these protocol/standard choices?</summary>
+
+Because interface choices have estate-wide blast radius: a transport or envelope decision affects every producer and consumer that integrates, and inconsistency (each team inventing its own) destroys interoperability and inflates integration cost. Centralising the toolkit and the standards (one event envelope, one async-doc format, clear protocol rubrics) is an architecture responsibility. It is the same governance logic as schema-evolution policy, applied to interfaces.
+
+</details>
+
+<details><summary><b>90.</b> How do you explain to a junior why "we already have REST, so use REST" is not always right?</summary>
+
+Because REST optimises for broad reach and human-friendliness, not for bulk columnar transfer (where Flight wins), tight internal typed calls (where `gRPC` wins), or server push (where WebSocket/streaming win). Reusing REST out of convenience can mean marshalling millions of rows one at a time or polling a feed — measurable, avoidable costs. The right answer names the interaction's deciding factor and picks the protocol that fits it.
+
+</details>
+
+<details><summary><b>91.</b> What would you put in an AsyncAPI document for the fund-order topics, concretely?</summary>
+
+A `server` with `protocol: kafka` and connection/`protocolVersion` details; `channels` for each topic such as the order events channel; `operations` marking whether your service sends or receives on each; and `messages` referencing the registry-managed order schema with descriptions. Reusable schemas/definitions go under `components`. Rendering this yields HTML docs that accurately describe what flows where, which is the lesson's "Do" deliverable.
+
+</details>
+
+<details><summary><b>92.</b> Why does separating operations from channels in AsyncAPI 3.0 aid reuse?</summary>
+
+Because an operation is now a first-class object that references a channel, the same channel can be referenced by multiple operations and operations can be defined and reused independently, rather than being locked inside one channel block. This mirrors OpenAPI's separation and reduces duplication when several services interact with the same topic differently. It also kills the 2.x ambiguity about whose publish/subscribe viewpoint applies.
+
+</details>
+
+<details><summary><b>93.</b> A consumer receives the same CloudEvent twice. What should already be true for this to be harmless, per this lesson?</summary>
+
+The consumer should be idempotent, deduplicating on the CloudEvents `source` + `id` pair so the second delivery is recognised and skipped before any business effect. CloudEvents gives the stable identity; the consumer supplies the dedup store and skip logic. With both in place, at-least-once delivery (the realistic norm) does not cause double bookings or double cash moves.
+
+</details>
+
+<details><summary><b>94.</b> Why is recognising OData and SOAP a "literacy" skill rather than something you build new on?</summary>
+
+Because you will encounter them as existing interfaces in the fund estate, not as choices you would make for greenfield work — the goal is to read, integrate with, and bridge them, not to design new systems around them. Knowing OData means exploiting its query options; knowing SOAP means reading a WSDL and wrapping the service. Literacy is about competent integration with the inherited estate.
+
+</details>
+
+<details><summary><b>95.</b> How does choosing Arrow Flight change the shape of a BI tool's data-access architecture?</summary>
+
+It replaces a JDBC/ODBC row-fetch with a Flight client that requests `GetFlightInfo`, then pulls Arrow batches via one or more parallel `DoGet` streams straight into columnar memory, skipping the row transpose. The BI engine works on Arrow data natively, so the extract is faster and uses less CPU on serialization. The architecture shifts from "driver returns rows" to "service streams columnar batches", which is the whole point of the Flight/ADBC stack.
+
+</details>
+
+<details><summary><b>96.</b> Summarise the lesson's decision rubric in one compact statement.</summary>
+
+For each interface, name the interaction (bulk pull, typed call, public API, push feed, queue task, file drop, async event) and pick the matching tool: Arrow Flight/ADBC for bulk columnar pulls, `gRPC` for internal typed RPC, REST for public/pragmatic HTTP, WebSocket/`gRPC`-streaming/Kafka for push (Kafka when replay/fan-out is needed), MQTT for IoT telemetry, AMQP for queue routing, and document it with AsyncAPI plus a CloudEvents envelope. Justify every mapping with a concrete factor — payload size, latency, ordering, schema — not habit.
+
+</details>
+
+<details><summary><b>97.</b> Why is "schema" listed as a justification factor alongside payload size, latency, and ordering?</summary>
+
+Because some transports/contracts give you strong, enforceable schemas (a `.proto` for `gRPC`, a registry schema referenced by AsyncAPI, a `protobuf`-typed Flight stream) while others are schema-loose (raw WebSocket JSON, plain REST), and the strength of the contract you need is a real deciding factor. A regulated NAV feed wants a hard schema gate; an internal debug endpoint may not. So "which schema guarantees does this interface require" is a first-class criterion.
+
+</details>
+
+<details><summary><b>98.</b> How does `gRPC` signal errors compared with REST's HTTP status codes?</summary>
+
+`gRPC` returns a status with a numeric code from a fixed enum — for example `OK` (0), `NOT_FOUND` (5), `INVALID_ARGUMENT` (3), `DEADLINE_EXCEEDED` (4), `UNAVAILABLE` (14) — plus an optional message and details, rather than the broad HTTP status space REST uses. This gives a smaller, standardised, language-neutral error vocabulary that clients can handle programmatically, and `DEADLINE_EXCEEDED` ties directly to `gRPC`'s built-in per-call deadlines. For an architect, knowing whether a failure is `UNAVAILABLE` (retryable) versus `INVALID_ARGUMENT` (a contract bug) shapes the retry and alerting design.
+
+</details>
+
+<details><summary><b>99.</b> What do MQTT's QoS levels 0, 1, and 2 mean, and why does the architect care?</summary>
+
+QoS 0 is at-most-once ("fire and forget", may be lost), QoS 1 is at-least-once (guaranteed delivery but possible duplicates), and QoS 2 is exactly-once (a four-way handshake, the most expensive). The architect cares because the level chosen mirrors the same delivery-guarantee trade-off seen across the streaming estate, and picking QoS 2 everywhere needlessly inflates latency and broker load. For a telemetry feed where occasional loss is fine QoS 0 suffices; for a feed that must not lose a reading you accept QoS 1 plus an idempotent consumer.
+
+</details>
+
+<details><summary><b>100.</b> Final integration question — how do all the lesson's pieces fit a single fund-order interface end to end?</summary>
+
+The order events ride a Kafka topic (a log, for replay/fan-out/audit), each wrapped in a CloudEvents envelope so identity is portable and consumers can deduplicate on `source` + `id`; the topic, messages, and schemas are documented in an AsyncAPI 3.0 document that references the registry-managed schema. Internal services that need a synchronous call use `gRPC`; a partner-facing edge uses REST; a large analytical extract of the resulting holdings uses Arrow Flight/ADBC. Each choice is defensible by a concrete factor, which is exactly the architect competence this lesson builds.
+
+</details>
+
+
+## Phase 4 · 1.4.1 + 1.4.2 Lambda vs Kappa — 100 self-test questions
+
+<details><summary><b>1.</b> What is the Lambda architecture, in one sentence?</summary>
+
+Lambda is a data architecture that runs two parallel processing paths over the same immutable input stream: a `batch layer` that periodically recomputes accurate results from all history, and a `speed layer` (stream processor) that produces low-latency approximate results for recent data. A `serving layer` merges the two so queries see a recent-but-correct view. The defining trait is that the same business logic is implemented twice, once per layer.
+
+</details>
+
+<details><summary><b>2.</b> Name the three layers of the Lambda architecture and what each is for.</summary>
+
+The `batch layer` recomputes results over the complete dataset for correctness and is the source of truth; the `speed layer` processes only recent events with low latency to fill the gap until the next batch run finishes; the `serving layer` indexes and merges both outputs so a query returns the batch result for old data plus the speed result for the freshest data. The serving layer is what makes the dual outputs queryable as one.
+
+</details>
+
+<details><summary><b>3.</b> In Lambda, why is the batch layer described as the "source of truth"?</summary>
+
+Because the batch layer reprocesses the entire immutable input from scratch each cycle, any error in a previous run is automatically corrected on the next full recompute. The speed layer's approximate output is treated as disposable and is discarded once the batch layer catches up to that data. This is why Lambda tolerates a buggy or lossy speed layer: the batch path eventually overwrites it.
+
+</details>
+
+<details><summary><b>4.</b> What is the "dual-codebase tax" in the Lambda architecture?</summary>
+
+It is the ongoing cost of maintaining the same transformation logic in two different systems (for example MapReduce and a stream processor) that must produce identical results. Kreps' essay frames it bluntly: maintaining code that must produce the same result in two complex distributed systems is exactly as painful as it sounds. Every logic change must be made, tested, and kept in sync twice, doubling the surface for bugs and drift.
+
+</details>
+
+<details><summary><b>5.</b> Give a concrete fund-data example of the dual-codebase tax.</summary>
+
+Imagine your intraday fund-flow / NAV-flow aggregation logic — net subscriptions minus redemptions per share class. Under Lambda you write it once in a batch engine for the authoritative end-of-day figure and again in a stream engine for the intraday estimate. If a rounding rule or a share-class mapping changes, you must edit both and prove they still agree; if they diverge, the intraday number contradicts the official one and an auditor asks which is right.
+
+</details>
+
+<details><summary><b>6.</b> Who proposed the Kappa architecture and in what publication?</summary>
+
+Jay Kreps proposed it in his 2014 O'Reilly Radar essay "Questioning the Lambda Architecture." The essay accepts Lambda's goals (correctness plus low latency over an immutable log) but argues the two-system structure is unnecessary, and offers a single-stream alternative that became known as Kappa.
+
+</details>
+
+<details><summary><b>7.</b> What is the Kappa architecture in one sentence?</summary>
+
+Kappa keeps a single stream-processing codebase and a replayable log: instead of a separate batch layer, you reprocess history by replaying the retained log through the same stream framework. There is one system and one implementation of the logic, used both for live processing and for reprocessing. The batch layer disappears, not the ability to recompute.
+
+</details>
+
+<details><summary><b>8.</b> In Kappa, how do you "do batch" if there is no batch layer?</summary>
+
+You replay the log from the beginning (or from the point you need) through a new instance of the stream job. Because the log is retained and ordered, feeding it back through the streaming engine is equivalent to a batch recompute, just expressed in the one streaming codebase. Reprocessing is a streaming job over historical data, not a second system.
+
+</details>
+
+<details><summary><b>9.</b> Describe Kreps' four-step reprocessing procedure under Kappa.</summary>
+
+First, retain enough log history to cover the reprocessing window. Second, start a second instance of the stream job that reads from the start of the log and writes to a new output table. Third, once that job catches up to the live position, switch the application to read from the new table. Fourth, decommission the old job and its old output. It is a blue-green swap of jobs, not a parallel permanent second system.
+
+</details>
+
+<details><summary><b>10.</b> Why does Kreps say Kappa removes the dual-codebase tax but Lambda's reprocessing capability is preserved?</summary>
+
+Because the reprocessing job in Kappa is the same code as the live job, just pointed at the log's history, so there is only ever one implementation to maintain. You still get full recompute-from-scratch (the property Lambda's batch layer provided) by replaying the log. You keep the capability and drop the second codebase.
+
+</details>
+
+<details><summary><b>11.</b> What does Kappa fundamentally demand of your log storage?</summary>
+
+It demands long retention of ordered data — the log must hold enough history to reprocess whatever window your corrections and restatements require (Kreps' example is on the order of 30 days, but it is sized to your needs). Without sufficient retention you cannot replay far enough back to recompute, and Kappa's whole reprocessing story breaks.
+
+</details>
+
+<details><summary><b>12.</b> Why is "retain a lot of log" considered economical and safe in Kappa, per Kreps?</summary>
+
+Kreps argues a log like Kafka stores data sequentially and cheaply, so keeping large amounts of ordered history is natural and does not hurt serving performance — reads are sequential and storage is commodity. The cost of extra retention is far lower than the cost of operating a whole second batch stack. Retention is a tuning knob, not a new system.
+
+</details>
+
+<details><summary><b>13.</b> If a fund needs to reprocess 18 months of order events for a restatement, what does that imply under Kappa?</summary>
+
+Your log retention (or an archived/tiered copy of the log) must cover those 18 months, otherwise you cannot replay them through the stream job to recompute. In practice you either set Kafka retention long enough, use tiered storage, or land the raw events in a durable store (object storage / Iceberg) you can replay from. The retention horizon is a deliberate, regulator-driven sizing decision.
+
+</details>
+
+<details><summary><b>14.</b> What is the "modern synthesis" that the syllabus says largely dissolves the Lambda-vs-Kappa dichotomy?</summary>
+
+It is the combination of open table formats (such as Iceberg, Delta, Hudi) with streaming ingestion: the same table is written incrementally by a stream and also serves batch queries, so one storage layer and often one engine cover both latency classes. Streams and tables become two views of the same data rather than two systems. Medallion-with-streaming is the practical shape this takes.
+
+</details>
+
+<details><summary><b>15.</b> How do table formats plus streaming ingestion make the batch/speed split unnecessary?</summary>
+
+Because a streaming job can continuously upsert into an Iceberg/Delta table that batch SQL also reads, the "speed layer" output and the "batch layer" output land in one governed table with one schema and one set of guarantees. There is no separate serving layer to merge two outputs, and no second codebase, because the table itself is the merge point. Latency is then just how often the stream commits.
+
+</details>
+
+<details><summary><b>16.</b> In the streams-and-tables view (Streaming Systems ch. 1), what is a stream and what is a table?</summary>
+
+A stream is the changelog — the sequence of changes over time; a table is the accumulated state — the result of applying that changelog up to some point. A table can be turned into a stream (emit its changes) and a stream can be turned into a table (fold its changes into state). This duality is why one log plus one table format can serve both real-time and batch.
+
+</details>
+
+<details><summary><b>17.</b> Why is the Lambda/Kappa debate described as framing every "do we need streaming?" conversation?</summary>
+
+Because deciding between batch-only, a separate speed layer, or a unified streaming-plus-table approach is exactly the question of how much latency the use case needs and whether a second system is justified. Naming the architecture forces you to state the latency requirement and the cost of meeting it. The architect uses this frame to avoid bolting on streaming where batch suffices, or vice versa.
+
+</details>
+
+<details><summary><b>18.</b> What was the original motivation for the Lambda architecture historically?</summary>
+
+It arose when batch systems (Hadoop/MapReduce) were accurate but high-latency and the available stream processors (early Storm) were low-latency but lossy or hard to make exactly-once. Combining them let you get fast approximate answers now and correct answers later. Lambda is a workaround for the immaturity of early stream processing, which is why better streaming engines weaken its rationale.
+
+</details>
+
+<details><summary><b>19.</b> Why did improvements in stream processing engines undermine the case for Lambda?</summary>
+
+As engines like Flink and Kafka's transactions made exactly-once and stateful, replayable streaming practical, the speed layer no longer had to be lossy or approximate — so the separate corrective batch layer lost its main justification. If one stream job can be both fast and correct over replayable history, you no longer need a second batch implementation. That is precisely Kreps' argument.
+
+</details>
+
+<details><summary><b>20.</b> A team proposes Lambda for intraday fund-flow totals. What is the first question you ask?</summary>
+
+Ask whether a single replayable streaming job over the order log can meet both the latency and the correctness need — if so, Kappa or the table-format synthesis avoids maintaining the flow logic twice. The dual-codebase tax is only justified if no single engine can serve the latency class with adequate correctness. For most fund aggregations over a Kafka log, one codebase suffices.
+
+</details>
+
+<details><summary><b>21.</b> What is the key risk you must name when you call a platform "Kappa"?</summary>
+
+That your log retention is genuinely sufficient for every reprocessing and restatement scenario you are committing to — including regulator-driven historical recomputes. If retention is too short, you have the operational simplicity of Kappa but not the recompute capability you claimed. The risk is a silent gap between the retention you set and the recompute you promised.
+
+</details>
+
+<details><summary><b>22.</b> In a regulated fund context, why is reprocessing/restatement capability non-negotiable?</summary>
+
+Because corrected NAVs, late trades, and price restatements must be recomputed and the corrected figures must be auditable and reproducible. Whatever architecture you choose must be able to recompute a past result deterministically from retained inputs. This is why both Lambda's batch layer and Kappa's log replay exist — the architecture must support restatement by construction.
+
+</details>
+
+<details><summary><b>23.</b> What single sentence captures Kreps' objection to Lambda?</summary>
+
+That having to implement and maintain the same logic in two different distributed systems that must agree is an avoidable, painful cost, and a replayable log lets one stream framework do both jobs. The complexity of dual maintenance, not the latency goal, is what Kreps attacks. Kappa keeps the goal and removes the second system.
+
+</details>
+
+<details><summary><b>24.</b> True or false: Kappa means you never run batch jobs. Explain.</summary>
+
+False. Kappa means you do not maintain a separate batch system with separately-written logic; reprocessing is still a "batch-like" run, but it is the same stream code replaying historical log data. You absolutely recompute over history — you just do it through the one streaming codebase rather than a distinct MapReduce-style stack.
+
+</details>
+
+<details><summary><b>25.</b> What does the "serving layer" do in Lambda that the table-format synthesis no longer needs?</summary>
+
+The serving layer indexes the batch output and merges it with the speed-layer output so a query gets a single, recent, correct view. In the table-format synthesis, the stream writes directly into the queryable table, so there is nothing separate to merge — the table is already the unified, current view. The merge problem is solved by the storage layer, not a bespoke serving tier.
+
+</details>
+
+<details><summary><b>26.</b> How would you answer "what architecture is our capstone platform?" for the Phase-4 build?</summary>
+
+It is best described as the table-format synthesis (sometimes "medallion-with-streaming"): Debezium/Kafka feed a Flink job that writes exactly-once into Iceberg on MinIO, with Dagster running nightly batch reconciliation — one log, one set of governed tables, not a permanently duplicated batch-and-speed pair. It leans Kappa (single stream codebase, replayable log) with a batch reconcile job for assurance rather than as a second source of truth.
+
+</details>
+
+<details><summary><b>27.</b> Is a nightly batch reconciliation job that recomputes streamed totals the same as a Lambda batch layer?</summary>
+
+No — a reconciliation job checks the stream's output against an independent recompute to detect drift; it is an assurance/audit control, not a parallel source of truth that the serving layer must merge into every query. In Lambda the batch layer's output overwrites the speed layer's and is what users read. A reconcile job only alerts on divergence; it does not serve results.
+
+</details>
+
+<details><summary><b>28.</b> What is the difference between Lambda's batch layer and a Kappa reprocessing run, operationally?</summary>
+
+Lambda's batch layer runs continuously and in parallel as permanent infrastructure with its own codebase; a Kappa reprocessing run is an occasional, on-demand replay of the log through the existing stream code, started only when you need to recompute. One is standing duplication; the other is transient and shares the single implementation.
+
+</details>
+
+<details><summary><b>29.</b> Why does Kreps prefer "switch to a new output table" over patching the existing output during reprocessing?</summary>
+
+Because writing the recomputed results to a fresh table and atomically switching the application avoids serving partially-recomputed or inconsistent state during the long replay. The old table keeps serving until the new one is fully caught up, then you cut over and retire the old. It is a clean, reversible blue-green swap rather than an in-place mutation.
+
+</details>
+
+<details><summary><b>30.</b> What would you change in your design if regulators demanded sub-minute NAV-error detection?</summary>
+
+Tighten the streaming path: lower the Flink window/trigger and commit intervals, ensure the source CDC latency is well under the budget, and run the reconciliation/error-detection check continuously on the stream rather than nightly. You would move drift detection from a batch job into a streaming comparison so divergence surfaces within the sub-minute window. The architecture stays Kappa-flavoured; you just spend latency budget more aggressively.
+
+</details>
+
+<details><summary><b>31.</b> Does moving NAV-error detection to sub-minute push you back toward Lambda?</summary>
+
+Not necessarily — you can keep one streaming codebase and simply run the corrective/checking logic as another stream operator, which is still Kappa. You would only drift toward Lambda if you found yourself maintaining a genuinely separate batch implementation of the same logic. The test is "is the logic implemented twice?", not "how fast is it?".
+
+</details>
+
+<details><summary><b>32.</b> What is the relationship between "medallion architecture" and the Lambda/Kappa synthesis?</summary>
+
+Medallion (bronze/silver/gold layers in a lakehouse) describes how you refine data quality across table tiers; the streaming synthesis means those tiers are fed incrementally by streams into table formats. "Medallion-with-streaming" is the synthesis applied: the same governed tables serve batch and near-real-time, refined through bronze-to-gold, with no separate speed-vs-batch duplication. They are complementary, not competing.
+
+</details>
+
+<details><summary><b>33.</b> A colleague says "Kappa needs infinite log retention." Correct them.</summary>
+
+Kappa needs retention long enough to cover your reprocessing horizon, not infinite retention. You size it to your longest realistic recompute window (or tier/archive older data to cheaper storage you can still replay from). Infinite retention is neither required nor usually economical; the requirement is "enough to recompute what you must."
+
+</details>
+
+<details><summary><b>34.</b> How does tiered storage in Kafka relate to the Kappa retention requirement?</summary>
+
+Tiered storage offloads older log segments to cheap object storage while keeping them part of the topic, so you can retain a very long history for reprocessing without keeping it all on broker disks. This directly serves Kappa: the replayable history extends back much further at lower cost. It makes long-horizon restatement economically feasible on a single log.
+
+</details>
+
+<details><summary><b>35.</b> Why is "ordered data" (not just retained data) essential to Kappa?</summary>
+
+Because reprocessing must replay events in the same order they originally occurred (at least per key) to recompute state correctly — fold-over-events depends on order. A log preserves per-partition ordering, which is what lets a replay reproduce the original result deterministically. Retained-but-unordered data could not reliably recompute order-dependent aggregates like running flow totals.
+
+</details>
+
+<details><summary><b>36.</b> Give a fund example where event ordering during replay matters for correctness.</summary>
+
+Computing a running cash balance or units-held per investor: a subscription then a redemption yields a different intermediate state than the reverse, and a transfer must apply after the position it moves exists. Replaying these out of order corrupts the recomputed position. Per-key (per-ISIN or per-investor) ordering in the log is what keeps the replay correct.
+
+</details>
+
+<details><summary><b>37.</b> In one line, when is Lambda still the honest answer?</summary>
+
+When no single engine can meet both the latency and the correctness requirement, forcing you to genuinely maintain separate batch and speed implementations — a shrinking but non-empty set of cases. If you must duplicate the logic to hit the targets, you are doing Lambda and should say so. Otherwise prefer a single-codebase approach.
+
+</details>
+
+<details><summary><b>38.</b> What is the danger of "defaulting everything to streaming" as an over-correction to Lambda?</summary>
+
+You can take on the operational complexity, state management, and cost of a streaming engine for workloads (like a nightly reconciliation) that a simple batch job would serve more cheaply and reliably. Kappa is about not duplicating logic, not about making everything real-time. Match the engine to the latency class; don't stream for streaming's sake.
+
+</details>
+
+<details><summary><b>39.</b> How does the streams/tables duality let one Iceberg table serve both a dashboard and a nightly report?</summary>
+
+The streaming writer continuously folds the changelog into the table (table = state), and both a live dashboard and a nightly batch query read that same table at whatever freshness it has committed. The dashboard reads near-real-time commits; the nightly report reads the same table at end-of-day. One table, two read patterns, no duplicated write logic.
+
+</details>
+
+<details><summary><b>40.</b> Why does the syllabus call medallion-with-streaming "today's synthesis" rather than a third architecture?</summary>
+
+Because it does not reintroduce a duplicated batch codebase (so it is not Lambda) and it relaxes the "pure single stream" purity by happily mixing streaming writes with batch reads and occasional batch jobs over the same tables. It synthesizes the best of both: Kappa's single-logic discipline with the practicality of querying durable tables in batch. It is a pragmatic blend, not a rival camp.
+
+</details>
+
+<details><summary><b>41.</b> For an intraday fund-flow estimate plus an authoritative end-of-day figure, how do you avoid the dual-codebase tax?</summary>
+
+Compute the intraday estimate as a windowed stream over the order log and let the authoritative figure be the same logic's output read at end-of-day from the same table (or a final-window emission), rather than a separately-coded batch aggregation. The "two numbers" become two read times of one computation, not two codebases. If they must differ in method, isolate only that difference, not the whole pipeline.
+
+</details>
+
+<details><summary><b>42.</b> What is the "speed layer" expected to sacrifice in classic Lambda, and why is that acceptable there?</summary>
+
+It typically sacrifices completeness/exactness for low latency — it may use approximations or drop late data — which is acceptable because the batch layer will later recompute the correct value and overwrite it. The speed layer is intentionally disposable. This designed-in approximation is exactly what modern exactly-once streaming removes the need for.
+
+</details>
+
+<details><summary><b>43.</b> How does exactly-once streaming (Flink + Kafka transactions) change the Lambda calculus?</summary>
+
+It lets the streaming path itself be correct and replayable, so you no longer need a corrective batch layer to fix an approximate speed layer. The single stream job is both fast and accurate, which is the technical precondition for Kappa being viable. Without exactly-once, the old Lambda argument for a corrective batch path was stronger.
+
+</details>
+
+<details><summary><b>44.</b> A reviewer claims your "real-time NAV" pipeline is Lambda because it has a nightly job. Are they right?</summary>
+
+Only if that nightly job is a separately-coded source of truth whose output is merged into what users read. If it is instead an independent reconciliation/assurance check that alerts on drift, the platform is still essentially Kappa/synthesis with a batch control. The distinguishing test is whether the same logic is implemented twice as a serving path, not merely whether any batch job exists.
+
+</details>
+
+<details><summary><b>45.</b> Why is "name which architecture the capstone actually is and defend it" listed as a Done-when?</summary>
+
+Because an architect must be able to label the design honestly (Lambda, Kappa, or the table-format synthesis) and justify the choice for fund data, rather than hand-wave. Mislabelling — for example claiming "pure Kappa" while quietly maintaining a duplicate batch path — misleads reviewers and auditors. The skill is precise self-description plus defensible reasoning.
+
+</details>
+
+<details><summary><b>46.</b> What concrete fund example best illustrates the dual-codebase tax for a Done-when answer?</summary>
+
+The NAV-flow / fund-flow aggregation maintained once in a batch engine and once in a stream engine that must reconcile: a single rule change must be applied and re-verified in both, and any divergence produces two conflicting NAV-flow numbers. That conflict is the tax made visible. A replayable log over one engine removes the second implementation entirely.
+
+</details>
+
+<details><summary><b>47.</b> How does the choice of partition key (e.g., ISIN) interact with Kappa reprocessing?</summary>
+
+The partition key determines the ordering guarantee during replay: keying by ISIN means all events for an instrument replay in order on one partition, so per-ISIN aggregates recompute correctly. If the key were wrong, cross-key ordering during reprocessing could corrupt order-dependent results. So the data-model decision (the key) is also a reprocessing-correctness decision.
+
+</details>
+
+<details><summary><b>48.</b> Why might a fund administrator be uncomfortable with a "speed layer that may lose data"?</summary>
+
+Because in regulated fund admin, intraday figures feed decisions and reporting, and a known-lossy estimate that silently understates flows is a compliance and reputational risk even if corrected overnight. Stakeholders want the real-time number to be trustworthy, not provisional-and-wrong. This pushes designs toward correct streaming (Kappa-style) rather than a disposable approximate speed layer.
+
+</details>
+
+<details><summary><b>49.</b> What is the simplest litmus test to tell whether a design is "really Lambda"?</summary>
+
+Ask: is the same business logic implemented and maintained in two different processing systems that must produce matching results? If yes, it is Lambda and you pay the dual-codebase tax. If the logic lives once and reprocessing is replay through that same code, it is Kappa or the synthesis.
+
+</details>
+
+<details><summary><b>50.</b> Why does Kreps argue the serving/merge complexity of Lambda is itself a cost?</summary>
+
+Because the serving layer must correctly stitch batch and speed outputs, handle the handoff as batch results land, and avoid double-counting or gaps at the boundary — non-trivial logic that exists only because there are two outputs. Removing the second path removes this merge complexity. One output means nothing to merge.
+
+</details>
+
+<details><summary><b>51.</b> In the synthesis, what plays the role Lambda's serving layer used to play?</summary>
+
+The open table format itself: a single governed table (e.g., Iceberg) that the stream upserts into and that all queries read, providing the unified, consistent, time-travelable view. ACID table semantics replace the bespoke merge logic. The "merge" is now a commit to one table, not a join of two outputs.
+
+</details>
+
+<details><summary><b>52.</b> How does Iceberg time travel relate to the reprocessing story?</summary>
+
+Time travel lets you query the table as of a past snapshot, which supports as-of reporting and restatement verification without rebuilding from the log, while log replay handles as-known recomputation when the logic itself changes. Together, table snapshots plus log retention cover both "what did the table say then" and "recompute it now with corrected logic." They are complementary recompute mechanisms.
+
+</details>
+
+<details><summary><b>53.</b> Why is "what you give up to catch stragglers" relevant to the Lambda/Kappa choice?</summary>
+
+Because in a single-stream (Kappa) design, completeness for late data comes from watermark/allowed-lateness tuning that adds latency, whereas Lambda historically pushed completeness onto the batch layer. Choosing the synthesis means you accept and tune that latency-completeness tradeoff in one engine rather than offloading it to a second system. The tradeoff doesn't vanish; it moves into your watermark/lateness knobs.
+
+</details>
+
+<details><summary><b>54.</b> A platform retains only 7 days of Kafka log but promises 7-year regulatory recompute. What is wrong?</summary>
+
+The retention horizon (7 days) is far shorter than the recompute promise (7 years), so log replay cannot satisfy a long restatement — the Kappa story is broken for that requirement. You must either extend retention via tiered/archived storage, or land raw events durably (object storage / Iceberg) and replay from there. The fix is matching retention/archival to the recompute SLA.
+
+</details>
+
+<details><summary><b>55.</b> Why does the syllabus tie this lesson to "do we need streaming at all?"</summary>
+
+Because before debating Lambda vs Kappa you must establish whether the latency requirement even calls for a speed/stream path; many fund workloads are fine with batch. The architecture choice only becomes live once streaming is genuinely needed. Lambda/Kappa is the framing you reach for after deciding streaming is in scope.
+
+</details>
+
+<details><summary><b>56.</b> How would you defend "table-format synthesis" over "pure Kappa" to a skeptical reviewer?</summary>
+
+Pure Kappa insists everything is a stream and you reprocess solely by log replay; the synthesis pragmatically lets batch jobs read the same durable tables and uses table snapshots alongside log replay, which is simpler to operate and audit in a fund estate. You keep Kappa's single-logic discipline while gaining ACID tables, time travel, and easy batch reconciliation. It is Kappa's principles with lakehouse pragmatism.
+
+</details>
+
+<details><summary><b>57.</b> What does "replay the log through one stream framework instead of two systems" mean in practice?</summary>
+
+It means a single engine (e.g., Flink) reads the retained Kafka log either live (from the tail) or historically (from an earlier offset) using the same job code, so reprocessing is just a different start offset. There is no second framework with its own dialect of the logic. One framework, one codebase, two start positions.
+
+</details>
+
+<details><summary><b>58.</b> Why is the immutable input log central to both Lambda and Kappa?</summary>
+
+Both architectures assume an immutable, ordered record of events as the canonical input — Lambda feeds it to two layers, Kappa replays it through one. Immutability is what makes recompute-from-scratch possible and deterministic in either model. The disagreement is only about how many processing systems consume that log.
+
+</details>
+
+<details><summary><b>59.</b> How does at-least-once-plus-idempotent-sink (effectively-once) intersect with the synthesis?</summary>
+
+When the stream writes into the lakehouse table with an idempotent or transactional sink, replays and retries don't double-apply, so reprocessing under Kappa is safe and the table stays correct. Effectively-once is what makes "just replay the log" produce the same table, not a duplicated one. Without it, replay would corrupt the table with duplicates.
+
+</details>
+
+<details><summary><b>60.</b> Why might "two systems that must agree" be worse than one slightly-slower system?</summary>
+
+Because divergence between two systems is a silent, hard-to-detect failure mode — the numbers disagree and you must investigate which is right — whereas one system gives one answer you can reason about end to end. The reconciliation burden and the audit ambiguity of two answers often outweigh a modest latency penalty. Kreps' point is that agreement is expensive to guarantee.
+
+</details>
+
+<details><summary><b>61.</b> For a nightly fund reconciliation, which latency class and architecture stance fits?</summary>
+
+It is a minutes-to-hours, batch-class workload, so a plain batch job over the lakehouse tables is appropriate — no speed layer needed, and forcing it into streaming would add cost without benefit. Within the synthesis, this is simply a scheduled batch read of the same tables the stream writes. Reserve streaming for the genuinely latency-sensitive paths.
+
+</details>
+
+<details><summary><b>62.</b> For a sub-second exposure alert, what does the Lambda/Kappa framing tell you?</summary>
+
+It tells you a streaming path is mandatory (batch cannot hit sub-second) and that you should implement it as a single correct stream job rather than a lossy speed layer needing a batch corrector. This is squarely a Kappa/synthesis case: one engine, low latency, exactly-once. Lambda's approximate speed layer would be unacceptable for an alert you act on.
+
+</details>
+
+<details><summary><b>63.</b> How do you explain to a junior why "we maintain the NAV logic in two places" is a smell?</summary>
+
+Tell them every change now needs duplicate implementation and a proof that both versions still match, doubling effort and the chance of a discrepancy that produces two contradictory NAV-flow numbers. A single replayable codebase removes that whole class of bug. The smell is duplicated logic that must stay in lockstep, not merely "having a batch job."
+
+</details>
+
+<details><summary><b>64.</b> What is the relationship between Kappa and event sourcing?</summary>
+
+Both treat an ordered, retained event log as the source of truth from which state is derived by replay (fold-over-events). Kappa applies that idea at the architecture level for analytics reprocessing; event sourcing applies it at the application-state level. Sharing the "log is truth, state is derived" principle is why they pair naturally on a streaming platform.
+
+</details>
+
+<details><summary><b>65.</b> Why is "retention vs the cost of a second stack" the real Kappa tradeoff?</summary>
+
+Because Kappa trades the operational and engineering cost of maintaining a separate batch system for the storage cost of retaining a longer log. Kreps argues log storage is cheap and sequential, so this trade strongly favors retention over a second stack in most cases. You pay in disk/object storage instead of in duplicated code and ops.
+
+</details>
+
+<details><summary><b>66.</b> When the syllabus says "table formats plus streaming ingestion dissolving most of the dichotomy," what does "most" acknowledge?</summary>
+
+It acknowledges the dichotomy isn't fully gone: extreme sub-second serving, or cases where one engine genuinely cannot meet both latency and correctness, can still warrant specialized or even dual paths. The synthesis covers the common case but not every edge. "Most" is the architect's honesty that exceptions remain.
+
+</details>
+
+<details><summary><b>67.</b> How would tiered/archived event storage let a single Iceberg-based platform satisfy 10-year restatement?</summary>
+
+Keep recent log in Kafka for live streaming, tier older segments to object storage, and/or persist raw events as an immutable bronze Iceberg table; a reprocessing job replays from whichever source covers the needed range. The 10-year recompute reads archived events, not hot broker disks. Long-horizon restatement becomes a storage-tiering problem, not an architecture change.
+
+</details>
+
+<details><summary><b>68.</b> What is the one-line elevator answer to "Lambda or Kappa?" for a typical fund analytics workload?</summary>
+
+Prefer the table-format synthesis (Kappa-leaning): one streaming codebase writing exactly-once into governed lakehouse tables, with batch jobs reading those same tables — avoiding the dual-codebase tax while keeping batch reconciliation and restatement. Reserve true Lambda for the rare case where no single engine meets both latency and correctness. Name it honestly and size your log retention to your restatement horizon.
+
+</details>
+
+<details><summary><b>69.</b> Why is "approximate now, correct later" risky specifically for settlement or NAV figures?</summary>
+
+Because downstream parties may act on the approximate figure (e.g., reporting an intraday flow or a provisional NAV) before the correction lands, and in regulated finance acting on a wrong number has compliance consequences even if later fixed. The "correct later" overwrite doesn't undo decisions already taken. This is why fund platforms favor correct-the-first-time streaming over Lambda's disposable speed layer.
+
+</details>
+
+<details><summary><b>70.</b> In a design review, how do you prove your platform is not paying the dual-codebase tax?</summary>
+
+Show that there is exactly one implementation of each transformation, used both for live processing and for reprocessing via log/table replay, and that any batch job present is a reconciliation control rather than a second serving path. Point to the single Flink job and the single Iceberg target. The evidence is "one codebase, two start offsets," not "no batch jobs at all."
+
+</details>
+
+<details><summary><b>71.</b> What does Kreps mean by "questioning" rather than "rejecting" the Lambda architecture?</summary>
+
+He accepts Lambda's goals — combine low-latency and accurate results over an immutable log — but questions whether two separate systems are the right means, proposing the log-replay alternative instead. It is a critique of the implementation, not the objective. Kappa keeps the destination and changes the route.
+
+</details>
+
+<details><summary><b>72.</b> How does the existence of mature managed streaming (Confluent, Managed Flink, ASA) affect the Lambda/Kappa decision?</summary>
+
+It lowers the operational cost of running a single correct streaming path, further weakening the case for a separate batch corrector and making Kappa/synthesis the default for most new builds. When one managed engine reliably delivers exactly-once streaming, duplicating logic in batch is hard to justify. Maturity of streaming tooling tilts the decision toward a single codebase.
+
+</details>
+
+<details><summary><b>73.</b> A stakeholder asks "why not just batch everything?" — how does this lesson answer?</summary>
+
+Batch-everything is fine until a use case (intraday flow, sub-second alert) needs lower latency than the batch interval can provide; then you need a streaming path. The lesson's frame says: add streaming only where latency demands it, and when you do, prefer a single streaming codebase (Kappa/synthesis) over a duplicated speed-plus-batch design. Latency requirement drives the choice.
+
+</details>
+
+<details><summary><b>74.</b> Why is the partition/key and retention design described as a "reprocessing contract"?</summary>
+
+Because correct replay depends on both ordered partitioning (so order-dependent state recomputes correctly) and sufficient retention (so the needed history exists to replay). Together they define what you can recompute and how faithfully. If either is wrong, your Kappa reprocessing claim is unsupported.
+
+</details>
+
+<details><summary><b>75.</b> How does the Lambda/Kappa lesson connect to delivery-guarantee ADRs in the capstone?</summary>
+
+Choosing Kappa/synthesis means your ADR must state where exactly-once is genuinely achieved (stream into a transactional/idempotent sink) so that replay produces the same table, versus where idempotent-at-least-once is the honest answer. The architecture choice and the guarantee design are intertwined. The ADR documents both the architecture name and where each guarantee actually holds.
+
+</details>
+
+<details><summary><b>76.</b> Why does a "single source of truth" argument favor Kappa/synthesis over Lambda?</summary>
+
+In Lambda the batch and speed outputs are two derivations that must be reconciled into one served view; in Kappa/synthesis there is one log and one set of governed tables, so there is a single, unambiguous source of truth and derived state. Auditors prefer a single lineage from log to table. Two parallel truths invite "which one is right?" disputes.
+
+</details>
+
+<details><summary><b>77.</b> What is the difference between "as-of" and "as-known-at" recompute, and which mechanism serves each?</summary>
+
+"As-of" asks for the value attributed to a business date; "as-known-at" asks for the value as it was known at a processing time. Table snapshots/time travel serve as-known-at (what the table said then), while log replay with corrected logic serves recomputation. The synthesis provides both: snapshots for historical reads, log replay for recompute.
+
+</details>
+
+<details><summary><b>78.</b> Why is it dangerous to claim "exactly-once end-to-end" merely because you adopted Kappa?</summary>
+
+Adopting Kappa (single stream codebase) does not by itself make the sink idempotent or transactional; replay safety requires the sink to absorb duplicates without double effect. If the downstream store is non-idempotent, replay corrupts it despite the architecture being "Kappa." The guarantee comes from the sink design, not the architecture label.
+
+</details>
+
+<details><summary><b>79.</b> How do you size log retention as an explicit, defensible number for a fund platform?</summary>
+
+Take the longest reprocessing or restatement window you are required to support (driven by regulatory and operational policy), add headroom, and set hot retention plus tiered/archived storage to cover it; document the figure and its driver. For example, "retain 90 days hot, archive raw events to Iceberg for 10 years to meet restatement." The number is justified by the recompute obligation, not guessed.
+
+</details>
+
+<details><summary><b>80.</b> Why is "medallion-with-streaming" auditor-friendly?</summary>
+
+Because there is one immutable raw layer (bronze) capturing events, refined deterministically into silver/gold tables that both streaming and batch read, giving clear lineage and reproducibility from a single source. Auditors can trace any figure back through governed table layers to the raw events. One lineage beats reconciling two parallel pipelines.
+
+</details>
+
+<details><summary><b>81.</b> A team built Lambda three years ago; should they migrate to the synthesis?</summary>
+
+Often yes if maintaining two codebases is causing drift, reconciliation pain, or slow change delivery — migrating to a single streaming codebase writing into lakehouse tables removes the tax. But weigh migration cost and whether any workload truly needs separate paths. The trigger is the pain of dual maintenance, not architectural fashion.
+
+</details>
+
+<details><summary><b>82.</b> How does the latency-class rubric (minutes / seconds / sub-second) feed the Lambda/Kappa decision?</summary>
+
+Classify each use case by required latency; minutes-class often stays batch, seconds/sub-second-class needs streaming. Once streaming is in scope, prefer a single streaming codebase (Kappa/synthesis) rather than duplicating logic into a speed layer plus batch corrector. The rubric decides whether you stream; the Kappa principle decides how.
+
+</details>
+
+<details><summary><b>83.</b> What is the risk of describing your platform as "Lambda" when it is actually the synthesis?</summary>
+
+You signal duplicated batch/speed logic and a merge serving layer that you don't actually have, confusing reviewers about where guarantees and costs live. Mislabelling misroutes scrutiny — people look for a dual-codebase risk that isn't there and miss the real ones (retention, sink idempotency). Accurate labelling focuses review on the actual tradeoffs.
+
+</details>
+
+<details><summary><b>84.</b> Why does Kreps emphasize that the reprocessing job writes to a new table and you "switch over"?</summary>
+
+To make reprocessing safe and atomic: the live table keeps serving consistent results while the long replay runs against a separate output, and only a verified, caught-up new table replaces it. This avoids serving half-recomputed data and gives a clean rollback (keep the old table). It is the operational discipline that makes log-replay reprocessing production-safe.
+
+</details>
+
+<details><summary><b>85.</b> How would you summarize the Kappa retention requirement to a storage budgeting meeting?</summary>
+
+"We must retain (hot plus archived) enough ordered event history to replay and recompute our longest required restatement window; this is cheap sequential storage and replaces the cost of a second batch system." Then give the concrete horizon and the storage tiering plan. Frame retention as buying out the dual-stack cost.
+
+</details>
+
+<details><summary><b>86.</b> What does "one model across surfaces" imply for Lambda/Kappa thinking?</summary>
+
+The same log-as-truth, state-as-derived discipline that governs your streaming analytics also informs Kafka topic evolution, Iceberg table evolution, and event-sourced application state — consistent principles across surfaces. Kappa/synthesis isn't just an analytics choice; it reflects a unified data philosophy. Coherence across surfaces reduces special-casing.
+
+</details>
+
+<details><summary><b>87.</b> Why might extreme sub-second user-facing serving still resist the synthesis?</summary>
+
+Because serving very high-concurrency sub-second queries can require specialized real-time stores (Pinot/Druid-class) layered on top of the stream, adding a serving path beyond the lakehouse tables. That extra path is a pragmatic specialization, not a duplicated transformation codebase, so it's not full Lambda. The synthesis still feeds it from the one log.
+
+</details>
+
+<details><summary><b>88.</b> How do you decide between accepting and avoiding the dual-codebase risk in a design?</summary>
+
+Avoid it by collapsing to one streaming codebase whenever an engine can meet the latency and correctness needs; accept it only when you can demonstrate no single engine suffices and the duplication is genuinely required. If you accept it, document the reconciliation discipline that keeps the two in sync. The default is avoid; acceptance must be justified and controlled.
+
+</details>
+
+<details><summary><b>89.</b> Why is "prove the platform's architecture and defend it for fund data" a higher bar than just naming it?</summary>
+
+Because defending it means tying the choice to fund-specific constraints — restatement obligations, audit reproducibility, intraday trust, regulatory latency — not just generic engineering preference. The architect must show the choice is right for this regulated domain, with retention, guarantees, and reconciliation that satisfy auditors. Naming is recall; defending is applied judgment.
+
+</details>
+
+<details><summary><b>90.</b> A late order arrives after the intraday window closed. How does the architecture choice affect handling it?</summary>
+
+Under Lambda, the batch layer would eventually pick it up and correct the total overnight; under Kappa/synthesis, you handle it in-stream via allowed lateness and a restatement/late-firing trigger, or replay. The synthesis keeps lateness handling in the one engine's watermark/trigger knobs rather than deferring correctness to a separate batch layer. Same correctness goal, single codebase.
+
+</details>
+
+<details><summary><b>91.</b> Why is log replay preferable to re-extracting from the source system for reprocessing?</summary>
+
+Because the source (e.g., a transfer-agency database) may have mutated or purged history, whereas the retained immutable log preserves the exact ordered events as they occurred, giving a faithful, reproducible recompute. Replaying the log avoids re-querying fragile or changed sources. The log is the durable, auditable record; the source is not.
+
+</details>
+
+<details><summary><b>92.</b> What is the danger of a Lambda speed layer "drifting" from the batch layer over time?</summary>
+
+Subtle differences in rounding, late-data handling, or a missed logic update can make the speed and batch results disagree in ways that go unnoticed until someone reconciles them, producing two contradictory fund figures. Drift is the dual-codebase tax realized as silent divergence. Single-codebase designs cannot drift against themselves.
+
+</details>
+
+<details><summary><b>93.</b> How does this lesson inform the ADR "log platform choice (Kafka vs Event Hubs vs Redpanda)"?</summary>
+
+Because a Kappa/synthesis design leans hard on long, replayable, ordered retention, the ADR must evaluate each platform's retention, tiered-storage, and replay capabilities against your restatement horizon. The architecture's reprocessing demands become explicit selection criteria. You choose the log platform partly on how well it supports Kappa-style replay.
+
+</details>
+
+<details><summary><b>94.</b> Summarize the lesson's core decision in one sentence an architect could say in a review.</summary>
+
+"We avoid the dual-codebase tax by running one streaming codebase that writes exactly-once into governed lakehouse tables, sizing log retention to our restatement horizon, with batch jobs as reconciliation rather than a parallel source of truth — a Kappa-leaning table-format synthesis, and here is what we'd change for sub-minute NAV-error detection." That states the architecture, its justification, and the latency contingency.
+
+</details>
+
+<details><summary><b>95.</b> Which specific technologies did the original Lambda architecture pair in its batch and speed layers?</summary>
+
+The canonical Lambda stack used Hadoop/MapReduce for the batch layer and a stream processor such as Apache Storm for the speed layer, with a serving layer indexing the merged outputs. The pairing reflects the era: a mature-but-slow batch engine alongside an early, lossy stream engine. Modern engines collapsing both roles is precisely why Kreps could propose dropping the second layer.
+
+</details>
+
+<details><summary><b>96.</b> How does the EMT/EPT file feed for fund cost transparency fit the batch-vs-streaming framing?</summary>
+
+EMT (European MiFID Template) and EPT files are periodic, structured deliverables, so producing and consuming them is a batch-class workload that needs no speed layer — forcing streaming there adds cost without benefit. Within the synthesis you generate them as a scheduled batch read of the governed lakehouse tables the stream populates. It illustrates "stream only where latency demands it."
+
+</details>
+
+<details><summary><b>97.</b> A streamed intraday flow total disagrees with the nightly batch recompute. Under the synthesis, what is the first thing you check?</summary>
+
+First check whether they are even meant to differ in method: in a single-codebase design the nightly job should be re-running the same logic, so any disagreement points to late/duplicate events handled differently, a non-idempotent sink double-applying on replay, or a watermark/lateness mismatch. Confirm the sink is idempotent and that allowed-lateness windows match before suspecting a logic bug. If the two paths secretly use different code, you have reintroduced the dual-codebase tax.
+
+</details>
+
+<details><summary><b>98.</b> Why does Kreps argue the two Lambda layers are "complexity-coupled" even though they run independently?</summary>
+
+Because although the batch and speed systems execute separately, every change to the business logic must be coordinated across both to keep their outputs consistent, so they are coupled at the maintenance and correctness level. Independent runtime does not buy independent evolution. That coupling is the dual-codebase tax expressed as change-coordination overhead.
+
+</details>
+
+<details><summary><b>99.</b> For replaying SWIFT-message-driven settlement events to recompute a corrected position, why is the retained log better than re-reading the transfer-agency system?</summary>
+
+The retained, ordered log preserves the exact settlement events as they arrived, whereas the transfer-agency database is mutable and may have been corrected or purged, so replaying the log gives a faithful, reproducible recompute an auditor can trust. Re-reading the live source risks recomputing from already-changed state. This is the Kappa principle that the immutable log, not the operational source, is the recompute substrate.
+
+</details>
+
+<details><summary><b>100.</b> In one line, what is the strongest single argument the synthesis makes against ever choosing Lambda for a new fund-data build?</summary>
+
+That mature exactly-once streaming into ACID lakehouse tables (e.g., `Flink` into `Iceberg`) gives you both low latency and full replay-based restatement from one codebase, so the only thing Lambda adds is a second implementation to keep in sync and an output-merging serving layer to maintain. You pay the dual-codebase tax for capability you already have. Hence, for a greenfield fund build, prefer the synthesis and reserve Lambda for proven edge cases.
+
+</details>
+
+
+## Phase 4 · 1.2.2 + 1.2.3 Micro-batch vs true streaming — 100 self-test questions
+
+<details><summary><b>1.</b> What is the core processing-model difference between Spark Structured Streaming and Apache Flink?</summary>
+
+Spark Structured Streaming is fundamentally micro-batch: it slices the incoming stream into many small batch jobs that run back-to-back. Flink is event-at-a-time (true streaming): each record flows through the operator graph and updates state as it arrives, with no batch boundary. This distinction drives every downstream difference in latency floor, state handling, and ops profile.
+
+</details>
+
+<details><summary><b>2.</b> What does "micro-batch" actually mean mechanically in Spark Structured Streaming?</summary>
+
+The engine repeatedly plans and executes a small batch query over the data that arrived since the last batch, then commits, then starts the next batch. Each micro-batch reads new offsets, runs the same Spark SQL/DataFrame plan, writes output, and records progress in the checkpoint. So a "stream" is really a fast loop of tiny batch jobs over an unbounded source.
+
+</details>
+
+<details><summary><b>3.</b> What is a "trigger" in Spark Structured Streaming?</summary>
+
+A trigger defines when a new micro-batch is launched — it is the cadence of the processing loop. You set it with `.trigger(...)` on the `DataStreamWriter`, choosing options like fixed `ProcessingTime`, the default trigger, `AvailableNow`, or experimental `Continuous`. The trigger choice is the single biggest lever over end-to-end latency in the micro-batch model.
+
+</details>
+
+<details><summary><b>4.</b> What is the default trigger when you do not specify one in Structured Streaming?</summary>
+
+The default trigger runs micro-batches as fast as possible: as soon as one batch finishes, the next starts immediately with whatever data is available. There is no fixed interval, so throughput and latency are governed by how long each batch takes. This is distinct from `ProcessingTime`, which pins a fixed wall-clock interval between batch starts.
+
+</details>
+
+<details><summary><b>5.</b> How do you configure a fixed-interval micro-batch trigger in Structured Streaming?</summary>
+
+Use `.trigger(Trigger.ProcessingTime("10 seconds"))` (Scala/Java) or `.trigger(processingTime="10 seconds")` (PySpark). The engine attempts to start a new micro-batch at each interval boundary. If a batch overruns the interval the next one starts immediately after, so the interval is a target, not a hard guarantee.
+
+</details>
+
+<details><summary><b>6.</b> What happens if a micro-batch takes longer than its configured `ProcessingTime` interval?</summary>
+
+The next micro-batch does not wait for the next interval tick; it kicks off as soon as the slow batch finishes. The engine effectively skips the missed ticks and falls back to back-to-back execution until it catches up. This is a key gotcha: a too-tight interval on a heavy workload silently degrades to as-fast-as-possible behaviour.
+
+</details>
+
+<details><summary><b>7.</b> What is the `AvailableNow` trigger and when do you use it?</summary>
+
+`Trigger.AvailableNow` processes all data currently available across potentially many micro-batches, then stops the query automatically. It is for batch-style incremental runs over a streaming source — for example a scheduled job that drains a Kafka topic or a directory and exits. It preserves streaming semantics (offsets, checkpoint, exactly-once) while behaving like a finite job.
+
+</details>
+
+<details><summary><b>8.</b> What is `Trigger.Once` and what is its current status?</summary>
+
+`Trigger.Once` ran exactly one micro-batch over all available data and stopped. As of Spark 3.4 it is deprecated in favour of `Trigger.AvailableNow`, because `Once` tried to process everything in a single batch (risking memory blowups on large backlogs) whereas `AvailableNow` splits the backlog across multiple right-sized batches before stopping.
+
+</details>
+
+<details><summary><b>9.</b> What is "continuous processing" mode in Spark Structured Streaming?</summary>
+
+Continuous processing is an experimental low-latency execution mode (introduced in Spark 2.3) that abandons the micro-batch loop and runs long-lived tasks that process records as they arrive, achieving roughly 1 ms end-to-end latency. You enable it with `.trigger(Trigger.Continuous("1 second"))`, where the interval is a checkpoint cadence, not a batch interval. It exists to push Spark closer to true-streaming latencies.
+
+</details>
+
+<details><summary><b>10.</b> In continuous processing, what does the interval passed to `Trigger.Continuous("1 second")` actually control?</summary>
+
+It is the checkpoint interval — how often the continuous engine records query progress — not a micro-batch interval. The docs note these checkpoints stay format-compatible with the micro-batch engine, so a query can be restarted under any trigger. So `Continuous("1 second")` means "snapshot progress every second" while records still flow continuously between snapshots.
+
+</details>
+
+<details><summary><b>11.</b> What delivery guarantee does Spark continuous processing provide, and how does it differ from micro-batch?</summary>
+
+Continuous processing provides only at-least-once fault tolerance, whereas the default micro-batch engine provides end-to-end exactly-once (given replayable sources and idempotent/transactional sinks). Trading exactly-once for at-least-once is the price of dropping the batch boundary that micro-batch uses to commit cleanly. This alone disqualifies continuous mode for use cases that cannot tolerate duplicates.
+
+</details>
+
+<details><summary><b>12.</b> What are the main limitations of Spark continuous processing mode?</summary>
+
+It is experimental, supports only a restricted set of operations (essentially map-like projections, selections, and simple aggregation-free transformations), works with a limited set of sources/sinks (e.g. Kafka, rate, console/memory), and offers only at-least-once. Stateful operations like arbitrary aggregations and joins are not supported. Databricks explicitly does not recommend it, steering users to other low-latency paths instead.
+
+</details>
+
+<details><summary><b>13.</b> What is the approximate latency floor of Spark's default micro-batch model versus continuous processing?</summary>
+
+Micro-batch realistically lands around 100 ms at best and more commonly hundreds of milliseconds to seconds, because every record must wait for a batch boundary plus planning and commit overhead. Continuous processing can reach about 1 ms but only at-least-once and for a narrow operation set. Flink's event-at-a-time model also reaches sub-millisecond-to-millisecond per-record latency without giving up exactly-once.
+
+</details>
+
+<details><summary><b>14.</b> Why does micro-batch impose a latency floor that event-at-a-time processing does not?</summary>
+
+A record cannot produce output until the micro-batch that contains it is triggered, planned, executed, and committed — so even an instantaneously-arriving event waits for the batch cycle. That per-batch fixed cost (scheduling, query planning, offset/commit bookkeeping) is amortised over the batch but never goes to zero, setting a floor. Event-at-a-time engines have no batch boundary, so a record can be processed the moment it arrives.
+
+</details>
+
+<details><summary><b>15.</b> A teammate sets `Trigger.ProcessingTime("0 seconds")` expecting zero latency. What actually happens?</summary>
+
+A zero interval just means "run as fast as possible" — equivalent to the default trigger — so batches run back-to-back, not instantaneously. You still pay the per-batch planning and commit overhead on every cycle, so latency is bounded by batch execution time, not driven to zero. To go below the micro-batch floor you would need continuous mode or a true-streaming engine like Flink.
+
+</details>
+
+<details><summary><b>16.</b> How does Spark Structured Streaming persist progress so it can recover after a failure?</summary>
+
+It writes to a checkpoint location containing the offset log (which input offsets each batch read), the commit log (which batches completed), and the state store snapshots/deltas for stateful operators. On restart, Spark reads the last committed batch, replays uncommitted offsets, and restores state, giving exactly-once for replayable sources. Losing or moving the checkpoint directory breaks recovery and exactly-once guarantees.
+
+</details>
+
+<details><summary><b>17.</b> What is the write-ahead log (WAL) role in Spark Structured Streaming checkpointing?</summary>
+
+Before processing a micro-batch, Spark records the range of offsets to be processed in the offset log (a form of WAL) so that on recovery it knows exactly which data each batch was responsible for. Combined with the commit log it can determine whether a batch finished, and re-run it deterministically if not. This offset-then-process-then-commit discipline is what makes micro-batch exactly-once achievable.
+
+</details>
+
+<details><summary><b>18.</b> What is the state store in Spark Structured Streaming, and what are the two backend options?</summary>
+
+The state store holds intermediate state for stateful operations (aggregations, joins, deduplication, `mapGroupsWithState`). The default is the `HDFSBackedStateStore`, which keeps state in JVM memory and persists deltas/snapshots to the checkpoint (commonly on HDFS or object storage); the alternative is the RocksDB state store, enabled via `spark.sql.streaming.stateStore.providerClass`. RocksDB spills state off-heap to local disk, reducing GC pressure for very large state.
+
+</details>
+
+<details><summary><b>19.</b> When would you switch Spark's state store from the default to RocksDB?</summary>
+
+Switch to RocksDB when state grows large enough that keeping it on the JVM heap causes long GC pauses or out-of-memory errors — for example wide keyspaces in streaming aggregations or large stream-stream joins. RocksDB stores state as an embedded on-disk key/value store, so heap usage stays bounded while state scales. The trade-off is some per-access disk/serialization overhead versus pure in-memory access.
+
+</details>
+
+<details><summary><b>20.</b> How does Flink manage state compared with Spark Structured Streaming?</summary>
+
+Flink maintains state continuously inside each operator as records flow, with keyed state behaving like an embedded per-key key/value store partitioned alongside the stream. State updates are local operations (no distributed transaction), and Flink snapshots state via barrier-based checkpoints rather than per-batch commits. Spark instead rebuilds/updates state at each micro-batch boundary and persists it through the checkpoint mechanism.
+
+</details>
+
+<details><summary><b>21.</b> What is the difference between keyed state and operator state in Flink?</summary>
+
+Keyed state is scoped to a key extracted from each record and is partitioned/distributed strictly with the stream, so a given key's state always lives where that key is processed — it behaves like a sharded key/value store. Operator state is scoped to a parallel operator instance regardless of key (e.g. a Kafka source tracking its partition offsets). Keyed state is the workhorse for aggregations and joins; operator state is mainly for source/sink bookkeeping.
+
+</details>
+
+<details><summary><b>22.</b> What are Flink's two main state backends and how do they differ?</summary>
+
+`HashMapStateBackend` keeps working state as objects on the JVM heap — fast access but bounded by memory and subject to GC. `EmbeddedRocksDBStateBackend` stores state in an embedded RocksDB instance on local disk, allowing state far larger than memory and supporting incremental checkpoints, at the cost of serialization and disk access per operation. The choice mirrors Spark's heap vs RocksDB state-store decision.
+
+</details>
+
+<details><summary><b>23.</b> How does Flink checkpoint state, and what algorithm underlies it?</summary>
+
+Flink uses a Chandy-Lamport-inspired distributed snapshot algorithm: special markers called stream barriers are injected at the sources and flow with the records. When an operator has seen barrier n on all its inputs, it snapshots its state asynchronously and forwards the barrier downstream. This gives a globally consistent cut of the streaming computation without stopping the flow of data.
+
+</details>
+
+<details><summary><b>24.</b> What are stream barriers in Flink and what invariant do they maintain?</summary>
+
+Barriers are lightweight markers injected into the data flow at the sources that separate records belonging to one checkpoint from the next. The key invariant is that barriers never overtake records: everything before barrier n is in snapshot n, everything after is in snapshot n+1. This ordering is what lets Flink take a consistent snapshot of in-flight state.
+
+</details>
+
+<details><summary><b>25.</b> What is barrier alignment in Flink, and why can it add latency?</summary>
+
+When an operator has multiple input streams, aligned checkpointing makes it wait until barrier n has arrived on every input before snapshotting, buffering records from faster inputs in the meantime. This guarantees exactly-once but the wait — the alignment phase — can add latency and backpressure when one input lags. Flink offers unaligned checkpointing to mitigate this on slow paths.
+
+</details>
+
+<details><summary><b>26.</b> What is unaligned checkpointing in Flink and what does it trade off?</summary>
+
+Introduced in Flink 1.11, unaligned checkpointing lets a barrier overtake buffered in-flight records by making those records part of the checkpointed operator state, so the barrier propagates quickly without waiting for alignment. This speeds up checkpoints under backpressure but increases checkpoint size and I/O pressure on the state backend. It is a latency/throughput-vs-checkpoint-cost trade-off.
+
+</details>
+
+<details><summary><b>27.</b> In Flink, what is the difference between exactly-once and at-least-once checkpointing modes?</summary>
+
+In exactly-once mode Flink aligns barriers so each record is reflected in state exactly once on recovery. In at-least-once mode it skips alignment, so an operator keeps processing all inputs after the first barrier; on restart some records from after the snapshot are replayed, appearing as duplicates. You choose at-least-once when you need lower checkpoint latency and your sink/logic tolerates duplicates.
+
+</details>
+
+<details><summary><b>28.</b> What is the difference between a checkpoint and a savepoint in Flink?</summary>
+
+Checkpoints are automatic, periodic snapshots taken by the runtime for fault tolerance and are typically expired/overwritten as newer ones complete. Savepoints are manually triggered snapshots that use the same mechanism but persist indefinitely until you delete them, and are meant for planned operations like upgrades, rescaling, or migrating a job. Use savepoints to stop-and-resume a job across code or cluster changes without losing state.
+
+</details>
+
+<details><summary><b>29.</b> Why is per-record state update in Flink described as a "local" operation?</summary>
+
+Because keyed state is co-partitioned with the stream, the state for a given key always resides on the same task that processes that key, so updating it requires no network round-trip or distributed transaction. This locality is what makes event-at-a-time stateful processing cheap enough to do on every record. Spark, by contrast, reconciles state at batch boundaries through the checkpoint.
+
+</details>
+
+<details><summary><b>30.</b> What is the typical operational profile of a Spark Structured Streaming deployment?</summary>
+
+Spark streaming jobs usually run on a long-lived, shared Spark cluster (YARN, Kubernetes, or standalone) that also runs batch and SQL workloads, with the streaming query as one of many applications reusing that cluster. This means you amortise one cluster across batch and streaming and reuse existing Spark skills and tooling. The trade-off is coarser isolation and a latency floor inherited from the micro-batch model.
+
+</details>
+
+<details><summary><b>31.</b> What is the typical operational profile of a Flink deployment?</summary>
+
+Flink commonly runs as per-job (application-mode) clusters where each streaming job gets its own JobManager and TaskManagers, giving strong isolation and independent scaling/upgrades per job. This isolation suits many independent low-latency pipelines but multiplies the number of clusters and the operational surface to manage. It contrasts with Spark's "one big shared cluster" reuse model.
+
+</details>
+
+<details><summary><b>32.</b> Why might an organisation already running a Spark cluster prefer to add a streaming job in Spark rather than adopt Flink?</summary>
+
+Because they reuse the existing long-lived cluster, the existing Spark/SQL codebase and skills, and one set of monitoring and deployment tooling — no new engine to learn or operate. For minute-grained or second-grained use cases the micro-batch latency floor is irrelevant, so the simplicity wins. Adopting Flink would add operational complexity that those latency requirements do not justify.
+
+</details>
+
+<details><summary><b>33.</b> What is the "latency-class rubric" this lesson asks you to apply?</summary>
+
+It is a decision aid that sorts a use case into a latency class — minutes, seconds, or sub-second — and maps each class to an engine: minutes-class fits batch or relaxed micro-batch (Spark), seconds-class fits micro-batch with tight triggers, and sub-second fits an event-at-a-time engine like Flink. The architect's job is to place each fund use case in the right class and name the engine. Mismatching the class either misses a latency floor or buys needless complexity.
+
+</details>
+
+<details><summary><b>34.</b> Which latency class is "nightly fund reconciliation" and which engine fits?</summary>
+
+Nightly reconciliation is firmly in the minutes (indeed hours-cadence) class — it runs once per day and has no sub-second requirement. A batch job or a Spark micro-batch with `AvailableNow` is the right fit; reaching for Flink here adds per-job cluster complexity for nothing. The honest engineering answer is the simplest tool that meets the (very relaxed) latency need.
+
+</details>
+
+<details><summary><b>35.</b> Which latency class is a "sub-second exposure alert" and which engine fits?</summary>
+
+A sub-second exposure or risk-limit alert is in the sub-second class, below the micro-batch latency floor, so it points to an event-at-a-time engine like Flink. Spark micro-batch cannot reliably meet a sub-second SLA because of the batch boundary plus planning/commit overhead. This is the canonical case where the latency floor forces the engine choice.
+
+</details>
+
+<details><summary><b>36.</b> Which latency class is "intraday fund-flow totals refreshed every minute" and which engine fits?</summary>
+
+Minute-granular intraday flow totals are in the seconds-to-minutes class, comfortably above the micro-batch floor, so Spark Structured Streaming with a `ProcessingTime` trigger of, say, 30–60 seconds is a clean fit. Flink would also work but adds operational overhead the latency target does not require. Pick the engine that meets the SLA most simply.
+
+</details>
+
+<details><summary><b>37.</b> A new requirement says NAV-error detection must fire within 500 ms of a bad price arriving. Which model can meet it?</summary>
+
+500 ms is sub-second, below Spark micro-batch's realistic floor (~100 ms best case but typically higher once planning/commit and real workloads are included), so you should use an event-at-a-time engine such as Flink. Flink processes each price as it arrives and can evaluate the NAV-error rule immediately. Trying to hit 500 ms with tight micro-batch triggers is fragile and may breach the SLA under load.
+
+</details>
+
+<details><summary><b>38.</b> For a fund pipeline that recomputes share-class flow totals every minute, why would choosing Flink be over-engineering?</summary>
+
+Because a one-minute target sits far above the micro-batch latency floor, Spark Structured Streaming on the existing shared cluster meets it trivially while reusing code, skills, and tooling. Flink would deliver latency you do not need at the cost of per-job clusters and a second engine to operate. The architect should name micro-batch here precisely to avoid that operational tax.
+
+</details>
+
+<details><summary><b>39.</b> For a sub-second pre-trade exposure check, why is micro-batch the wrong choice?</summary>
+
+Sub-second sits below the micro-batch latency floor, so even an as-fast-as-possible Spark trigger cannot guarantee the SLA once you account for batch planning, execution, and commit per cycle. An event-at-a-time engine evaluates each position change immediately, with no batch boundary to wait on. Forcing micro-batch here means accepting SLA misses under load — a correctness-of-design failure.
+
+</details>
+
+<details><summary><b>40.</b> What does "end-to-end latency" mean when comparing these two engines, and why measure it rather than reason about it?</summary>
+
+End-to-end latency is the wall-clock time from a record arriving at the source to its effect appearing in the sink/output, spanning ingestion, processing, state update, and write. You measure rather than assume because real planning overhead, trigger settings, state size, checkpoint cost, and sink behaviour shift the number well beyond textbook floors. The lesson's "Do" step explicitly has you measure both implementations.
+
+</details>
+
+<details><summary><b>41.</b> How would you actually measure end-to-end latency for a Spark vs Flink implementation of the same aggregation?</summary>
+
+Stamp each source event with an ingestion timestamp, then at the sink compute the difference between the current time (or output commit time) and that stamp, and report the distribution (median, p95, p99) rather than a single number. Run both engines on the same input rate and the same aggregation so the comparison is apples-to-apples. Watching the tail percentiles, not the mean, is what exposes the micro-batch floor.
+
+</details>
+
+<details><summary><b>42.</b> When comparing "code volume" between rebuilding a Flink aggregation in Spark, what usually drives the difference?</summary>
+
+Spark Structured Streaming often expresses windowed aggregations concisely in DataFrame/SQL with `groupBy(window(...))` and an output mode, whereas Flink may require more explicit wiring of watermarks, keyed process functions, and state. Conversely, advanced event-time and late-data control can be terser to express precisely in Flink. The half-page note should report measured code volume, not impressions, since it cuts both ways.
+
+</details>
+
+<details><summary><b>43.</b> When comparing "operational burden" between the two engines, what concrete factors belong in the note?</summary>
+
+Number and lifecycle of clusters (shared long-lived vs per-job), checkpoint configuration and storage, upgrade/rescale procedure (savepoints in Flink), monitoring/alerting surface, and how recovery is performed and verified. You also weigh team familiarity and existing tooling. The point is to ground "ops burden" in observable, comparable facts rather than a vibe.
+
+</details>
+
+<details><summary><b>44.</b> Why can event-time windowing be done in both engines, yet the engines still differ in latency?</summary>
+
+Both Spark and Flink support event-time windows, watermarks, and late-data handling, so functionally you can compute the same windowed result in either. The latency difference is about when a result is emitted relative to the triggering record: micro-batch emits at batch boundaries, event-at-a-time can emit as soon as the window fires. So equivalent semantics do not imply equivalent latency.
+
+</details>
+
+<details><summary><b>45.</b> What is a watermark, and is it specific to one of these engines?</summary>
+
+A watermark is a moving threshold in event time asserting that no (or few) events older than it will still arrive, used to decide when an event-time window can be finalized and how late data is treated. Both Spark Structured Streaming and Flink implement watermarks; they are a streaming concept, not engine-specific. The micro-batch vs event-at-a-time difference affects emission timing, not the existence of watermarks.
+
+</details>
+
+<details><summary><b>46.</b> In a fund context, give an example where minute-class micro-batch is exactly right.</summary>
+
+An intraday dashboard of cumulative subscription/redemption flow per share class, refreshed every minute for the dealing desk, has no sub-second need and fits a Spark `ProcessingTime("60 seconds")` trigger on the existing cluster. The relaxed SLA means you reuse infrastructure and keep ops simple. Naming micro-batch here is the architect demonstrating right-sized engineering.
+
+</details>
+
+<details><summary><b>47.</b> In a fund context, give an example where sub-second event-at-a-time is genuinely required.</summary>
+
+A trading-adjacent intraday exposure or limit-breach monitor that must alert before the next order is placed needs sub-second reaction to each position change, which only an event-at-a-time engine like Flink reliably delivers. Here the latency floor of micro-batch would let breaches slip past the alert window. The architect names Flink because the SLA sits below the micro-batch floor.
+
+</details>
+
+<details><summary><b>48.</b> Why is most core fund-administration work (NAV strike, TA processing, EMT/EPT generation) NOT a sub-second streaming problem?</summary>
+
+NAV is typically struck once per valuation point (often daily), transfer-agency dealing cuts off at set times, and EMT/EPT files are produced on a periodic schedule — none of these are continuous sub-second flows. They are batch or minute/second-class at most, so micro-batch or pure batch is the honest fit. Recognising this prevents over-engineering a streaming spine where a scheduled batch suffices.
+
+</details>
+
+<details><summary><b>49.</b> A streaming job built for "real-time NAV" turns out to only need end-of-day output. What does the latency-class rubric tell you?</summary>
+
+It tells you the use case is minutes/daily-class, so a true-streaming engine is unjustified and even default micro-batch is heavier than needed — a scheduled batch or `AvailableNow` run is the right answer. The rubric guards against latency-class inflation driven by the word "real-time" rather than an actual SLA. Always pin the requirement to a number before naming the engine.
+
+</details>
+
+<details><summary><b>50.</b> What does exactly-once mean in Spark Structured Streaming, and what does it require from sources and sinks?</summary>
+
+Exactly-once means each input record affects the output state once despite failures and retries, achieved via the offset/commit logs plus deterministic re-execution of uncommitted batches. It requires a replayable source (e.g. Kafka, file source) so offsets can be re-read, and an idempotent or transactional sink so re-written output does not duplicate. Without both, you fall back to at-least-once in practice.
+
+</details>
+
+<details><summary><b>51.</b> Why does the lesson pair the engine choice with a delivery-guarantee discussion?</summary>
+
+Because latency and guarantee are linked levers: Spark's exactly-once lives in the micro-batch path, and its lowest-latency continuous mode only offers at-least-once, while Flink offers exactly-once via aligned checkpoints at some latency cost or at-least-once for lower latency. You cannot pick an engine/mode without stating which guarantee you keep. In regulated fund data, the guarantee often constrains the choice more than raw latency.
+
+</details>
+
+<details><summary><b>52.</b> For a regulated NAV-flow aggregation feeding accounting, which guarantee do you usually want, and what does that rule out?</summary>
+
+You almost always want exactly-once so totals are neither double-counted nor dropped, which rules out Spark's continuous-processing mode (at-least-once) and Flink's at-least-once mode. That pushes you to micro-batch with a replayable source and idempotent sink, or Flink with aligned exactly-once checkpoints. The guarantee requirement, not latency, drives the decision here.
+
+</details>
+
+<details><summary><b>53.</b> What is the risk of using Spark continuous processing for a financial aggregation despite its low latency?</summary>
+
+Its at-least-once guarantee means a failure/restart can replay records, double-counting amounts in an aggregation — unacceptable for monetary totals like fund flows or NAV components. It also supports only a narrow set of operations, so most real aggregations are not even expressible in it. For financial sums you keep exactly-once via micro-batch or Flink aligned checkpoints instead.
+
+</details>
+
+<details><summary><b>54.</b> How does the choice of state backend (heap vs RocksDB) interact with latency in either engine?</summary>
+
+Heap-based state (`HDFSBackedStateStore` in Spark, `HashMapStateBackend` in Flink) gives the fastest per-access latency but risks GC pauses and OOM as state grows, which can spike tail latency. RocksDB-based state bounds memory and scales to huge state but adds serialization and disk-access cost per operation. So the backend choice is itself a latency-vs-scale trade-off, separate from the engine model.
+
+</details>
+
+<details><summary><b>55.</b> A Spark streaming job's p99 latency periodically spikes by seconds. What state-related cause should you check first?</summary>
+
+Long JVM garbage-collection pauses from large heap-resident state in the `HDFSBackedStateStore`, which stall the whole executor and inflate the tail. Check GC logs and state-store size; if state is large, switch to the RocksDB state store to move state off-heap. The mean may look fine while p99 suffers, so always inspect the tail when chasing latency SLAs.
+
+</details>
+
+<details><summary><b>56.</b> Why does the lesson insist you "name the engine," not just the latency class?</summary>
+
+Because the architect's deliverable is an actionable decision, and a latency class only becomes actionable when tied to a concrete engine (and mode/guarantee) the team will operate. Naming the engine forces you to confront ops profile, guarantee, and existing-cluster reuse, not just the abstract SLA. "Seconds-class" is an observation; "Spark micro-batch at 30s ProcessingTime, exactly-once" is a decision.
+
+</details>
+
+<details><summary><b>57.</b> What does "rebuild one Flink aggregation in Spark Structured Streaming on the existing cluster" teach you?</summary>
+
+It forces a like-for-like comparison: you implement the same windowed aggregation in both engines, then measure latency, code volume, and ops burden directly rather than arguing from theory. Doing it on the existing Spark cluster also surfaces the real reuse benefit (no new cluster) versus Flink's per-job model. The exercise produces evidence for the half-page comparison note.
+
+</details>
+
+<details><summary><b>58.</b> What is the danger of defaulting all streaming work to Flink "because it's true streaming"?</summary>
+
+You take on per-job cluster proliferation, a second engine's operational complexity, and barrier-alignment/checkpoint tuning for use cases whose SLAs micro-batch already meets — pure over-engineering. For minute and many second-class workloads, Spark on the existing cluster is simpler and cheaper. True streaming is a tool for sub-second needs, not a default.
+
+</details>
+
+<details><summary><b>59.</b> What is the danger of defaulting all streaming work to Spark micro-batch "because we already have it"?</summary>
+
+For genuinely sub-second use cases the micro-batch latency floor means you silently miss SLAs no matter how you tune triggers, and continuous mode only buys latency by dropping to at-least-once and a narrow op set. The right move for sub-second is an event-at-a-time engine. Reusing what you have is only correct when the latency class allows it.
+
+</details>
+
+<details><summary><b>60.</b> How does Spark's micro-batch commit step contribute to its latency floor?</summary>
+
+At the end of every micro-batch Spark must commit progress — writing the offset/commit log and finalizing sink output — before results are durably visible and the next batch starts. This commit, plus query planning at batch start, is fixed overhead per cycle that cannot be driven to zero. It is precisely this per-batch bookkeeping that an event-at-a-time engine avoids on the per-record path.
+
+</details>
+
+<details><summary><b>61.</b> In Flink, why does at-least-once mode have lower checkpoint latency than exactly-once mode?</summary>
+
+At-least-once skips barrier alignment, so operators with multiple inputs do not pause to wait for barrier n on every input before snapshotting — they keep processing. Removing that alignment wait reduces the latency the checkpoint adds, at the cost of replaying some post-barrier records (duplicates) on recovery. You trade a duplicate-tolerant guarantee for faster, smoother checkpoints.
+
+</details>
+
+<details><summary><b>62.</b> What does "embarrassingly parallel" have to do with Flink's guarantees in at-least-once mode?</summary>
+
+Dataflows of only map/flatMap/filter-style operators (no multi-input operators or reshuffles) effectively give exactly-once even in at-least-once mode, because there is no alignment point where duplicates could be introduced. Alignment — and thus the duplicate risk — only arises at operators with multiple inputs or after a keyBy/shuffle. So topology shape, not just mode, affects the realised guarantee.
+
+</details>
+
+<details><summary><b>63.</b> A Flink job's checkpoints keep timing out under heavy load. What mechanism is designed to help, and what's the trade-off?</summary>
+
+Unaligned checkpointing (since Flink 1.11) lets barriers overtake buffered in-flight data by snapshotting that data as operator state, so checkpoints complete even under backpressure where alignment would stall. The trade-off is larger checkpoints and higher I/O pressure on the state backend. It is the go-to mitigation when aligned checkpoints cannot finish in time on slow/backpressured paths.
+
+</details>
+
+<details><summary><b>64.</b> What is the relationship between this lesson's micro-batch-vs-streaming choice and the Lambda-vs-Kappa debate?</summary>
+
+Lambda/Kappa is about whether you maintain separate batch and speed layers or one replayable-log stream path; this lesson is one level down, choosing the engine for the streaming (speed) path once you have one. You can run Kappa on either Spark micro-batch or Flink; the latency class decides which. The two decisions are related but distinct: architecture shape versus engine/latency-class.
+
+</details>
+
+<details><summary><b>65.</b> Why might a single platform legitimately use both Spark and Flink?</summary>
+
+Because different workloads fall in different latency classes: minute/second-class batch-and-stream reconciliation and reporting fit Spark on the shared cluster, while a specific sub-second alerting path fits Flink. Using each engine where its model is the right fit is sound architecture, not indecision. The architect names the engine per use case rather than forcing one engine everywhere.
+
+</details>
+
+<details><summary><b>66.</b> What does it mean that Spark continuous-processing checkpoints are "format-compatible with the micro-batch engine"?</summary>
+
+It means a query checkpointed under continuous mode can be stopped and restarted under the micro-batch engine (or vice versa) because the progress format is shared. This gives an escape hatch: you can prototype in low-latency continuous mode and fall back to robust exactly-once micro-batch without rebuilding checkpoint state. It reflects that the trigger is a runtime choice over a common progress representation.
+
+</details>
+
+<details><summary><b>67.</b> What does the `console` sink versus a production sink tell you when benchmarking these engines?</summary>
+
+The `console` (or `memory`) sink is convenient for inspecting output during development but does not exercise real commit/transaction overhead, so latency measured against it understates production end-to-end latency. Benchmark against the real sink you will use (e.g. Kafka, an Iceberg table) so the per-batch commit cost in Spark and the sink's exactly-once handshake in Flink are included. Otherwise your measured latency floor is artificially low.
+
+</details>
+
+<details><summary><b>68.</b> Why is throughput, not just latency, part of a fair micro-batch-vs-streaming comparison?</summary>
+
+An engine can hit a low latency at trivial input rates but collapse under realistic load, so you must report sustained throughput at the target latency rather than latency in isolation. Micro-batch amortises fixed overhead better at high throughput, while event-at-a-time keeps per-record latency low but must keep up with the arrival rate. Reporting both latency percentiles and sustained records-per-second is what makes the comparison honest.
+
+</details>
+
+<details><summary><b>69.</b> How would you justify an engine mapping "with numbers, not vibes" for a fund use case?</summary>
+
+State the SLA as a number (e.g. p99 ≤ 1 s), state the required guarantee (e.g. exactly-once for monetary totals), then show the engine/mode that meets both with measured end-to-end latency from your test. Add the ops cost (shared vs per-job cluster) as a concrete factor. The justification is a number-backed match of SLA + guarantee + ops to a named engine, not a preference.
+
+</details>
+
+<details><summary><b>70.</b> What is the first thing to check when a Spark Structured Streaming query is "running" but produces no output?</summary>
+
+Check the trigger and the source: with the default or `ProcessingTime` trigger, output appears only when a micro-batch fires and the source actually has new offsets, so verify new data is arriving and offsets are advancing in the streaming progress logs. Also confirm the output mode (append vs update vs complete) and any watermark are not withholding results. No new offsets means no batch, means no output.
+
+</details>
+
+<details><summary><b>71.</b> A Structured Streaming aggregation never emits results in append mode. What is the likely cause?</summary>
+
+Append output mode for an event-time aggregation only emits a window's result once the watermark has passed the window end, so if the watermark never advances (e.g. no event-time column or stale timestamps) results are never finalized. Either advance the watermark with real event-time data or use update/complete mode if appropriate. This is a classic append-plus-watermark gotcha, not an engine fault.
+
+</details>
+
+<details><summary><b>72.</b> After restarting a Spark streaming job, it reprocesses old data unexpectedly. What should you check first?</summary>
+
+Check that the checkpoint location is the same as before and intact — if it changed or was cleared, Spark has no committed offsets and may reprocess from the source's earliest available offsets. The checkpoint's offset/commit logs are what define "where we left off." Pointing a restart at a fresh checkpoint dir is the usual cause of unexpected reprocessing.
+
+</details>
+
+<details><summary><b>73.</b> A Flink job fails and on restart you see duplicate aggregation results. What configuration likely caused it?</summary>
+
+It was likely running in at-least-once checkpointing mode (or with an at-least-once sink), so post-barrier records were replayed as duplicates on recovery. Switch to exactly-once checkpointing with an exactly-once-capable sink (transactional/idempotent) if duplicates are unacceptable. For monetary fund aggregations, exactly-once is normally required.
+
+</details>
+
+<details><summary><b>74.</b> Why is changing parallelism (rescaling) easier to reason about in Flink than mid-stream in Spark?</summary>
+
+Flink supports rescaling from a savepoint, redistributing keyed state across new parallelism using key groups, so you stop at a savepoint, restart at the new parallelism, and resume with correct state. Spark micro-batch can change some parallelism but state-store partitioning and shuffle assumptions make arbitrary mid-stream rescaling more constrained. Savepoints are Flink's explicit tool for this lifecycle operation.
+
+</details>
+
+<details><summary><b>75.</b> What is a key group in Flink and why does it matter for rescaling?</summary>
+
+A key group is the atomic unit of keyed-state assignment; the number of key groups equals the job's maximum parallelism, and each parallel operator instance owns a contiguous range of key groups. On rescale, Flink reassigns whole key groups to new instances, which makes redistributing keyed state efficient and deterministic. Set max parallelism deliberately, because it bounds how far you can scale out later.
+
+</details>
+
+<details><summary><b>76.</b> Why does Spark's "one shared long-lived cluster" model affect noisy-neighbour risk for streaming jobs?</summary>
+
+Because batch, SQL, and streaming applications share the same cluster resources, a heavy batch job can steal CPU/memory and inflate your streaming job's batch durations and latency. You mitigate with scheduler pools/queues and resource isolation, but the coupling is inherent to the reuse model. Flink's per-job clusters avoid this by giving each job its own resources, at the cost of more clusters.
+
+</details>
+
+<details><summary><b>77.</b> How does the operational burden of upgrading a job differ between the two engines?</summary>
+
+In Flink you typically take a savepoint, deploy the new job version, and restore from the savepoint, getting an explicit, state-preserving upgrade path per job. In Spark you stop the query and restart against the same checkpoint, but compatibility of state across code changes can be more constrained, and the shared cluster may host many jobs. The note should compare these concrete upgrade procedures.
+
+</details>
+
+<details><summary><b>78.</b> If a use case needs seconds-class latency AND exactly-once on a replayable source, what is a clean Spark answer?</summary>
+
+Use Spark Structured Streaming in default micro-batch with a `ProcessingTime` trigger sized to the SLA (e.g. a few seconds), a replayable source like Kafka, and an idempotent/transactional sink — this delivers seconds-class latency with exactly-once. You stay on the existing cluster and reuse the codebase. Continuous mode is unnecessary and would sacrifice exactly-once.
+
+</details>
+
+<details><summary><b>79.</b> Why is "real-time" a dangerous word in a fund-platform requirements conversation?</summary>
+
+Because "real-time" is used loosely for anything from sub-second alerting to "fresh by end of day," and each maps to a wildly different latency class and engine. The architect must convert it to a number and a guarantee before designing, or risk building a Flink spine for a daily report or a micro-batch path for a true sub-second alert. Pin the SLA, then name the class and engine.
+
+</details>
+
+<details><summary><b>80.</b> How does the micro-batch interval interact with the cost of small files written to a sink like Iceberg?</summary>
+
+A very tight trigger interval produces many tiny output commits, which in a table format like Iceberg means lots of small files and metadata churn, hurting read performance and requiring frequent compaction. A relaxed interval batches more data per commit, producing fewer, larger files. So trigger choice trades latency against downstream file/compaction overhead — a real ops consideration.
+
+</details>
+
+<details><summary><b>81.</b> When measuring code volume and ops burden, why is a "half-page note" the deliverable rather than a benchmark suite?</summary>
+
+Because the goal is an architect-level decision artifact that captures the meaningful comparison (latency, code, ops) concisely enough to inform engine selection, not an exhaustive benchmark. The note forces you to distil measurements into a defensible recommendation per latency class. It is decision documentation, the same spirit as an ADR.
+
+</details>
+
+<details><summary><b>82.</b> Why might Flink's event-time and late-data handling feel more first-class than Spark's for complex streaming logic?</summary>
+
+Flink was designed event-at-a-time around event-time semantics, exposing fine-grained control via watermarks, allowed lateness, side outputs for late events, and keyed process functions with timers. Spark supports event time and watermarks too but expresses them within the batch-oriented DataFrame model, which can be less granular for arbitrary per-event logic. For intricate late-data flows, Flink's primitives are often a better fit.
+
+</details>
+
+<details><summary><b>83.</b> What is a "side output" in Flink and how does it relate to late fund events?</summary>
+
+A side output is a secondary stream from an operator used to route specific records — classically late events that arrive after their window plus allowed lateness — to a separate sink for inspection or correction. For fund flows, late price or order corrections can be diverted to a side output rather than silently dropped or wrongly aggregated. It is part of why Flink suits precise late-data handling.
+
+</details>
+
+<details><summary><b>84.</b> Does Spark Structured Streaming support handling late data, and how?</summary>
+
+Yes — you declare a watermark with `withWatermark("eventTime", "10 minutes")`, and Spark accepts late records within that bound into their windows while it can drop or finalize those beyond it. The watermark governs how long state is retained for a window and when results are emitted in append mode. So late-data handling exists in Spark; it is expressed within the micro-batch/watermark model.
+
+</details>
+
+<details><summary><b>85.</b> Why can a too-aggressive watermark cause incorrect fund-flow totals in either engine?</summary>
+
+A watermark that advances too fast declares lateness prematurely, so legitimately late price or order events are treated as too-late and excluded from their window, undercounting the flow total. Set the watermark/allowed-lateness to the real maximum out-of-orderness of the feed. This is a correctness gotcha shared by Spark and Flink, independent of the micro-batch-vs-streaming choice.
+
+</details>
+
+<details><summary><b>86.</b> What does the "Done when" criterion "explain why micro-batch has a latency floor that event-at-a-time does not" require you to articulate?</summary>
+
+You must explain that in micro-batch a record waits for its batch to be triggered, planned, executed, and committed — fixed per-cycle overhead that bounds minimum latency above zero — whereas event-at-a-time processes each record immediately on arrival with no batch boundary. The floor is structural, not a tuning artifact. Stating this clearly is the test of understanding the core distinction.
+
+</details>
+
+<details><summary><b>87.</b> How would you place "EMT/EPT file generation for distributors" in the latency-class rubric?</summary>
+
+EMT (European MiFID Template) and EPT (European PRIIPs Template) files are produced on a periodic schedule (e.g. monthly/quarterly or on data change), so this is firmly batch/minutes-class with no streaming need at all. A scheduled batch job or `AvailableNow` run is the fit; neither micro-batch streaming nor Flink is warranted. Recognising file-drop cadences as batch prevents streaming over-engineering.
+
+</details>
+
+<details><summary><b>88.</b> How would you place "SWIFT message processing for settlement" in the latency-class rubric?</summary>
+
+Inbound SWIFT settlement messages arrive as a continuous-ish event flow that often needs prompt (seconds-class) processing for status updates and exception handling, fitting micro-batch streaming with a short trigger, or Flink if a specific path needs sub-second reaction. The exact class depends on the downstream SLA for acknowledgements/exceptions. Convert the operational SLA to a number, then pick the engine.
+
+</details>
+
+<details><summary><b>89.</b> How would you place "intraday position/exposure monitoring feeding a risk limit" in the latency-class rubric?</summary>
+
+If the limit must be enforced before the next action (trade/order), it is sub-second-class and points to an event-at-a-time engine like Flink; if it is an informational refresh every minute, it is minutes-class and Spark micro-batch suffices. The same nominal feature can sit in different classes depending on whether it gates an action. Always tie the class to the consequence of latency.
+
+</details>
+
+<details><summary><b>90.</b> Why is the guarantee question often more binding than latency in regulated fund data?</summary>
+
+Because mis-stating monetary aggregates (double-counted or dropped flows/NAV components) is a correctness and compliance failure, exactly-once is frequently non-negotiable, which immediately rules out at-least-once-only modes regardless of how fast they are. Latency targets in fund admin are often relaxed (minutes/seconds), so the guarantee, not speed, usually decides the engine/mode. The architect states the guarantee first.
+
+</details>
+
+<details><summary><b>91.</b> What is the difference between "trigger interval" and "checkpoint interval" in these engines?</summary>
+
+In Spark micro-batch the trigger interval governs how often a batch runs and thus latency, while checkpointing happens per batch to persist progress; in Spark continuous mode the `Continuous("…")` interval is purely a checkpoint cadence, not a batch cadence. In Flink there is no trigger interval (event-at-a-time), and the checkpoint interval governs snapshot frequency for fault tolerance. Conflating these two intervals is a common source of confusion.
+
+</details>
+
+<details><summary><b>92.</b> How does increasing the Flink checkpoint interval affect latency and recovery?</summary>
+
+A longer checkpoint interval reduces per-checkpoint overhead and can lower steady-state latency, but it increases the amount of work replayed (more records reprocessed from sources) after a failure, lengthening recovery and widening the at-least-once duplicate window if applicable. It is a recovery-cost-vs-runtime-overhead trade-off. Tune it to balance acceptable recovery time against checkpoint pressure.
+
+</details>
+
+<details><summary><b>93.</b> Why does processing-time-based output differ from event-time-based output, and which engine cares more?</summary>
+
+Processing-time logic emits based on when records are handled (wall clock), so results depend on system timing and are non-deterministic under reprocessing; event-time logic emits based on timestamps in the data, so reprocessing yields the same result. Both engines support both, but event-at-a-time engines like Flink expose richer event-time controls. For reproducible fund aggregations you prefer event-time semantics.
+
+</details>
+
+<details><summary><b>94.</b> A Spark streaming job is stable at a 5-second trigger but you tighten it to 200 ms and throughput collapses. Why?</summary>
+
+At 200 ms the fixed per-batch overhead (planning, scheduling, commit) is no longer amortised over enough data, so the engine spends most of its time on bookkeeping rather than useful work, and batches start overrunning the interval. This is the micro-batch floor manifesting as overhead-dominated batches. The fix is either a more relaxed interval or, for genuine sub-second needs, a different engine.
+
+</details>
+
+<details><summary><b>95.</b> What does "ops profile" mean as a comparison axis in this lesson?</summary>
+
+It is the operational shape of running the engine: cluster lifecycle (shared long-lived vs per-job), checkpoint/state storage and tuning, upgrade/rescale/recovery procedures, monitoring surface, and team familiarity. The lesson contrasts Spark's long-lived-cluster reuse against Flink's per-job clusters as the headline ops difference. The architect weighs ops profile alongside latency and guarantee, not after them.
+
+</details>
+
+<details><summary><b>96.</b> Why is "reuse the existing Spark cluster" itself a legitimate architectural argument?</summary>
+
+Because operating one engine and one cluster reduces toil, on-call surface, tooling sprawl, and hiring/skill needs — real costs that a second engine multiplies. When the latency class permits Spark, reuse is often the cheapest correct answer over the platform's lifetime. The architect counts operational simplicity as a first-class factor, not an afterthought.
+
+</details>
+
+<details><summary><b>97.</b> When is Flink's added operational complexity clearly worth it?</summary>
+
+When the use case is genuinely sub-second and/or needs rich per-event event-time logic (timers, side outputs, fine-grained state) that micro-batch cannot meet, the operational cost of per-job Flink clusters buys a capability Spark cannot provide. Here the complexity is justified by an SLA or semantic need, not by preference. The test is whether the latency class or logic actually requires event-at-a-time.
+
+</details>
+
+<details><summary><b>98.</b> How do you avoid building a sub-second Flink path that the business never actually needed?</summary>
+
+Insist that every "real-time/sub-second" requirement come with a measured SLA and a stated consequence-of-latency before you commit to an event-at-a-time engine; if the honest SLA is minutes or seconds, place it in that class and use Spark. The discipline is converting adjectives to numbers and matching them to the simplest engine that meets them. This is exactly the latency-class rubric in action.
+
+</details>
+
+<details><summary><b>99.</b> Summarise the one-sentence decision rule this lesson hands the architect.</summary>
+
+Place each use case in a latency class (minutes, seconds, sub-second) and required guarantee (exactly-once vs at-least-once), then name the simplest engine/mode that meets both — Spark micro-batch on the shared cluster for minutes/seconds-class exactly-once, and Flink event-at-a-time for sub-second or rich per-event needs. Justify with measured latency, code, and ops, not vibes. The latency floor of micro-batch is the structural reason sub-second forces event-at-a-time.
+
+</details>
+
+<details><summary><b>100.</b> Why does the lesson combine 1.2.2 (micro-batch) and 1.2.3 (true streaming) into one block?</summary>
+
+Because they are two ends of the same axis — micro-batch versus event-at-a-time — and you only understand each by contrast with the other. The architect's real deliverable is the comparison and the resulting placement rule, not either model in isolation. Studying them together yields the latency-class rubric that drives engine selection.
+
+</details>
