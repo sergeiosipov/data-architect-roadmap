@@ -226,7 +226,11 @@ def finalize(html: str, link_names: bool = True) -> str:
 
 # ---------------------------------------------------------------- Phase-0 quizzes
 QUIZ_DIR = root / "_quizzes"
-QUIZ_IDS = [f"0.{i}" for i in range(1, 13)]
+QUIZ_IDS_P0 = [f"0.{i}" for i in range(1, 13)]
+QUIZ_IDS_P1 = ["1.6.1", "1.6.3", "1.7.1", "1.8.1", "1.8.9", "1.5.1",
+               "3.2.1", "8.2.1", "8.2.4", "8.5.1", "1.10.1", "9.1.3"]
+QUIZ_IDS = QUIZ_IDS_P0 + QUIZ_IDS_P1
+QUIZ_PHASES = (0, 1)
 
 
 def _inline_code(s: str) -> str:
@@ -296,7 +300,7 @@ for fname in PHASE_FILES:
         clean_title = re.sub(r"—\s*T[123](?:/T[123])?\s*$", "", heading).strip(" —")
         body_html = finalize(md2html(body.strip()))
         nq = 0
-        if n == 0 and ids:
+        if n in QUIZ_PHASES and ids:
             qp = QUIZ_DIR / f"{ids[0]}.md"
             if qp.exists():
                 qpairs = parse_quiz(qp)
@@ -371,8 +375,8 @@ js = "window.PLAN = " + json.dumps(data, ensure_ascii=False) + ";"
 print(f"wrote docs/data.js ({len(js) // 1024} KB)")
 
 # ---------------------------------------------------------------- QUIZZES.md (GitHub-readable)
-qz = ["# Phase 0 — Self-test Question Banks\n",
-      "100 questions per foundation lesson. Click a question to reveal its answer. "
+qz = ["# Phase 0 & 1 — Self-test Question Banks\n",
+      "100 questions per lesson. Click a question to reveal its answer. "
       "These also appear inside each lesson in the [tracker app](https://sergeiosipov.github.io/data-architect-roadmap/).\n"]
 qtotal = 0
 for qid in QUIZ_IDS:

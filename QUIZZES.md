@@ -1,6 +1,6 @@
-# Phase 0 — Self-test Question Banks
+# Phase 0 & 1 — Self-test Question Banks
 
-100 questions per foundation lesson. Click a question to reveal its answer. These also appear inside each lesson in the [tracker app](https://sergeiosipov.github.io/data-architect-roadmap/).
+100 questions per lesson. Click a question to reveal its answer. These also appear inside each lesson in the [tracker app](https://sergeiosipov.github.io/data-architect-roadmap/).
 
 
 ## Phase 0 · 0.1 Linux, the command line & shell — 100 self-test questions
