@@ -25327,3 +25327,4827 @@ It violates "every model and column has a description" (the new column is undocu
 You write model and column descriptions (and reusable docs blocks) in versioned YAML reviewed in PRs alongside the SQL, optionally push them to the warehouse with `persist_docs`, declare exposures like the EMT output naming their consumers and owners, then run `dbt docs generate` and publish the site from CI. The result is always-current, self-service documentation where an analyst can trace any EMT field to its source without asking you. That self-service traceability — not the docs site itself — is the real governance deliverable.
 
 </details>
+
+
+## Phase 3 · 4.1.1 Distributed batch compute (Spark) — 100 self-test questions
+
+<details><summary><b>1.</b> What is the role of the Spark driver in a cluster application?</summary>
+
+The driver is the process that runs your `main()` and holds the `SparkSession`; it builds the logical and physical plans, schedules work by breaking the job into stages and tasks, and tracks their progress. It is the single coordination point — if the driver dies the whole application dies — so it must reach the cluster manager and every executor. A common gotcha is collecting a huge result with `df.collect()`, which pulls all data back to the driver's JVM and can OOM it.
+
+</details>
+
+<details><summary><b>2.</b> What is a Spark executor and what two things does it provide?</summary>
+
+An executor is a JVM process launched on a worker node that does the actual computation: it runs the tasks the driver assigns and provides memory for caching/shuffle data. Each executor has a fixed number of cores (task slots) and a heap, so total cluster parallelism is roughly `num_executors × cores_per_executor`. Sizing these wrong — too few fat executors or too many tiny ones — is one of the most common causes of slow or wasteful Spark jobs.
+
+</details>
+
+<details><summary><b>3.</b> Define the hierarchy jobs → stages → tasks in Spark.</summary>
+
+One Spark action (e.g. `count()`, `write()`) triggers a job; each job is split into stages at shuffle boundaries; each stage is a set of tasks, one per partition, that run the same code on different data. Tasks are the unit of parallel execution scheduled onto executor cores. Understanding this chain is the basis for reading the Spark UI: you trace a slow job to its slow stage, then to the straggler task.
+
+</details>
+
+<details><summary><b>4.</b> What exactly creates a stage boundary in Spark?</summary>
+
+A stage boundary is created by a wide transformation that requires a shuffle — data must be repartitioned across the network so rows with the same key land on the same task. Narrow transformations (`map`, `filter`, `select`) stay within a stage because each output partition depends on one input partition. So every `groupBy`, `join`, `distinct`, or `repartition` typically introduces a new stage.
+
+</details>
+
+<details><summary><b>5.</b> Why is the shuffle described as "where the money goes" in Spark?</summary>
+
+The shuffle writes intermediate data to local disk on the map side, transfers it across the network, and re-reads it on the reduce side, so it costs disk I/O, network, and serialization — the most expensive operations in a distributed job. Most slow and over-billed Spark jobs are dominated by one or two heavy shuffles, not by CPU. For a NAV pipeline, minimizing and balancing shuffles (avoiding needless `repartition`, broadcasting small dimensions) is usually the biggest single saving.
+
+</details>
+
+<details><summary><b>6.</b> What is a task in Spark and how many tasks does a stage have?</summary>
+
+A task is the smallest unit of work: it processes exactly one partition of the data within a stage and runs in one executor core slot. A stage has as many tasks as the stage's input has partitions, so a 200-partition shuffle produces a 200-task stage. This is why partition count directly controls parallelism and why "stuck at task 199 of 200" points to a single straggler partition.
+
+</details>
+
+<details><summary><b>7.</b> What is the difference between a wide and a narrow transformation?</summary>
+
+A narrow transformation produces output partitions that each depend on a single input partition (`map`, `filter`, `union`), so no data moves between nodes. A wide transformation produces output partitions that depend on many input partitions (`groupBy`, `join`, `repartition`), forcing a shuffle. Narrow transformations are pipelined within a stage; wide ones cut the job into separate stages.
+
+</details>
+
+<details><summary><b>8.</b> In the Spark architecture, what is the cluster manager's job?</summary>
+
+The cluster manager (YARN, Kubernetes, Spark standalone, or a vendor's like Databricks) allocates executor resources to the application — it grants the driver a set of executors with cores and memory. Spark itself is agnostic to which manager you use; the same job runs on any of them. The manager handles physical resource scheduling, while Spark's driver handles task scheduling within the granted resources.
+
+</details>
+
+<details><summary><b>9.</b> What does it mean that the DataFrame API is "lazy"?</summary>
+
+Transformations like `select`, `filter`, and `join` do not execute; they build up an unresolved logical plan describing the computation. Nothing runs until you call an action (`count`, `show`, `collect`, `write`), at which point Spark optimizes and executes the whole plan. This laziness lets Catalyst optimize across many operations at once, but it also means errors and timings surface at the action, not at the line where you wrote the transformation.
+
+</details>
+
+<details><summary><b>10.</b> Name three Spark actions and three transformations and explain the difference.</summary>
+
+Actions include `count()`, `collect()`, `show()`, `write()`, and `take()` — they trigger execution and return a value or write data. Transformations include `select()`, `filter()`, `withColumn()`, `join()`, and `groupBy()` — they are lazy and just extend the plan. The rule of thumb: if it returns a new DataFrame it's a transformation; if it returns a non-DataFrame result or side effect it's an action.
+
+</details>
+
+<details><summary><b>11.</b> A junior says their `df.filter(...)` line is slow but the program flew past it instantly — what's happening?</summary>
+
+Because transformations are lazy, the `filter` line only added to the plan and did no work, so it returned instantly; the time is actually spent at the next action that forces execution. To find the real cost you look at the action's job in the Spark UI, not the source line of the transformation. This lazy-evaluation gotcha is the single most common confusion for engineers coming from pandas.
+
+</details>
+
+<details><summary><b>12.</b> What is the difference between the logical plan and the physical plan?</summary>
+
+The logical plan is the abstract sequence of operations Catalyst derives from your DataFrame code, independent of how it runs; the physical plan is the concrete execution strategy — which join algorithm, which exchange (shuffle), which scan. Catalyst rewrites the logical plan with rule- and cost-based optimization, then selects a physical plan. You can inspect both with `df.explain(True)` to see the analyzed, optimized, and physical stages.
+
+</details>
+
+<details><summary><b>13.</b> What does `df.explain()` show and why is it the first tool for plan debugging?</summary>
+
+`df.explain()` prints the physical plan; `df.explain(True)` (or `explain(mode="extended")`) prints parsed, analyzed, optimized logical plans plus the physical plan. It reveals the chosen join strategy (`BroadcastHashJoin` vs `SortMergeJoin`), exchanges, and filter pushdown — before you run anything. It is the cheapest way to confirm Spark is doing what you intended without paying for a full execution.
+
+</details>
+
+<details><summary><b>14.</b> What is the Catalyst optimizer?</summary>
+
+Catalyst is Spark SQL's query optimizer that transforms the logical plan through rule-based rewrites (predicate pushdown, constant folding, projection pruning) and cost-based decisions, then generates an efficient physical plan. It is what lets the DataFrame and SQL APIs produce the same optimized execution. Because it optimizes the whole plan from one action, writing idiomatic DataFrame code usually beats hand-tuned RDD code.
+
+</details>
+
+<details><summary><b>15.</b> Give two concrete rewrites Catalyst performs automatically.</summary>
+
+Predicate pushdown moves filters as close to the data source as possible — e.g. pushing a `WHERE fund_id = 'X'` down into a Parquet/Iceberg scan so unmatched row groups are never read. Projection (column) pruning drops columns you never reference so only needed columns are read. Both reduce I/O before any compute happens, which is why selecting only the columns you need and filtering early still matters even though Catalyst helps.
+
+</details>
+
+<details><summary><b>16.</b> What is Adaptive Query Execution (AQE) and what changed in its default?</summary>
+
+AQE re-optimizes the physical plan at runtime using actual statistics gathered from completed shuffle stages, rather than relying only on compile-time estimates. It is controlled by `spark.sql.adaptive.enabled`, which has defaulted to `true` since Spark 3.2. This matters because AQE can fix planner mistakes — like a join planned as sort-merge that should have been a broadcast — that static optimization could not catch.
+
+</details>
+
+<details><summary><b>17.</b> Name the three main optimizations AQE applies at runtime.</summary>
+
+AQE (1) coalesces small post-shuffle partitions to avoid thousands of tiny tasks, (2) converts a sort-merge join to a broadcast hash join when runtime stats show one side is small enough, and (3) splits skewed partitions into sub-partitions to defuse straggler tasks. All three rely on real shuffle statistics that only exist at runtime. They reduce the manual tuning you'd otherwise do with shuffle-partition counts and broadcast hints.
+
+</details>
+
+<details><summary><b>18.</b> What does AQE's coalescing of post-shuffle partitions do, and which config drives the target size?</summary>
+
+After a shuffle, AQE merges adjacent small partitions so each task processes a sensible amount of data instead of many near-empty tasks, cutting scheduling overhead. The target is governed by `spark.sql.adaptive.advisoryPartitionSizeInBytes`, which defaults to 64 MB. This is why with AQE you can leave `spark.sql.shuffle.partitions` high and let AQE coalesce down rather than hand-tuning it per job.
+
+</details>
+
+<details><summary><b>19.</b> With AQE enabled, do you still need to set `spark.sql.shuffle.partitions` carefully?</summary>
+
+Far less so — AQE's coalescing uses your shuffle-partition count as an upper bound and merges down to the advisory size at runtime, so a generously high value (the default is 200) is usually fine. You set it high to give AQE room, not low. The old practice of hand-tuning it per job for partition skew is largely replaced by AQE on Spark 3.2+.
+
+</details>
+
+<details><summary><b>20.</b> What is a partition in Spark and why does partition count matter?</summary>
+
+A partition is a chunk of the dataset that one task processes; the number of partitions sets the maximum parallelism of a stage. Too few partitions underuses the cluster and risks OOM on large tasks; too many creates scheduling overhead and tiny tasks. The goal is partitions sized so each task handles a balanced, reasonable amount of data — neither a 4 GB straggler nor a million 1-row tasks.
+
+</details>
+
+<details><summary><b>21.</b> What is data skew in the context of a shuffle?</summary>
+
+Skew is when shuffle keys are unevenly distributed, so one or a few partitions receive far more rows than the rest. The stage can't finish until that oversized partition's task finishes, so the whole job waits on a single straggler. In fund data this is classic: one mega-fund or one hot `fund_id` holds most of the positions, so its partition dwarfs the others.
+
+</details>
+
+<details><summary><b>22.</b> Why does a 200-task stage "stall at task 199 of 200"?</summary>
+
+Because 199 tasks got balanced partitions and finished quickly, but the 200th got a skewed, oversized partition — a hot key — and runs far longer, holding up the whole stage. The symptom in the UI is a long task-duration tail: max far above median. This is the signature of skew, and the fix is to break up the hot key, not to add more nodes.
+
+</details>
+
+<details><summary><b>23.</b> What is salting and how does it fix a skewed join?</summary>
+
+Salting appends a random suffix (a "salt") to the hot key so its rows spread across many partitions instead of one; the other side of the join is replicated across the same salt values so matches still occur. This converts one giant straggler partition into several balanced ones. The cost is extra rows on the replicated side and added complexity, so you salt only the keys that are actually hot.
+
+</details>
+
+<details><summary><b>24.</b> Walk through salting a positions × fund-reference join where one `fund_id` is hot.</summary>
+
+On the skewed `positions` side, add a column `salt = floor(rand() * N)` and key on `(fund_id, salt)`; on the small `fund_ref` side, explode each row into N copies, one per salt value, keyed the same way. The join now spreads the hot fund's rows across N tasks instead of stalling on one. Choose N roughly proportional to how badly that fund dominates, and drop the salt column after the join.
+
+</details>
+
+<details><summary><b>25.</b> How does AQE's automatic skew-join handling work, and which two thresholds define a "skewed" partition?</summary>
+
+AQE detects a partition as skewed when its size exceeds both `skewedPartitionFactor × the median partition size` (factor default 5.0) and `skewedPartitionThresholdInBytes` (default 256 MB), then splits that partition into smaller sub-partitions handled by separate tasks. It is enabled by `spark.sql.adaptive.skewJoin.enabled` (default `true`). It often removes the need for manual salting, but only for sort-merge joins and only above those thresholds.
+
+</details>
+
+<details><summary><b>26.</b> When does manual salting still beat AQE skew-join handling?</summary>
+
+When the skew is below AQE's 256 MB threshold but still causes a meaningful straggler, when the join isn't a plain sort-merge join AQE can split, or when you need deterministic control in a regulated pipeline rather than runtime heuristics. AQE is the first thing to try, but it has thresholds and join-type limits. Knowing both lets you say in a review exactly why AQE did or didn't rescue a given job.
+
+</details>
+
+<details><summary><b>27.</b> What is the broadcast hash join strategy?</summary>
+
+In a broadcast hash join Spark ships the entire small table to every executor, building a local hash table, so the large table is joined with no shuffle of itself. It is the fastest join when one side is small because it eliminates the expensive shuffle of the big side. The risk is broadcasting something too large, which OOMs executors or the driver during the broadcast.
+
+</details>
+
+<details><summary><b>28.</b> What is the sort-merge join and when is it used?</summary>
+
+Sort-merge join shuffles both sides on the join key, sorts each partition, then merges them; it is Spark's default for joining two large tables. It scales to big-vs-big joins that can't be broadcast, but it pays for two shuffles plus sorting. Most heavy, slow joins in a Spark NAV pipeline are sort-merge joins, and they're where skew bites.
+
+</details>
+
+<details><summary><b>29.</b> What is `spark.sql.autoBroadcastJoinThreshold` and its default?</summary>
+
+It is the size threshold below which Spark automatically broadcasts a table in a join rather than using sort-merge; the default is `10485760` bytes (10 MB). Spark uses table size statistics to decide. Setting it to `-1` disables auto-broadcast entirely, which you might do to stop Spark broadcasting something whose size it underestimated and OOMs on.
+
+</details>
+
+<details><summary><b>30.</b> How do you force or prevent a broadcast join explicitly?</summary>
+
+Wrap the small side in `broadcast(df)` (from `pyspark.sql.functions`) or use the SQL hint `/*+ BROADCAST(t) */` to force it; raise or lower `spark.sql.autoBroadcastJoinThreshold` to change the automatic behavior, or set it to `-1` to disable auto-broadcast. Forcing is useful when Spark's size estimate is wrong — for instance a small fund-reference table whose stats are stale after a write.
+
+</details>
+
+<details><summary><b>31.</b> When does the planner pick the wrong join and broadcast a table that's too big?</summary>
+
+When table statistics are missing or stale, Spark may underestimate a side's size and broadcast it, causing executor OOM or a driver bottleneck while it collects the broadcast. This often happens after writing a table without refreshing stats, or with compressed columnar files whose on-disk size hides a large in-memory footprint. The fix is `ANALYZE TABLE`/refreshed stats, an explicit threshold, or disabling auto-broadcast for that query.
+
+</details>
+
+<details><summary><b>32.</b> What is the difference between `repartition()` and `coalesce()`?</summary>
+
+`repartition(n)` does a full shuffle to produce exactly `n` evenly-sized partitions and can increase or decrease partition count; `coalesce(n)` only reduces partitions by merging existing ones without a full shuffle. Use `repartition` to fix skew or increase parallelism, and `coalesce` to cheaply cut down many small partitions before a write. A gotcha: `coalesce` to a very small number can starve upstream parallelism because it pulls the narrow-dependency boundary back.
+
+</details>
+
+<details><summary><b>33.</b> Why might `repartition(col)` before a write be useful for an Iceberg/Parquet output?</summary>
+
+Repartitioning by the column you partition the table on (e.g. `valuation_date`) groups rows so each output partition writes to one table partition, avoiding many small files per partition directory. This reduces the small-file problem that slows later reads and metadata. The tradeoff is the extra shuffle, so you balance file-size health against shuffle cost.
+
+</details>
+
+<details><summary><b>34.</b> What are the main regions of Spark executor memory?</summary>
+
+Unified memory is split between execution memory (for shuffles, joins, sorts, aggregations) and storage memory (for cached data), which share one region and can borrow from each other; outside that sits user memory for your data structures and a reserved portion. The split between execution and storage is dynamic. Understanding it explains why heavy caching can squeeze out shuffle memory and trigger spill.
+
+</details>
+
+<details><summary><b>35.</b> What is "spill" in Spark and is it always bad?</summary>
+
+Spill is when a task's execution data (e.g. a sort or aggregation buffer) exceeds available execution memory and Spark writes it to local disk, then reads it back. It is a safety valve that prevents OOM, so it's not catastrophic, but heavy spill means slow disk I/O dominating the stage. In the UI, large "spill (memory)" and "spill (disk)" numbers on a stage are a sign to give the job more memory or reduce partition size.
+
+</details>
+
+<details><summary><b>36.</b> Distinguish `cache()` from `persist()` and state the default storage level for a DataFrame.</summary>
+
+`cache()` is shorthand for `persist()` with the default storage level; `persist(StorageLevel...)` lets you choose the level explicitly. For a DataFrame/Dataset the default is `MEMORY_AND_DISK` (not `MEMORY_ONLY` as it is for raw RDDs), because recomputing the columnar cache is expensive so Spark prefers to spill it to disk rather than drop it. This is a frequently-missed distinction in interviews and tuning.
+
+</details>
+
+<details><summary><b>37.</b> List the main persistence storage levels and what they trade off.</summary>
+
+`MEMORY_ONLY` keeps deserialized objects in heap (fast, but recomputes if it doesn't fit); `MEMORY_AND_DISK` spills overflow to disk instead of recomputing; the `_SER` variants store serialized bytes (less memory, more CPU); `DISK_ONLY` keeps everything on disk; `OFF_HEAP` stores serialized data off-heap. The `_2` suffix replicates each partition on two nodes for fault tolerance. You trade memory footprint against CPU and recompute risk.
+
+</details>
+
+<details><summary><b>38.</b> When is caching a DataFrame actually worthwhile?</summary>
+
+Cache only when the same DataFrame is reused by multiple actions or branches and recomputing it is expensive — otherwise the cache overhead is pure waste, and a single-action job never benefits. Caching also consumes storage memory that competes with execution memory, so over-caching can cause spill or slow shuffles. A common gotcha is caching then immediately using the data once; that's slower than not caching.
+
+</details>
+
+<details><summary><b>39.</b> A Spark job dies with `java.lang.OutOfMemoryError` — how do you debug "from the error upward"?</summary>
+
+First read which JVM died: driver OOM usually means a large `collect()`/broadcast pulled too much back, while executor OOM points to oversized partitions, skew, or too much cached data squeezing execution memory. Check the failed stage's task sizes and spill in the UI, look for a skewed partition or an over-large broadcast, then fix the cause (repartition, raise memory, lower broadcast threshold) rather than blindly increasing `--executor-memory`. The error's stack and the UI together localize whether it's data volume, skew, or a broadcast.
+
+</details>
+
+<details><summary><b>40.</b> Driver OOM vs executor OOM — what distinguishes their causes?</summary>
+
+Driver OOM typically comes from pulling data to the driver — `collect()`, `toPandas()`, very large broadcast tables, or huge query plans — because the driver's heap is small and not meant to hold data. Executor OOM comes from data-side pressure: a skewed partition too big to process, excessive caching, or wide aggregations exceeding execution memory. The fix differs: shrink what you bring to the driver vs rebalance/resize executor work.
+
+</details>
+
+<details><summary><b>41.</b> What does the Spark UI "Stages" tab tell you about a slow stage?</summary>
+
+It shows each stage's task count, duration distribution (min/median/max and percentiles), shuffle read/write sizes, and spill, so you can see at a glance whether tasks are balanced or one straggler dominates. A max task time far above the median signals skew; large shuffle read on one task confirms a hot partition. This is the core screen for the UI → stages → shuffle/skew → fix workflow.
+
+</details>
+
+<details><summary><b>42.</b> In the Spark UI, what evidence proves a skewed join (not "Spark is slow")?</summary>
+
+You point to the offending stage's task summary where one task's shuffle-read size and duration are many times the median while the rest finished early — a long tail with a single outlier. The stage timeline shows most tasks done and the job waiting on that one. That concrete max-vs-median gap and shuffle-read size is the evidence an architect cites instead of a vague "it's slow".
+
+</details>
+
+<details><summary><b>43.</b> What is the SQL tab in the Spark UI good for?</summary>
+
+The SQL/DataFrame tab shows each query's plan as a DAG with per-node metrics — rows, time, and which physical operators ran (e.g. `BroadcastHashJoin`, `Exchange`, `SortMergeJoin`) — so you confirm the chosen join strategy and where time went. It links the plan to actual runtime numbers, complementing `explain()` which only shows the plan. It's where you verify AQE actually converted a join or split a skew partition.
+
+</details>
+
+<details><summary><b>44.</b> How do you write to an Iceberg table from Spark, and what must be configured first?</summary>
+
+You configure an Iceberg catalog via `spark.sql.catalog.<name>` properties (the implementation class and a catalog `type` such as `hive`, `hadoop`, or `rest`), then write with SQL (`INSERT INTO`, `MERGE INTO`) or the DataFrame `writeTo(...)` API. The catalog tells Spark where table metadata lives. Without the catalog configured, Spark can't resolve the Iceberg table and you get a table-not-found error.
+
+</details>
+
+<details><summary><b>45.</b> What is the difference between Iceberg's `SparkCatalog` and `SparkSessionCatalog`?</summary>
+
+`SparkCatalog` exposes Iceberg tables under a dedicated catalog name you reference explicitly (e.g. `my_catalog.db.table`); `SparkSessionCatalog` wraps Spark's built-in session catalog so Iceberg tables coexist with non-Iceberg tables under the default `spark_catalog`. Use `SparkCatalog` for a clean Iceberg-only namespace and `SparkSessionCatalog` when you need Iceberg alongside existing Hive tables. Both are set through `spark.sql.catalog.*` configs.
+
+</details>
+
+<details><summary><b>46.</b> What does `MERGE INTO` do in Iceberg from Spark, and why is it central to a NAV pipeline?</summary>
+
+`MERGE INTO target USING source ON <cond> WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...` performs an atomic upsert, applying inserts, updates, and deletes in one transactional commit. For NAV data this is how you apply late-arriving corrections or restated positions without rewriting the whole table. It replaces fragile delete-then-insert patterns and gives you a clean, auditable snapshot per run.
+
+</details>
+
+<details><summary><b>47.</b> What is write-audit-publish (WAP) and which Iceberg/Spark setting enables it?</summary>
+
+WAP writes new data to a staged branch, audits/validates it, then publishes (fast-forwards the main branch) only if checks pass, so readers never see unvalidated data. In Iceberg you set `spark.wap.branch` (or `spark.wap.id`) so Spark writes commit to a branch instead of `main`. This pattern is the regulated-pipeline answer to "how do you guarantee a bad NAV never reaches consumers" and is the hook this lesson sets up for later.
+
+</details>
+
+<details><summary><b>48.</b> How does `spark.wap.branch` change where a Spark write lands?</summary>
+
+When `spark.wap.branch` is set to a branch name, Spark routes the table's writes to that Iceberg branch rather than the table's main line, creating staged snapshots you can query and validate in isolation. After your audit passes you publish by fast-forwarding `main` to that branch. This decouples "data written" from "data visible", which is exactly what an audited NAV publish needs.
+
+</details>
+
+<details><summary><b>49.</b> What does INSERT OVERWRITE's dynamic vs static partition behavior mean in Iceberg from Spark?</summary>
+
+Dynamic overwrite replaces only the partitions present in the incoming data, leaving other partitions untouched — ideal for reprocessing a single `valuation_date`. Static overwrite replaces the whole table (or an explicitly named partition predicate). Choosing the wrong one can wipe partitions you meant to keep, so for daily NAV reloads you almost always want dynamic, partition-scoped overwrite.
+
+</details>
+
+<details><summary><b>50.</b> What are the four main Spark deployment modes you should compare as an architect?</summary>
+
+Local mode (single JVM, for dev/test), standalone (Spark's own simple cluster manager), Kubernetes (executors as pods, the modern container-native option), and managed platforms like Databricks (Spark plus a control plane, autoscaling, and proprietary engines). They differ operationally in resource management, autoscaling, isolation, and cost model — not in your DataFrame code, which stays the same. The architect's job is picking the mode whose operations and bill fit the team.
+
+</details>
+
+<details><summary><b>51.</b> What is the difference between client and cluster deploy mode?</summary>
+
+In client mode the driver runs on the machine that submitted the job (e.g. your laptop or an edge node), convenient for interactive work but tying the job to that machine's lifetime and network; in cluster mode the driver runs inside the cluster, which is more robust for production batch jobs. The choice affects where logs appear and what happens if the submitting machine disconnects. Production scheduled NAV jobs typically run cluster mode.
+
+</details>
+
+<details><summary><b>52.</b> Why does local mode matter even though production is a cluster?</summary>
+
+Local mode runs the full Spark engine in one JVM with no cluster manager, so you can develop, unit-test, and reproduce plan/optimizer behavior on a laptop — the same DataFrame code and `explain()` output as production. It's the entire lab for this lesson before you scale up. The caveat: local mode hides shuffle-network and executor-sizing problems, so some issues only appear on a real cluster.
+
+</details>
+
+<details><summary><b>53.</b> What operationally changes when you move a Spark job from standalone to Kubernetes?</summary>
+
+On Kubernetes executors become pods scheduled by the K8s API server, so you gain container isolation, dynamic allocation, and integration with cluster autoscaling and namespaces/quotas; you also inherit K8s concerns like image management, RBAC, and pod scheduling. The Spark code is unchanged. The operational model shifts from Spark managing workers to Kubernetes managing pods, which is why many firms standardize on it.
+
+</details>
+
+<details><summary><b>54.</b> What does Databricks add on top of open-source Spark that an architect should know to challenge a quote?</summary>
+
+Databricks bundles managed Spark with autoscaling clusters, a notebook/workspace control plane, Unity Catalog governance, and the proprietary Photon vectorized engine; pricing is by DBU on top of cloud compute. To challenge a "just add nodes" or vendor quote you need to know cluster types, Photon's where-it-helps, and the DBU multiplier so you can compare against self-managed Spark. The lock-in and cost model, not raw Spark capability, are the decision levers.
+
+</details>
+
+<details><summary><b>55.</b> What is Photon and when does it help?</summary>
+
+Photon is Databricks' C++ vectorized query engine that accelerates SQL and DataFrame workloads by processing columnar batches with SIMD, helping most on scan-, filter-, join-, and aggregation-heavy analytical queries. It does not accelerate arbitrary Python UDFs and carries a higher DBU rate. So the architect's question on a quote is whether the workload is the kind Photon speeds up enough to justify its premium.
+
+</details>
+
+<details><summary><b>56.</b> A nightly NAV Spark job takes four hours when it could take twenty minutes — what is your diagnostic order?</summary>
+
+Go UI → find the dominant job → its slowest stage → inspect the stage's task distribution and shuffle for skew (max ≫ median) or excessive shuffle/spill → then apply the targeted fix (broadcast a small dimension, salt or let AQE split the hot key, fix partitioning). You quantify before/after with stage timings. The point is a methodical UI-driven diagnosis, never "add nodes" without evidence.
+
+</details>
+
+<details><summary><b>57.</b> Why is "just add more nodes" usually the wrong answer to a skewed Spark job?</summary>
+
+Skew means one task is overloaded; adding executors gives more idle slots but the single straggler partition still runs on one task, so wall-clock barely improves while the bill rises. You must rebalance the data (salt, AQE skew split, broadcast) so work spreads across tasks. Recognizing this lets an architect push back on a vendor's reflexive scale-up recommendation.
+
+</details>
+
+<details><summary><b>58.</b> When is DuckDB on one node the right tool instead of a Spark cluster?</summary>
+
+When the data fits comfortably on a single machine (roughly tens of GB, well under ~100 GB) and the workload is a self-contained query, a single-node columnar engine like DuckDB avoids cluster startup, shuffle-network, and scheduling overhead entirely and often wins on wall-clock and cost. Spark's distribution only pays off when data genuinely exceeds one node or you need its ecosystem. The rule of thumb: don't pay the distributed tax for single-node-size data.
+
+</details>
+
+<details><summary><b>59.</b> What concrete numbers would you cite to argue Spark is the wrong tool for a given job?</summary>
+
+You compare your own runs: DuckDB wall-clock and peak RAM on one node versus the Spark job's wall-clock plus cluster-minutes (and therefore cost), for the same NAV computation on the same data. If DuckDB finishes faster and cheaper because the data fits in memory and there's no shuffle benefit, that's the evidence. Architects win these arguments with measured numbers from their own benchmark, not assertions.
+
+</details>
+
+<details><summary><b>60.</b> What is a broadcast variable's lifecycle risk in a long-running job?</summary>
+
+A broadcast (whether an explicit broadcast variable or a broadcast-join table) is held in executor memory for the life of its use, so broadcasting a too-large or growing table can accumulate memory pressure and contribute to OOM. If a "small" reference table grows past the threshold over time, a job that worked yesterday can OOM today. Re-checking broadcast sizes and stats is part of operating the pipeline, not a one-time setup.
+
+</details>
+
+<details><summary><b>61.</b> What does `spark.sql.shuffle.partitions` control and what is its default?</summary>
+
+It sets the number of partitions produced by shuffles in Spark SQL/DataFrame operations (joins, aggregations); the default is 200. Too low underuses a big cluster; too high makes tiny tasks. With AQE on, you can leave it high and let coalescing right-size partitions, so it's now more of a ceiling than a precise knob.
+
+</details>
+
+<details><summary><b>62.</b> Why can the same Spark code give different physical plans on two clusters?</summary>
+
+Physical plans depend on runtime configuration and statistics: `autoBroadcastJoinThreshold`, AQE settings, available memory, table stats, and Spark version all influence join choice, partitioning, and AQE rewrites. So a join that broadcasts on one cluster may sort-merge on another with a lower threshold or stale stats. This is why you debug with that environment's `explain()` and UI, not assumptions.
+
+</details>
+
+<details><summary><b>63.</b> What is predicate pushdown into an Iceberg/Parquet scan and why does it save money?</summary>
+
+Predicate pushdown sends your filter (e.g. `WHERE valuation_date = '2026-06-12'`) down to the file format and table metadata so Spark skips row groups, files, and partitions that can't match, reading far less data from object storage. With Iceberg's partition and column-level stats, entire data files are pruned before any compute. Less I/O from MinIO/S3 is often the biggest single cost lever in a lakehouse Spark job.
+
+</details>
+
+<details><summary><b>64.</b> What is the difference between partition pruning and predicate pushdown?</summary>
+
+Partition pruning eliminates whole partition directories/files using the table's partition columns (e.g. skip every date but the one queried); predicate pushdown additionally filters within files using column statistics and the file format's skipping. Pruning is coarse (partition level) and pushdown is fine (row-group/page level). Together they minimize bytes read, which is why partitioning a NAV table by `valuation_date` pays off.
+
+</details>
+
+<details><summary><b>65.</b> A join produces far more output rows than expected and the job explodes — what's the likely cause?</summary>
+
+A key that isn't unique on one side (or nulls/duplicates in the join key) produces a cartesian-like fan-out, multiplying rows and inflating shuffle and output. Check key cardinality and for duplicate or null keys before blaming Spark. In fund data this happens when a reference table has multiple rows per `fund_id` (e.g. by share class) and the join condition forgot a column.
+
+</details>
+
+<details><summary><b>66.</b> Why can nulls in a join key create skew?</summary>
+
+All null-keyed rows hash to the same partition in a shuffle, so a column with many nulls dumps them onto one task, creating a hot partition exactly like a single hot key. The fix is to filter or specially handle nulls before the join, or use a null-safe strategy. It's a frequently-missed skew source because the "hot key" is null, not a real value.
+
+</details>
+
+<details><summary><b>67.</b> What does a "straggler task" look like in the stage timeline and what causes it besides skew?</summary>
+
+A straggler is one task whose bar in the timeline extends well past the others; besides data skew it can come from a slow or failing executor node, disk pressure causing heavy spill, or GC pauses on that JVM. The UI's per-task metrics (GC time, spill, shuffle read) tell you which. So you distinguish data skew (big shuffle read on that task) from infrastructure skew (one bad node) before fixing.
+
+</details>
+
+<details><summary><b>68.</b> How does Spark achieve fault tolerance for a lost executor mid-job?</summary>
+
+Spark tracks lineage — the deterministic transformations needed to recompute any partition — so when an executor is lost it reschedules that partition's tasks on another executor and recomputes from the last available shuffle output or source. Cached data with replication (`_2` levels) survives one node loss without recompute. This is why a transient node failure usually retries rather than killing the whole job.
+
+</details>
+
+<details><summary><b>69.</b> What does it mean that Spark uses lazy lineage rather than materializing every step?</summary>
+
+Because transformations build a lineage graph and only actions execute it, Spark can recompute any lost partition from its lineage instead of needing intermediate results saved to disk. This is the basis of fault tolerance and of whole-plan optimization. The tradeoff is that without caching, reusing a DataFrame across actions recomputes the lineage each time.
+
+</details>
+
+<details><summary><b>70.</b> Why might caching a DataFrame that's used once actually slow the job down?</summary>
+
+Materializing the cache costs memory and time, and if the DataFrame is consumed by only one action you pay that cost without any reuse benefit — and you may evict other useful data or trigger spill. Caching only helps when the same computed result is read multiple times. The gotcha is "cache everything" cargo-culting; cache deliberately where the lineage is reused.
+
+</details>
+
+<details><summary><b>71.</b> What is `spark.sql.adaptive.advisoryPartitionSizeInBytes` for?</summary>
+
+It tells AQE the target size for shuffle partitions after coalescing — Spark merges small partitions toward this size so tasks aren't tiny; the default is 64 MB. Raising it produces fewer, larger tasks; lowering it produces more, smaller ones. It's the main knob for tuning AQE's post-shuffle partition sizing without touching `spark.sql.shuffle.partitions`.
+
+</details>
+
+<details><summary><b>72.</b> Your broadcast join unexpectedly OOMs the executors — first thing to check?</summary>
+
+Check the actual size of the "small" side versus `spark.sql.autoBroadcastJoinThreshold` and its current table statistics — Spark may have under-estimated it (stale stats, compressed columnar files) and broadcast something too large. The immediate mitigations are to refresh stats, lower the threshold, or set it to `-1` to force a sort-merge join for that query. Confirm in `explain()` which side is being broadcast.
+
+</details>
+
+<details><summary><b>73.</b> How can stale table statistics cause a bad plan, and how do you refresh them?</summary>
+
+Catalyst uses size and row-count stats to choose join strategies and broadcast candidates; if stats are missing or stale after a write, it can mis-size a table and pick sort-merge when broadcast was right, or vice versa. You refresh with `ANALYZE TABLE <t> COMPUTE STATISTICS` (and `FOR COLUMNS` for column stats), or rely on AQE which uses runtime stats instead. Keeping stats fresh is part of operating a stable pipeline.
+
+</details>
+
+<details><summary><b>74.</b> What is the role of the DAG scheduler vs the task scheduler in the driver?</summary>
+
+The DAG scheduler turns the logical plan into a DAG of stages split at shuffle boundaries and submits stages in dependency order; the task scheduler then assigns each stage's tasks to executor slots and handles retries and locality. Together they implement jobs → stages → tasks. Understanding the split clarifies why a stage waits (its parent shuffle) versus why a task is slow (scheduling/skew).
+
+</details>
+
+<details><summary><b>75.</b> What is data locality and why does it affect task scheduling?</summary>
+
+Locality is how close a task runs to its input data — process-local, node-local, rack-local, or any — and Spark prefers scheduling tasks where the data already resides to avoid network transfer. With object storage (S3/MinIO) most reads are "any" locality, so locality matters less than it did with HDFS. It still influences cached-partition reuse and shuffle reads.
+
+</details>
+
+<details><summary><b>76.</b> Why is `collect()` dangerous and what should you use instead for inspection?</summary>
+
+`collect()` pulls every row to the driver's JVM, which OOMs the driver on large results since the driver heap is small and not meant to hold data. For inspection use `show(n)` or `take(n)` to bring back a bounded sample, and write full results to storage rather than collecting them. This is a top cause of driver OOM in notebooks.
+
+</details>
+
+<details><summary><b>77.</b> What does `df.show()` actually trigger under the hood?</summary>
+
+`show()` is an action that runs a job to compute and return the first rows (default 20), so it forces execution of the whole lazy plan up to a `limit`. Because it's an action, it's also where transformation errors and timings surface. Spark can short-circuit by reading only enough partitions to fill the requested rows, so `show()` is cheaper than `collect()` but still a real execution.
+
+</details>
+
+<details><summary><b>78.</b> How does columnar storage (Parquet/Iceberg) interact with Spark's optimizer to reduce work?</summary>
+
+Columnar formats let Spark read only the referenced columns (projection pruning) and skip row groups via min/max statistics (predicate pushdown), so Catalyst's pruning translates directly into less I/O. Iceberg adds table-level metadata for partition and file pruning on top. The result is that selective queries on wide NAV/holdings tables read a small fraction of the bytes.
+
+</details>
+
+<details><summary><b>79.</b> What's the difference between `union()` and `join()` in terms of shuffle cost?</summary>
+
+`union()` is a narrow transformation that concatenates partitions with no shuffle (it just stacks rows), while `join()` is wide and shuffles both sides on the key (unless one is broadcast). So unioning daily NAV files is cheap, but joining holdings to reference data is where shuffle cost and skew appear. Knowing which operations shuffle is half of reading a plan.
+
+</details>
+
+<details><summary><b>80.</b> Why might increasing `--executor-memory` not fix a job's OOM?</summary>
+
+If the OOM is caused by skew (one partition too big for any reasonable heap) or by a too-large broadcast, more memory per executor just delays the failure or wastes resources, because the problem is data imbalance, not total memory. The real fix is to rebalance the data (salt/AQE) or shrink the broadcast. Throwing memory at a skew problem is a classic anti-pattern.
+
+</details>
+
+<details><summary><b>81.</b> What does the "shuffle read" metric on a task tell you?</summary>
+
+Shuffle read is the volume of data a reduce-side task pulled from map-side outputs over the network; a task with shuffle read far above the median is processing an oversized partition — the signature of skew. Comparing shuffle-read across tasks in a stage is how you prove which partition is hot. Large total shuffle read across the stage also flags a join or aggregation you might reduce or broadcast away.
+
+</details>
+
+<details><summary><b>82.</b> How does `MERGE INTO` give you auditability that delete-then-insert does not?</summary>
+
+`MERGE INTO` commits inserts, updates, and deletes as one atomic Iceberg snapshot, so the table moves cleanly from one consistent version to the next and you can time-travel to any prior snapshot. Delete-then-insert is two non-atomic steps that can leave the table half-updated and harder to audit. For regulated NAV restatements, the single atomic, snapshotted commit is the audit trail.
+
+</details>
+
+<details><summary><b>83.</b> What is an Iceberg snapshot and how does it relate to a Spark write?</summary>
+
+Each successful Spark write to an Iceberg table creates a new immutable snapshot capturing the table state and a summary of the operation; readers see a consistent snapshot and you can time-travel or roll back to earlier ones. This is what makes Iceberg writes atomic and auditable. In WAP, snapshots created on a branch are exactly what you validate before publishing to main.
+
+</details>
+
+<details><summary><b>84.</b> Why does writing many small files to Iceberg from Spark hurt later reads?</summary>
+
+Each small file adds metadata and a per-file open/read cost, so a table with thousands of tiny files has slow planning and scan performance and bloated metadata. Spark creates one output file per task per partition, so high task counts plus many table partitions multiply files. The mitigations are repartitioning by the partition column before write and periodic compaction.
+
+</details>
+
+<details><summary><b>85.</b> What does `writeTo(...).append()` vs `.overwritePartitions()` do for an Iceberg table in the DataFrame API?</summary>
+
+`append()` adds the DataFrame's rows as a new snapshot without touching existing data; `overwritePartitions()` (dynamic overwrite) replaces only the partitions present in the DataFrame, leaving others intact. For a daily NAV reload you typically `overwritePartitions()` so reprocessing one `valuation_date` doesn't disturb history. Choosing `append()` when you meant to replace causes duplicate rows for that date.
+
+</details>
+
+<details><summary><b>86.</b> How would you verify, before running, that Spark will broadcast your small fund-reference table?</summary>
+
+Run `df.explain()` on the join and look for `BroadcastHashJoin` with a `BroadcastExchange` on the reference side; if you instead see `SortMergeJoin`, the table is over the threshold or its stats are missing. You can then force it with `broadcast()` or fix stats. Checking the plan first avoids paying for a full run to discover the wrong join.
+
+</details>
+
+<details><summary><b>87.</b> What is the difference between `cache()` taking effect lazily vs eagerly?</summary>
+
+`cache()`/`persist()` only mark the DataFrame for caching; the data is actually materialized the first time an action reads it, so the first action pays the full cost and later ones benefit. If you want to force population immediately you trigger an action like `df.count()` after caching. Forgetting this leads people to think the cache "isn't working" when really nothing has read it yet.
+
+</details>
+
+<details><summary><b>88.</b> Why can a `groupBy().agg()` on a high-skew key be slow even without a join?</summary>
+
+Aggregation also shuffles rows by the grouping key, so a dominant key (one mega-fund) sends a huge partition to one reduce task — the same straggler problem as a skewed join. Partial aggregation helps but can't fully fix extreme skew. AQE skew handling and salting the aggregation key are the same tools you'd use for the join case.
+
+</details>
+
+<details><summary><b>89.</b> What is map-side (partial) aggregation and why does it help?</summary>
+
+Spark pre-aggregates within each map task before the shuffle (a combiner), so it shuffles partial results instead of every raw row, drastically cutting shuffle volume for `sum`, `count`, `avg`, etc. This is automatic for standard aggregations on the DataFrame API. It's why a `groupBy().sum()` is far cheaper than collecting raw rows, though it can't rescue a single dominant key's final partition.
+
+</details>
+
+<details><summary><b>90.</b> How do you decide executor count and cores per executor at a high level?</summary>
+
+Balance parallelism against overhead: enough total cores to run your partitions in a few waves, but not so many tiny executors that JVM/GC and shuffle-connection overhead dominate, nor so few fat ones that one GC pause stalls many cores and memory is wasted. A common starting point is moderate executors of 4–5 cores each. The right answer comes from observing stage parallelism and spill in the UI, then adjusting.
+
+</details>
+
+<details><summary><b>91.</b> What is "speculative execution" in Spark and when is it useful?</summary>
+
+Speculative execution launches duplicate copies of slow-running tasks on other executors and takes whichever finishes first, mitigating stragglers caused by a slow/flaky node (not by data skew). It's controlled by `spark.speculation`. It helps with infrastructure stragglers but wastes resources on data-skew stragglers, since a duplicate of an oversized partition is just as slow.
+
+</details>
+
+<details><summary><b>92.</b> A stage shows huge "spill (disk)" — what does that mean and how do you reduce it?</summary>
+
+It means execution memory was too small for the task's sort/aggregation/join buffers, so Spark wrote intermediate data to local disk and read it back, slowing the stage. You reduce spill by giving tasks more execution memory (more memory per core, fewer cores, or less caching competing for the unified region) or by making partitions smaller so each task's working set fits. Confirm by watching the spill metrics drop after the change.
+
+</details>
+
+<details><summary><b>93.</b> Why is the same DataFrame transformation code portable across local, K8s, and Databricks?</summary>
+
+Spark separates the logical API from execution: your DataFrame/SQL code compiles to the same Catalyst plan regardless of deployment, and only the cluster manager and resource layer differ underneath. This is why the lab runs the identical NAV transformation in local mode and on a cluster. The differences you must manage are operational — sizing, autoscaling, cost — not the transformation logic itself.
+
+</details>
+
+<details><summary><b>94.</b> What's the practical difference between `persist(MEMORY_AND_DISK_SER)` and `MEMORY_AND_DISK` on the JVM?</summary>
+
+`MEMORY_AND_DISK` stores deserialized objects — fast to read but larger and heavier on GC; `MEMORY_AND_DISK_SER` stores serialized bytes — more CPU to read/write but a much smaller footprint and less GC pressure. On memory-constrained executors the serialized level often fits more data and reduces GC stalls. In PySpark the distinction is blurred because Python objects are pickled regardless.
+
+</details>
+
+<details><summary><b>95.</b> How does AQE convert a sort-merge join to a broadcast join at runtime?</summary>
+
+After the input shuffle stages run, AQE has exact size statistics; if one side turns out smaller than the adaptive broadcast threshold it rewrites the remaining plan to a broadcast hash join, skipping the sort and the second shuffle. This rescues cases where compile-time estimates were too high to broadcast. It's a key reason AQE-on can outperform a hand-tuned static plan when stats were wrong.
+
+</details>
+
+<details><summary><b>96.</b> Why might you still see a `SortMergeJoin` even though one table looks small?</summary>
+
+The "small" table's estimated size may exceed `autoBroadcastJoinThreshold` (10 MB default) due to stale or missing stats or because its compressed on-disk size hides a larger uncompressed footprint, so neither static planning nor AQE chose to broadcast it. Check the estimated size in `explain()`, refresh stats, raise the threshold, or force `broadcast()`. The lesson: trust the plan's size estimate, then correct it.
+
+</details>
+
+<details><summary><b>97.</b> When reprocessing a single bad `valuation_date` in an Iceberg NAV table, what write pattern avoids touching other dates and stays auditable?</summary>
+
+Use a partition-scoped dynamic overwrite (`MERGE INTO` matched on date, or `writeTo(...).overwritePartitions()`/`INSERT OVERWRITE` with the date predicate) so only that date's partition is rewritten as a new atomic snapshot, leaving history untouched. Optionally stage it on a WAP branch and publish after validation. This gives a clean, reversible, time-travelable correction — exactly what an auditor expects for a restated NAV.
+
+</details>
+
+<details><summary><b>98.</b> What does `spark-submit` do and name two flags you'd set for a production batch job?</summary>
+
+`spark-submit` is the launcher that packages your application and submits it to a cluster manager, creating the driver and requesting executors. Key flags include `--master` (the cluster manager URL or `local[*]`), `--deploy-mode cluster`, and resource flags like `--executor-memory`, `--executor-cores`, and `--num-executors`. You also pass `--conf` to set Spark properties such as `spark.sql.shuffle.partitions`. Getting these right is how a scheduled NAV job gets the resources and deploy mode you intend.
+
+</details>
+
+<details><summary><b>99.</b> What is the Tungsten engine and why does it make Spark SQL fast?</summary>
+
+Tungsten is Spark SQL's execution backend that uses off-heap binary memory layouts, cache-aware processing, and whole-stage code generation to compile a chain of operators into tight JVM bytecode, cutting per-row virtual-call and boxing overhead. This is why DataFrame/SQL operations dramatically outperform equivalent Python RDD code. The flip side: dropping to a Python UDF breaks whole-stage codegen and reintroduces serialization cost, which is a common performance regression to watch for.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the architect's end-to-end method for an unfamiliar slow Spark job.</summary>
+
+Open the Spark UI, find the job triggered by the slow action, drill into its longest stage, and read the task distribution and shuffle metrics: a max-≫-median tail or huge single-task shuffle read means skew, heavy spill means memory pressure, an unexpected sort-merge means a missed broadcast. Apply the matching fix — salt or let AQE split the hot key, broadcast a small dimension, resize partitions/memory — then re-measure stage timings to prove the improvement. The discipline is evidence-first (UI → stages → shuffle/skew → fix), explainable to a junior, never "Spark is just slow" or "add nodes".
+
+</details>
+
+
+## Phase 3 · 5.3.2 DataFrame transformation layer (PySpark / Polars / Ibis) — 100 self-test questions
+
+<details><summary><b>1.</b> At the architect level, why is "SQL vs DataFrames, and which DataFrame runtime" framed as a standards decision rather than a personal preference?</summary>
+
+Because every team inherits whatever the architect blesses, so the choice propagates across the whole estate and is expensive to reverse. Get it wrong and you end up with the same NAV logic re-implemented in three dialects, no single source of truth, and no clean answer when an auditor asks where a number was computed. A standard fixes which transformation types live where, so reviewers can enforce it consistently instead of each team improvising.
+
+</details>
+
+<details><summary><b>2.</b> What is the single biggest "pandas habit" to unlearn when moving to PySpark?</summary>
+
+Row-by-row iteration — anything like `df.iterrows()`, `apply` over rows, or Python `for` loops over records. Spark is a distributed columnar engine, so row loops force data out of the JVM into Python one record at a time, which serializes everything and destroys parallelism. The PySpark idiom is to express the logic as column expressions that the engine can plan and run across partitions.
+
+</details>
+
+<details><summary><b>3.</b> What does "columnar thinking" mean in the context of PySpark transformations?</summary>
+
+It means describing what each output column should be as a function of input columns, using built-in expressions, rather than describing how to walk the rows. You build up `DataFrame` operations like `withColumn`, `select`, `filter`, joins, and aggregations that the Catalyst optimizer can rearrange and the engine can vectorize. The mental model is "transform whole columns at once" instead of "loop and mutate", which keeps work inside the optimized engine.
+
+</details>
+
+<details><summary><b>4.</b> In PySpark, what should replace a pandas `groupby().apply()` pattern when you need a per-group running calculation?</summary>
+
+A window specification — define a `Window` with `partitionBy` (and usually `orderBy`) and apply window functions like `row_number`, `lag`, `lead`, `sum`, or `rank` over it. Window specs let Spark compute per-partition ordered results natively without materializing each group into a Python object. `groupby-apply` style code typically drops you into a slow Python UDF path, which a window expression avoids entirely.
+
+</details>
+
+<details><summary><b>5.</b> Write the PySpark idiom for "running total of `amount` per `account`, ordered by `trade_date`".</summary>
+
+Define `w = Window.partitionBy("account").orderBy("trade_date")` then `df.withColumn("running_total", F.sum("amount").over(w))`. The `partitionBy` scopes the cumulative sum to each account and `orderBy` fixes the running order. This stays as a native expression so Spark evaluates it across the cluster without any Python round-trip per row.
+
+</details>
+
+<details><summary><b>6.</b> Why does a Python row loop "melt the cluster" while a native column expression on the same data does not?</summary>
+
+A Python row loop pulls every row across the JVM-to-Python boundary, serializes it, runs interpreted Python, and serializes it back, which serializes execution onto the driver or chokes executors and defeats parallelism. A native column expression is compiled by Catalyst, runs inside the JVM on whole partitions, and parallelizes naturally. The loop turns a distributed job into an effectively single-threaded one with massive serialization overhead.
+
+</details>
+
+<details><summary><b>7.</b> What is a `Window` spec in PySpark composed of, and which part is optional?</summary>
+
+It is composed of an optional `partitionBy` (which groups rows), an optional `orderBy` (which orders rows within each partition), and an optional frame clause such as `rowsBetween` or `rangeBetween`. Ranking and offset functions like `row_number`, `lag`, and `lead` require an `orderBy` to be meaningful. Without `partitionBy` the window spans the entire DataFrame, which can force everything into one partition and is a common performance trap.
+
+</details>
+
+<details><summary><b>8.</b> What is a Polars `LazyFrame` and how does it differ from a Polars `DataFrame`?</summary>
+
+A `LazyFrame` records the operations you request as a query plan instead of executing them immediately, whereas a `DataFrame` is eager and computes each step as it is called. The lazy plan is only run when you call `.collect()`, which lets the optimizer see the whole pipeline first. This deferred model is what enables predicate and projection pushdown and other whole-query optimizations.
+
+</details>
+
+<details><summary><b>9.</b> How do you create a Polars `LazyFrame`, and how do you finally execute it?</summary>
+
+Create one with a scan function such as `pl.scan_parquet(...)` or `pl.scan_csv(...)`, or by calling `.lazy()` on an existing eager `DataFrame`. You build up the transformation with the usual expressions and then call `.collect()` to run the optimized plan and get back a materialized `DataFrame`. Using `scan_*` rather than `read_*` is what keeps the source itself lazy so the optimizer can push filters and column selection down to the file reader.
+
+</details>
+
+<details><summary><b>10.</b> What is the difference between `pl.read_parquet` and `pl.scan_parquet`?</summary>
+
+`pl.read_parquet` eagerly loads the file into an in-memory `DataFrame` immediately, while `pl.scan_parquet` returns a `LazyFrame` that defers reading until `.collect()`. With `scan_parquet` the optimizer can push predicates and column projections into the read, so only the needed row groups and columns are pulled off disk. For large files this means you may read a fraction of the data instead of loading it all and then filtering.
+
+</details>
+
+<details><summary><b>11.</b> Name two query optimizations the Polars lazy optimizer performs and what each one buys you.</summary>
+
+Predicate pushdown moves `filter` conditions as close to the data source as possible so rows are dropped early, and projection pushdown selects only the columns the query actually needs so unused columns are never read or carried. Together they cut both I/O and the volume of data flowing through the pipeline. The optimizer also does things like common-subexpression elimination and slice pushdown, all enabled because lazy execution sees the whole plan before running it.
+
+</details>
+
+<details><summary><b>12.</b> How do you inspect a Polars lazy query plan without running it, and why would you?</summary>
+
+Call `.explain()` on the `LazyFrame` to print the optimized (and optionally the unoptimized) logical plan as text, or `.show_graph()` to render it visually. You do this to confirm the optimizer actually pushed your filters and projections down and to spot accidental full scans or missing pushdown before paying to execute. It is the Polars equivalent of reading a SQL `EXPLAIN` plan to validate your assumptions.
+
+</details>
+
+<details><summary><b>13.</b> What does Polars "streaming" execution give you, and when do you need it?</summary>
+
+Streaming processes the query in batches rather than holding all intermediate data in RAM, so it can handle datasets larger than memory on a single node. You reach for it when a `collect` would otherwise blow the machine's memory but the workload still fits comfortably on one box's disk and cores. It is the mechanism that lets one fat node stand in for a small Spark cluster on moderately large data.
+
+</details>
+
+<details><summary><b>14.</b> Around what data size does single-node Polars typically become a credible replacement for Spark, per the lesson?</summary>
+
+Below roughly 100GB, a single beefy node running Polars (especially lazy and streaming) often beats a Spark cluster because you avoid all distributed-execution overhead — shuffles, JVM startup, task scheduling, and serialization between nodes. Spark's value shows up when data genuinely exceeds what one node can hold or process in reasonable time. The architect's job is to know that crossover for their own data and not reach for a cluster reflexively.
+
+</details>
+
+<details><summary><b>15.</b> Why can a single-node tool like Polars beat a distributed engine on sub-100GB data?</summary>
+
+Distributed engines pay fixed costs — network shuffles, serialization between executors, task scheduling, and JVM overhead — that only pay off once the data is too big for one machine. On sub-100GB data those costs dominate, while Polars runs everything in one process with a vectorized, multi-threaded, Arrow-based engine and no network. So the "small" tool wins precisely because it skips the machinery designed for "big".
+
+</details>
+
+<details><summary><b>16.</b> What is Ibis, in one sentence, and what problem does it solve?</summary>
+
+Ibis is a portable Python dataframe library: one expression language that compiles to 20+ execution engines, so you write your transformation once and run it on DuckDB, Spark, BigQuery, Snowflake, Postgres, Polars, and more. It solves the problem of a multi-engine estate where the same logic would otherwise be rewritten per engine. You change the connection, not the analytical code, to switch backends.
+
+</details>
+
+<details><summary><b>17.</b> How does Ibis execute an expression — eagerly or deferred — and what happens under the hood for a SQL backend?</summary>
+
+Ibis uses deferred execution: building an expression just constructs a logical plan, and nothing runs until you trigger execution (for example `.execute()` or `.to_pandas()`). For SQL backends Ibis compiles that expression into a SQL string (using SQLGlot) and sends it to the engine to run. So the same Ibis code becomes BigQuery SQL on BigQuery and DuckDB SQL on DuckDB, each idiomatic to its target.
+
+</details>
+
+<details><summary><b>18.</b> What is the default Ibis backend, and why is that a sensible default for local development?</summary>
+
+The default backend is DuckDB, an in-process analytical database that needs no server and runs fast on a single machine. It lets you develop and test the same Ibis expressions locally that you will later run on a heavyweight cloud engine, "scaling up and out" without rewriting. DuckDB-as-default embodies Ibis's local-to-cloud portability story.
+
+</details>
+
+<details><summary><b>19.</b> In a multi-engine estate, what concretely does Ibis buy an architect?</summary>
+
+It buys one canonical definition of each transformation that runs across every engine in the estate, so NAV or enrichment logic is written and reviewed once instead of forked into Spark, Snowflake, and Postgres dialects. That collapses maintenance, removes dialect drift, and makes the "where was this number computed" question answerable. It also reduces lock-in, since moving an engine is a connection change rather than a rewrite.
+
+</details>
+
+<details><summary><b>20.</b> How does Ibis claim to avoid the usual performance penalty of an abstraction layer?</summary>
+
+Because Ibis does not execute the data itself — it compiles the expression to the backend's native language and the backend does the work, so you get performance "as good as the backend it is connected to". There is no Ibis runtime sitting in the data path adding overhead. The abstraction is at compile time, not at execution time.
+
+</details>
+
+<details><summary><b>21.</b> What library does Ibis use to turn expressions into SQL for SQL backends, and why does that detail matter?</summary>
+
+It uses SQLGlot to transpile the Ibis expression into a backend-specific SQL string. It matters because it means Ibis can emit dialect-correct SQL for many engines from one expression tree, and you can even inspect the generated SQL to audit exactly what will run. That inspectability is valuable in a regulated shop where you must show what query produced a figure.
+
+</details>
+
+<details><summary><b>22.</b> List the three runtimes this lesson asks you to implement the same transformation in, plus the SQL path.</summary>
+
+PySpark, Polars (lazy), and Ibis are the three DataFrame runtimes, and dbt SQL is the set-based SQL path you compare them against. The exercise is to implement one silver transformation in PySpark, Polars lazy, and dbt SQL and verify identical output on the same sample. Running the same logic three ways is what forces you to understand each engine's idioms and cost model.
+
+</details>
+
+<details><summary><b>23.</b> What is the "UDF cost model" and what are its three tiers from most to least expensive?</summary>
+
+The cost model ranks how a custom transformation is executed: a plain Python UDF is most expensive, a pandas/Arrow (vectorized) UDF is cheaper, and a native engine expression is cheapest. The cost is driven by how much data must cross the JVM-to-Python boundary and be serialized, and how much work runs in interpreted Python versus the optimized engine. The architect's rule is to push logic into native expressions whenever possible.
+
+</details>
+
+<details><summary><b>24.</b> Why is serialization called "the hidden tax" of Python UDFs in Spark?</summary>
+
+Because a Python UDF forces every input row to be serialized out of the JVM into a separate Python worker process, deserialized, processed in interpreted Python, then serialized back — and that round-trip is invisible in the code but dominates runtime. Native expressions never leave the JVM, so they pay none of it. The tax is "hidden" because the UDF looks like a one-line function call yet quietly moves all your data across a process boundary.
+
+</details>
+
+<details><summary><b>25.</b> How does a pandas (vectorized) UDF reduce the cost of a plain Python UDF?</summary>
+
+A pandas UDF transfers data in batches as Arrow record batches and hands the function a whole `pandas.Series` or `DataFrame` at once, so it amortizes the serialization and runs vectorized NumPy/pandas code instead of per-row Python. This drastically cuts the boundary-crossing overhead compared with a scalar Python UDF that processes one value at a time. It is still slower than a native expression but far better than the row-at-a-time path.
+
+</details>
+
+<details><summary><b>26.</b> What are Arrow UDFs in PySpark and how do they improve on pandas UDFs?</summary>
+
+Arrow UDFs operate directly on Arrow data without converting inputs into pandas or NumPy objects, preserving the columnar layout end to end and avoiding extra data copies. Per Databricks' benchmarks they run about 10% faster and use roughly 40% less memory than pandas UDFs, with better support for complex data types. They are a leaner replacement for pandas UDFs while still not matching a fully native expression.
+
+</details>
+
+<details><summary><b>27.</b> Why is a native Spark expression still faster than even an Arrow UDF?</summary>
+
+Because a native expression executes entirely inside the optimized JVM engine and never crosses the JVM-to-Python boundary at all, whereas any UDF — Arrow included — still ships data to a Python process and back. Eliminating the boundary removes both the serialization cost and the loss of Catalyst's ability to optimize across the operation. So the ordering "native > Arrow UDF > pandas UDF > Python UDF" reflects how much each one avoids leaving the engine.
+
+</details>
+
+<details><summary><b>28.</b> An architect is enforcing a standard: which transformation types belong in dbt SQL versus DataFrame code?</summary>
+
+Set-based work — joins, aggregations, filters, and declarative reshaping — belongs in dbt SQL because the warehouse optimizes it and it stays testable and lineage-tracked. Procedural row-level enrichment, complex iterative logic, and ML feature preparation belong in DataFrame code where an imperative API and richer libraries fit. The boundary is roughly "can it be expressed cleanly as a query?" — if yes, keep it in SQL; if it needs procedural logic, move it to DataFrames.
+
+</details>
+
+<details><summary><b>29.</b> Who enforces the SQL-vs-DataFrame layer ownership standard, and how in practice?</summary>
+
+The data architect owns the standard and enforces it through code review, templates, and the project's contribution guidelines, so reviewers can reject a procedural pandas blob that should have been a SQL model and vice versa. Without an owner the boundary erodes and logic scatters across layers. Enforcement is social and tooling-based: a written standard, plus reviewers and CI checks that hold the line.
+
+</details>
+
+<details><summary><b>30.</b> How would you answer the challenge "why not do everything in SQL?" for a fund transformation layer?</summary>
+
+SQL is ideal for set-based joins and aggregations and gives free lineage and testability in dbt, but it is a poor fit for procedural row-level enrichment, iterative logic, calling Python libraries, or ML feature prep, where DataFrame code is clearer and sometimes the only practical option. Forcing everything into SQL produces unreadable nested CTEs and brittle workarounds. The defensible standard keeps set-based logic in SQL and reserves DataFrames for genuinely procedural work, justified with timings.
+
+</details>
+
+<details><summary><b>31.</b> For a silver-layer EMT-style share-class enrichment of holdings, which engine and layer would you default to, and why?</summary>
+
+If it is mostly a set-based join of holdings to share-class reference data, default to dbt SQL in the warehouse for testability and lineage; if it involves procedural per-position logic that does not map cleanly to a query, move it to DataFrame code. EMT enrichment that is essentially a lookup-and-attach is a textbook SQL join. The decision should be backed by your own timings on the 1M-row and 50M-row samples, not by reflex.
+
+</details>
+
+<details><summary><b>32.</b> How do you prove that the PySpark, Polars, and dbt SQL implementations of one transformation are equivalent?</summary>
+
+Run all three on the same input sample and verify they produce identical output — same rows, same columns, same values — after sorting to a canonical order, since DataFrame engines do not guarantee row order. A practical check is to compare row counts, then a column-by-column equality or a hash of the sorted result. Any divergence usually reveals a subtle semantic difference such as null handling, join type, or numeric rounding that you must reconcile before trusting the standard.
+
+</details>
+
+<details><summary><b>33.</b> Why must you sort or canonicalize before comparing outputs of two DataFrame engines?</summary>
+
+Because DataFrame engines and distributed shuffles do not guarantee a stable row order, so two correct results can differ only in ordering and fail a naive equality check. Sorting on a deterministic key (or comparing as sets/hashes) removes order from the comparison. Skipping this step produces false "mismatch" alarms that send you debugging logic that is actually correct.
+
+</details>
+
+<details><summary><b>34.</b> When timing the same transformation on a 50M-row dataset versus a 1M-row sample, what pattern usually emerges?</summary>
+
+On the small 1M-row sample, single-node Polars and even local DuckDB typically win because Spark's fixed startup, scheduling, and shuffle costs dominate at that scale. On the 50M-row set the gap narrows and the winner depends on the operation's shuffle intensity and memory footprint, with Spark's distribution paying off as data grows. The point of measuring both is to locate your own crossover instead of assuming one engine is always best.
+
+</details>
+
+<details><summary><b>35.</b> A reviewer asks you to name the dataset size and shape where Polars beats Spark — what does a good answer contain?</summary>
+
+A good answer cites your own measured numbers, for example "on our ~X-row, Y-GB holdings table on a single Z-core node, Polars lazy ran in N seconds versus Spark's M, and held that lead up to ~100GB". It names size, shape, hardware, and the operation, not a generic claim. The "Done when" bar is explicitly that you can quote your own timings, which forces the standard to be evidence-based.
+
+</details>
+
+<details><summary><b>36.</b> What is the most common cause of a Polars lazy query reading far more data than expected?</summary>
+
+Predicate or projection pushdown not happening — usually because you used an eager `read_*` instead of `scan_*`, applied a filter after a `collect`, or used an operation the optimizer cannot push through. Inspecting `.explain()` shows whether the filter and column selection reached the scan node. Switching to `scan_parquet` and filtering before `collect` typically restores pushdown.
+
+</details>
+
+<details><summary><b>37.</b> A PySpark job is far slower than the equivalent SQL — first thing to check?</summary>
+
+Check whether the job contains a Python UDF (or a row-wise `apply`) that forces a JVM-to-Python serialization round-trip, since that is the classic cause of a DataFrame job underperforming native SQL. Look at the query plan and the stages for a `BatchEvalPython`/UDF stage. If found, the fix is to replace the UDF with a native expression or, failing that, an Arrow/pandas UDF.
+
+</details>
+
+<details><summary><b>38.</b> In a Spark job profile, how would you detect that a Python UDF is the bottleneck?</summary>
+
+In the Spark UI's SQL/DAG view you will see a Python evaluation stage (such as a `BatchEvalPython` or `ArrowEvalPython` node) and disproportionate time and data movement around it, with executors spending time in the Python worker rather than the JVM. High serialization/deserialization time and a stage that does not parallelize well are the tells. Removing the UDF and re-profiling, then comparing wall-clock and shuffle metrics, confirms it.
+
+</details>
+
+<details><summary><b>39.</b> What does the Spark plan node `ArrowEvalPython` versus `BatchEvalPython` tell you?</summary>
+
+`BatchEvalPython` indicates a plain (scalar) Python UDF running row-at-a-time through pickle serialization, while `ArrowEvalPython` indicates a vectorized pandas/Arrow UDF that transfers data in Arrow batches. Seeing `ArrowEvalPython` means you are already on the cheaper vectorized path; seeing `BatchEvalPython` is a flag to vectorize or go native. Either node means data is still leaving the JVM, so a native expression would remove it entirely.
+
+</details>
+
+<details><summary><b>40.</b> How do you read a PySpark physical plan, and what are you looking for?</summary>
+
+Call `df.explain()` (optionally `df.explain(True)` or `mode="formatted"`) to print the physical plan and look for `Exchange` nodes (shuffles), `*EvalPython` nodes (UDFs), the join strategy (broadcast vs sort-merge), and filter/scan pushdown. Excess shuffles and Python eval nodes are the usual performance smells. Reading the plan before optimizing tells you what is actually expensive instead of guessing.
+
+</details>
+
+<details><summary><b>41.</b> What is the difference between Spark's `withColumn` called in a long loop versus building expressions once?</summary>
+
+Calling `withColumn` hundreds of times in a Python loop builds a deeply nested logical plan that can make analysis and optimization slow or even blow the plan size, even though each call is "native". The idiom is to construct the columns in a single `select` with a list of expressions, or chain a few `withColumns` (plural) calls. So "native expressions" still require building the plan efficiently, not just avoiding UDFs.
+
+</details>
+
+<details><summary><b>42.</b> Why does the lesson say NAV logic ending up "in three dialects" is the failure mode to avoid?</summary>
+
+Because if the same NAV calculation is hand-written separately in Spark, Snowflake, and Postgres SQL, the three copies inevitably drift, produce subtly different numbers, and leave no authoritative definition. When an auditor or transfer agent disputes a figure, you cannot say which copy computed it or that they agree. A single owned definition — ideally one engine-portable expression or one dbt model — is the architectural fix.
+
+</details>
+
+<details><summary><b>43.</b> How does choosing Ibis differ from choosing Snowpark or the Databricks DataFrame API, in lock-in terms?</summary>
+
+Ibis is engine-portable: the same expression compiles to many backends, so swapping engines is a connection change. Snowpark and the Databricks DataFrame API are the same concepts rebranded but bound to one vendor's platform, so logic written in them is tied to Snowflake or Databricks respectively. Knowing this trade-off lets the architect decide consciously between portability and a vendor's integrated tooling rather than backing into lock-in.
+
+</details>
+
+<details><summary><b>44.</b> What is Snowpark, and what should an architect "evaluate" about it before adopting it?</summary>
+
+Snowpark is Snowflake's DataFrame-style API that runs transformation code inside Snowflake using familiar DataFrame and UDF concepts. The thing to evaluate is the lock-in trade-off: it is convenient and well-integrated, but the code is Snowflake-specific, so the architect weighs that against a portable approach like Ibis. The concepts are the same DataFrame ideas rebranded onto one platform.
+
+</details>
+
+<details><summary><b>45.</b> Why does running all three runtimes "via uv" matter for this exercise?</summary>
+
+Because `uv` gives you reproducible, isolated environments so PySpark, Polars, and Ibis (with conflicting transitive dependencies) can each be installed and run cleanly without polluting a global interpreter. The study plan mandates `uv run` for all Python, so each engine's job runs in a pinned environment you can reproduce later. That reproducibility also makes your timing comparisons fair and re-runnable.
+
+</details>
+
+<details><summary><b>46.</b> What does it mean that a Polars expression is "lazy" but Polars also has an eager API?</summary>
+
+It means Polars supports both: the eager `DataFrame` API runs each operation immediately for interactive convenience, while the lazy `LazyFrame` API records a plan and optimizes it before `.collect()`. The lazy path is where the query optimizer (predicate/projection pushdown, etc.) lives, so production transformations should generally use it. The eager API is fine for quick exploration where whole-query optimization does not matter.
+
+</details>
+
+<details><summary><b>47.</b> For a 50M-row holdings enrichment that is a simple join plus a few derived columns, what would you predict about Polars vs Spark and why?</summary>
+
+If the data fits one node's memory or streams comfortably, predict Polars wins on wall-clock because it avoids shuffle and JVM overhead for what is essentially a hash join and column math. Spark would only pull ahead if the join needs a large shuffle that exceeds one node's capacity. You confirm the prediction with measured timings rather than asserting it, per the lesson's "your own numbers" bar.
+
+</details>
+
+<details><summary><b>48.</b> What is "projection pushdown" and give a concrete example of its effect on a Parquet scan.</summary>
+
+Projection pushdown is the optimizer selecting only the columns the query needs and pushing that selection into the source read. For a wide Parquet holdings file with 80 columns where your query uses 5, projection pushdown means only those 5 columns' chunks are read off disk. That can cut I/O by an order of magnitude versus reading the whole file and selecting columns afterward.
+
+</details>
+
+<details><summary><b>49.</b> What is "predicate pushdown" and how does it interact with Parquet row-group statistics?</summary>
+
+Predicate pushdown moves filter conditions toward the data source so rows are eliminated as early as possible. With Parquet it can use per-row-group min/max statistics to skip entire row groups that cannot match the filter, so a `WHERE valuation_date = '2026-06-12'` may read only the relevant groups. The result is far less data decoded and carried through the pipeline.
+
+</details>
+
+<details><summary><b>50.</b> Why does the architect care that dbt SQL gives "free" lineage and testability, in the layer-ownership decision?</summary>
+
+Because dbt models declare dependencies (lineage) and support schema/data tests as first-class features, so set-based logic kept in SQL is automatically documented, graphed, and testable. DataFrame code does not get that for free — you must add lineage and tests yourself. That asymmetry is a strong reason to keep joins and aggregations in dbt SQL and reserve DataFrames for logic SQL cannot express cleanly.
+
+</details>
+
+<details><summary><b>51.</b> A pandas UDF returns wrong results only on large inputs but is fine on small samples — likely cause?</summary>
+
+A common cause is that a grouped or scalar pandas UDF receives data in Arrow batches and the function assumed it saw a whole group when it only saw a batch, so per-batch state (like cumulative computations or `.iloc[0]` assumptions) breaks once data spans multiple batches. It passes on small samples that fit one batch and fails at scale. The fix is to use the correct UDF type (for example a grouped-map or grouped-aggregate UDF) so the engine guarantees whole-group inputs.
+
+</details>
+
+<details><summary><b>52.</b> How would you implement an EMT/EPT-style enrichment portably so it runs the same on DuckDB locally and Spark in production?</summary>
+
+Express it as an Ibis expression — the join, derived share-class fields, and filters — built once, then point Ibis at DuckDB for local development and at the Spark (or Snowflake/BigQuery) backend in production by changing only the connection. Ibis compiles the one expression to each engine's native execution, so the EMT logic has a single definition. That is exactly the portability and "computed where?" auditability a regulated fund platform wants.
+
+</details>
+
+<details><summary><b>53.</b> Why is "where was this number computed" an auditability question that the transformation-layer standard must answer?</summary>
+
+In a regulated fund-administration context an auditor or regulator can demand the provenance of a NAV, holding value, or EMT field, and you must point to one definitive piece of code in one layer. If the logic is duplicated across dialects or scattered between SQL and DataFrame code with no standard, you cannot give a clean answer. Owning the layer boundary and keeping single definitions makes provenance traceable.
+
+</details>
+
+<details><summary><b>54.</b> What is the risk of doing procedural NAV-component enrichment as nested SQL CTEs instead of DataFrame code?</summary>
+
+The SQL becomes deeply nested, hard to read, hard to test in isolation, and brittle to change, because SQL is awkward for genuinely procedural or iterative logic. Reviewers cannot reason about it and small edits cause regressions. The standard's value is recognizing when logic has crossed from set-based into procedural and belongs in DataFrame code instead.
+
+</details>
+
+<details><summary><b>55.</b> How do `scan_csv` and `scan_parquet` differ in how much the optimizer can help?</summary>
+
+Both produce a `LazyFrame`, but Parquet is columnar and carries row-group statistics, so the optimizer can do projection pushdown and skip row groups via predicate pushdown far more effectively than with row-oriented CSV. With CSV, projection still helps but the format forces reading and parsing more of the file. So `scan_parquet` generally yields much bigger pushdown wins than `scan_csv`.
+
+</details>
+
+<details><summary><b>56.</b> Why might `.collect()` in Polars exhaust memory even though the source file is on disk and large?</summary>
+
+Because the default (non-streaming) collect materializes all intermediate results and the final frame in RAM, so a wide join or aggregation can exceed memory even if the raw file is read lazily. Enabling streaming execution processes the plan in batches and keeps the footprint bounded. Checking the plan for an exploding intermediate (a large join or unbounded group) tells you whether streaming or a redesign is needed.
+
+</details>
+
+<details><summary><b>57.</b> In Ibis, how do you actually trigger execution and get results back into Python?</summary>
+
+You build the expression lazily and then call an execution method such as `.execute()` (which typically returns a pandas DataFrame) or backend-aware methods like `.to_pandas()`, `.to_polars()`, or `.to_pyarrow()`. Until you call one of these, nothing runs and no data moves — Ibis has only constructed and (for SQL backends) compiled a query. This deferral is what lets the same expression target any backend.
+
+</details>
+
+<details><summary><b>58.</b> Why is inspecting Ibis's compiled SQL useful in a regulated environment?</summary>
+
+Because you can call Ibis's SQL-printing facility (for SQL backends) to see exactly the query that will run against the warehouse, giving you an auditable, reviewable artifact for how a figure is computed. That transparency supports change control and lets reviewers reason about performance and correctness at the SQL level. It turns the abstraction into something you can sign off on rather than a black box.
+
+</details>
+
+<details><summary><b>59.</b> What is the trap with using `collect_list`/`collect_set` aggregations in Spark on large groups?</summary>
+
+They gather all values of a group into a single in-memory array on one task, so a skewed or huge group can cause memory pressure or OOM on that executor. They are native expressions but not free — the cost moved from serialization to memory and skew. The mitigation is to bound group sizes, salt skewed keys, or reframe the logic to avoid materializing giant arrays.
+
+</details>
+
+<details><summary><b>60.</b> How does Spark's choice between broadcast join and sort-merge join show up in a plan, and why care?</summary>
+
+A small table joined to a large one ideally appears as a `BroadcastHashJoin`, which ships the small side to every executor and avoids shuffling the big side; a `SortMergeJoin` (with `Exchange` nodes) shuffles and sorts both sides and is far more expensive. For an enrichment that joins a big holdings table to a small share-class reference, you want the broadcast plan. Reading `explain()` confirms which you got and whether the broadcast threshold needs adjusting.
+
+</details>
+
+<details><summary><b>61.</b> Why is a small reference-data join (like share-class lookup) an ideal broadcast-join candidate?</summary>
+
+Because the reference table is tiny relative to the holdings fact table, so broadcasting it to every executor lets Spark do a local hash join with no shuffle of the large side. That avoids the expensive sort-and-shuffle of a sort-merge join. Ensuring the reference side is recognized as broadcastable (it fits under the broadcast threshold, or you hint it) is a standard optimization for enrichment workloads.
+
+</details>
+
+<details><summary><b>62.</b> What does "no row loops" not forbid — i.e., when is iterating in Python actually fine?</summary>
+
+Iterating over a small, fixed set of columns or a handful of partitions/config items in Python to build expressions is fine, because you are constructing the plan, not processing data rows. The rule forbids looping over data rows, which moves the dataset through Python. Looping to generate a list of column expressions that Spark then executes natively is idiomatic and cheap.
+
+</details>
+
+<details><summary><b>63.</b> How would you decide between Polars and Spark for the gold-layer NAV aggregation step specifically?</summary>
+
+Measure it: if the aggregated input fits one node (or streams) and the operation is a manageable group-by, Polars likely wins on latency and cost; if the data is genuinely huge or the shuffle exceeds one node, Spark's distribution pays off. NAV aggregation is often a moderate set-based group-by, which favors single-node tools at typical fund sizes. The decision must cite your own timings to survive review.
+
+</details>
+
+<details><summary><b>64.</b> What is the difference between a scalar Python UDF and a grouped-map pandas UDF in Spark?</summary>
+
+A scalar Python UDF maps one input value to one output value row-by-row through pickle serialization, while a grouped-map pandas UDF receives an entire group as a `pandas.DataFrame` (via `applyInPandas`/grouped map) and returns a DataFrame. The grouped-map form is vectorized and whole-group, suited to per-group transformations like normalization within a share class. Both still cross the JVM-Python boundary, so prefer native expressions when the logic allows.
+
+</details>
+
+<details><summary><b>65.</b> Why might two engines disagree on the result of an average due to null handling?</summary>
+
+Engines differ in whether they include or skip nulls in aggregations and how they treat division and integer-vs-float types, so an `AVG` over a column with nulls can differ if one engine counts nulls in the denominator and another does not. SQL `AVG` ignores nulls, but a hand-rolled DataFrame mean might not. When verifying three implementations are identical, null and type semantics are the first place mismatches appear.
+
+</details>
+
+<details><summary><b>66.</b> What is the role of Arrow as a common substrate across Polars, Ibis, and pandas/Arrow UDFs?</summary>
+
+Apache Arrow is the columnar in-memory format that Polars uses natively, that Ibis can hand data back in (`to_pyarrow`), and that pandas/Arrow UDFs use to transfer batches between the JVM and Python with minimal copying. Sharing Arrow means data can move between these tools cheaply and in a columnar layout. It is the reason vectorized UDFs and zero-copy interchange are fast.
+
+</details>
+
+<details><summary><b>67.</b> A dbt SQL model and a PySpark version of the same logic produce different row counts — first thing to check?</summary>
+
+Check join semantics and null handling: SQL inner/left joins, equality on nullable keys (SQL treats `NULL = NULL` as not-equal), and implicit deduplication can differ from how the DataFrame code was written. A `DISTINCT` in one and not the other, or a left vs inner join, is a frequent culprit. Reconciling the exact join type and key-null treatment usually closes the count gap.
+
+</details>
+
+<details><summary><b>68.</b> Why does the lesson tie the half-page standards note to your own timing numbers?</summary>
+
+Because a standard that says "use SQL for set-based work" is only credible if backed by evidence from your own data, so the note must cite where each engine won on the 1M- and 50M-row samples. Numbers make the standard defensible against "why not all SQL?" and against reviewers' preferences. Opinion without measurement does not survive architectural scrutiny.
+
+</details>
+
+<details><summary><b>69.</b> What is the difference between `LazyFrame.collect()` and `LazyFrame.fetch()` (or a head/limit-based preview) in Polars?</summary>
+
+`collect()` runs the full optimized plan over all data, while taking a small preview (historically via a fetch-style call or by adding a `.limit`/`.head` before collecting) runs the plan against a small slice for quick iteration. Previewing lets you validate logic cheaply before paying for the full dataset. The key is that a limited run still goes through the optimizer, so it reflects the real plan, just on less data.
+
+</details>
+
+<details><summary><b>70.</b> How does Ibis let you "scale up and out" from a laptop to the cloud without rewriting?</summary>
+
+You develop against the in-process DuckDB backend on your laptop, validate the expression, then point the same Ibis code at a cloud engine like BigQuery, Snowflake, or Spark by changing the connection. "Up" means a bigger single engine, "out" means a distributed one, and neither requires touching the transformation logic. This is the concrete payoff of decoupling the frontend API from the backend execution.
+
+</details>
+
+<details><summary><b>71.</b> What is the danger of writing transformation logic as a Spark UDF that calls a Python library like `requests` or a model?</summary>
+
+Besides the serialization cost, such a UDF runs arbitrary Python per row/batch with external side effects or heavy objects, which is slow, hard to make idempotent, and can hammer external services from every executor in parallel. Logic with external calls usually belongs outside the hot transformation path, or batched carefully. If it must be a UDF, an Arrow/pandas form that batches calls is far less damaging than a scalar per-row UDF.
+
+</details>
+
+<details><summary><b>72.</b> Why is ML feature preparation often placed in DataFrame code rather than dbt SQL in the layer standard?</summary>
+
+Because feature engineering frequently needs procedural logic, numerical libraries, custom transforms, and tight integration with Python ML tooling that SQL expresses poorly or not at all. DataFrame code (PySpark/Polars) gives the imperative control and library access that feature prep needs. So the standard typically assigns set-based joins/aggregations to SQL and ML feature prep to DataFrames.
+
+</details>
+
+<details><summary><b>73.</b> What does it mean that Spark's DataFrame API is lazy, and how is that similar to Polars and Ibis?</summary>
+
+Spark transformations like `select`, `filter`, and joins are lazy: they build a logical plan that Catalyst optimizes, and nothing executes until an action like `count`, `collect`, or `write` is called. This mirrors Polars `LazyFrame` (run on `.collect()`) and Ibis (run on `.execute()`). All three defer execution so a whole-query optimizer can rearrange the plan, which is why each rewards "describe the result" over "step through rows".
+
+</details>
+
+<details><summary><b>74.</b> Why can a single misplaced `.collect()` (Polars) or action (Spark) inside a loop wreck performance?</summary>
+
+Each `collect`/action triggers a full execution of the plan, so calling it inside a loop re-runs the whole pipeline repeatedly instead of once, multiplying I/O and compute. It also breaks the optimizer's ability to fuse work across iterations. The fix is to build one lazy plan over the whole job and materialize a single time at the end.
+
+</details>
+
+<details><summary><b>75.</b> How would you express "rank holdings by market value within each fund" portably in Ibis, and what does it compile to?</summary>
+
+You build a window expression in Ibis partitioned by fund and ordered by market value, applying a rank function, then execute it on your chosen backend. For a SQL backend Ibis compiles it to a `RANK() OVER (PARTITION BY fund ORDER BY market_value DESC)` window query in that engine's dialect. The same expression runs on DuckDB locally and on Spark or Snowflake in production unchanged.
+
+</details>
+
+<details><summary><b>76.</b> What is the relationship between Polars and Ibis — can Ibis use Polars as a backend?</summary>
+
+Yes: Polars is one of Ibis's 20+ backends, so you can write Ibis expressions and have them executed by Polars, just as you could target DuckDB or Spark. This lets you keep one expression language while choosing single-node Polars execution for moderate data. It illustrates Ibis's role as a frontend over many engines rather than a competitor to any single one.
+
+</details>
+
+<details><summary><b>77.</b> When comparing managed Databricks or Snowpark against the FOSS stack, what does the lesson want you to "know"?</summary>
+
+That they are "the same concepts rebranded" — DataFrame APIs, lazy execution, UDFs, optimizers — wrapped in a vendor platform, and that adopting them is a build-vs-buy decision with a lock-in cost. You should be able to map each managed feature to its FOSS equivalent and articulate the trade-off. The skill is recognizing the underlying concepts so vendor branding does not obscure the engineering.
+
+</details>
+
+<details><summary><b>78.</b> A Polars `.explain()` shows your `filter` above the `scan` rather than pushed into it — what likely went wrong?</summary>
+
+Likely the filter references a column produced later in the pipeline (for example after a join or a computed column) or uses a function the optimizer cannot push through, so it cannot be moved to the scan. Restructuring so the filter uses only source columns, and applying it before transformations that block pushdown, usually lets the optimizer push it down. Re-running `.explain()` confirms the filter moved.
+
+</details>
+
+<details><summary><b>79.</b> Why is "idempotent and reproducible" relevant even within the transformation layer, not just orchestration?</summary>
+
+Because a transformation should produce the same output from the same input regardless of how many times it runs, which is essential when reruns happen after a NAV correction or a backfill. UDFs with side effects, nondeterministic ordering, or hidden state break that and produce inconsistent figures. Keeping transformations as deterministic expressions over inputs preserves reproducibility, which a regulated audit trail requires.
+
+</details>
+
+<details><summary><b>80.</b> What is the cost difference between `df.count()` and `df.cache().count()` in Spark for an iterative comparison job?</summary>
+
+A bare `count()` re-executes the entire plan from the source each time, while caching materializes the DataFrame once so subsequent actions reuse it from memory/disk. In a timing or comparison job that touches the same frame repeatedly, caching avoids recomputing upstream work on every action. The gotcha is that caching consumes memory and must be sized and unpersisted deliberately, so it is not free.
+
+</details>
+
+<details><summary><b>81.</b> How do you keep Polars from silently upcasting or changing dtypes when matching a Spark/dbt result?</summary>
+
+Set schemas explicitly on scan (for example pass `schema`/`dtypes` to `scan_csv`) and cast columns deliberately, because automatic type inference can pick a different numeric type than the other engines and cause value or precision mismatches. Aligning dtypes up front is part of proving the three implementations are identical. Type drift is a frequent, subtle source of "off by a rounding" differences in NAV figures.
+
+</details>
+
+<details><summary><b>82.</b> Why might a transformation that is correct on Polars eager fail or differ on Polars lazy?</summary>
+
+Some operations behave differently or are only optimizable in the lazy engine, and the lazy optimizer may reorder or fuse steps in ways that surface a logic dependency you implicitly relied on (such as row order before a non-deterministic step). Most logic is identical, but ordering assumptions can break. Inspecting `.explain()` and pinning any required ordering resolves the discrepancy.
+
+</details>
+
+<details><summary><b>83.</b> What is the architect's two-minute pitch for adopting Ibis across a multi-engine fund platform?</summary>
+
+One expression language, written and reviewed once, compiles to every engine in the estate, so NAV and EMT logic has a single auditable definition that runs on DuckDB locally and Spark/Snowflake in production by swapping a connection. It removes dialect duplication, reduces lock-in, and lets you show exactly what query produced a number. The cost is a thinner ecosystem and one more abstraction to learn, which you weigh against the duplication it eliminates.
+
+</details>
+
+<details><summary><b>84.</b> Why is a wide `select` with a list of expressions preferred over chained `withColumn` calls in production PySpark?</summary>
+
+Because each `withColumn` adds a layer to the logical plan, and hundreds of them produce a huge nested plan that slows the analyzer/optimizer and can hit limits, whereas a single `select` (or `withColumns` plural) builds the same columns in one flat step. The result is the same data but a far cheaper plan to optimize. It is a "native but still inefficient" trap that an architect should call out in review.
+
+</details>
+
+<details><summary><b>85.</b> How do you choose UDF type when you genuinely must run custom Python in Spark?</summary>
+
+Prefer the most vectorized option available: an Arrow UDF or pandas (Series/grouped) UDF over a scalar Python UDF, because batched Arrow transfer slashes the serialization tax versus row-at-a-time pickling. Pick the grouped form when the logic needs whole groups, and the scalar pandas/Arrow form for elementwise work. Reserve the plain Python UDF for cases where no vectorized form fits, knowing it is the most expensive path.
+
+</details>
+
+<details><summary><b>86.</b> What does "the same concepts rebranded" imply about transferring skills from Snowpark to PySpark or vice versa?</summary>
+
+It implies the core ideas — lazy DataFrames, lazy evaluation, window functions, UDFs and their cost model, and pushdown optimization — carry across, so an engineer fluent in one can learn the other quickly. The differences are mostly API surface, dialect, and platform integration, not fundamentals. Recognizing this lets the architect hire and train on transferable concepts rather than a single vendor's API.
+
+</details>
+
+<details><summary><b>87.</b> When does Spark remain the right choice despite single-node tools being faster on small data?</summary>
+
+When the data genuinely exceeds one node's memory and disk, when shuffles are too large for a single machine, or when you need its mature ecosystem for streaming, complex joins at scale, or an existing cluster investment. The crossover is roughly where data passes what one fat node can handle (around and above ~100GB for many workloads). The architect picks Spark deliberately for that regime, not reflexively for all "big data".
+
+</details>
+
+<details><summary><b>88.</b> How would you prove to a reviewer that replacing a UDF with a native expression actually helped?</summary>
+
+Profile both versions on the same input — capture wall-clock, the Spark UI stage breakdown, and whether the `*EvalPython` node disappeared — and show the native version removed the Python evaluation stage and reduced time and shuffle. A controlled before/after on identical data and hardware is the evidence. The "Done when" bar is exactly being able to explain the cost difference and how you detected it in a profile.
+
+</details>
+
+<details><summary><b>89.</b> Why is it dangerous to let business logic live implicitly inside a UDF rather than as a reviewable expression or SQL model?</summary>
+
+Because a UDF is opaque to the optimizer and often to reviewers and lineage tooling, so the business rule it encodes (say a fee or NAV adjustment) is hidden from documentation, tests, and provenance tracking. That undermines auditability and makes the rule easy to duplicate or diverge. Expressing the logic as a native expression, a dbt model, or a portable Ibis expression keeps it visible and governed.
+
+</details>
+
+<details><summary><b>90.</b> What is the practical meaning of Ibis giving performance "as good as the backend it is connected to"?</summary>
+
+It means Ibis itself does not process data, so your job runs at the speed of DuckDB, Spark, BigQuery, or whichever engine executes the compiled query — there is no Ibis-layer slowdown. If a backend is fast, your Ibis job is fast; if it is slow, Ibis cannot rescue it. The abstraction is a compile-time convenience, not a runtime bottleneck.
+
+</details>
+
+<details><summary><b>91.</b> How does the layer-ownership standard reduce the chance of NAV logic drift across teams?</summary>
+
+By declaring where each transformation type must live — set-based logic in dbt SQL, procedural enrichment in DataFrame code — it stops teams from each putting NAV logic wherever is convenient, which is what causes three-dialect drift. A single owned location per logic type means one place to change and one place to audit. Enforcement through review keeps the standard real rather than aspirational.
+
+</details>
+
+<details><summary><b>92.</b> A Spark window function over a partition with no `orderBy` gives unexpected cumulative results — why?</summary>
+
+Cumulative and offset functions like `sum().over(w)`, `lag`, and `row_number` depend on a defined order, and without `orderBy` the frame is ambiguous (often the whole partition), so the "running" result is not what you intended and may be nondeterministic. Adding an explicit `orderBy` to the window spec fixes it. This is a frequent bug when porting an ordered `groupby-apply` to a window.
+
+</details>
+
+<details><summary><b>93.</b> Why is reading the query plan a core architect skill across all three engines?</summary>
+
+Because Polars `.explain()`, Spark `.explain()`, and Ibis's compiled SQL all reveal whether the optimizer did what you expect — pushdown, join strategy, absence of UDF stages — so you validate performance from the plan rather than by trial. Plan literacy is how you catch a missing broadcast join or an un-pushed filter before it costs cluster time. It is the common diagnostic muscle for the whole transformation layer.
+
+</details>
+
+<details><summary><b>94.</b> What is the failure mode of "pandas habits" specifically around indexing and joins in Spark?</summary>
+
+Pandas relies on an index and supports operations like `merge` on the index and positional `.iloc`, none of which translate to Spark, where there is no row index and joins are explicit on key columns across partitions. Carrying those habits leads to attempts at positional access or index joins that are inefficient or impossible. The Spark idiom is explicit key-based joins and column expressions, with no reliance on a row index.
+
+</details>
+
+<details><summary><b>95.</b> How would you structure the half-page standards note so it survives "why not do everything in SQL?"</summary>
+
+State the rule (set-based logic in dbt SQL; procedural enrichment and ML feature prep in DataFrame code), justify it with the free lineage/testability of SQL versus SQL's poor fit for procedural logic, and back the boundary with your own 1M/50M-row timings showing where each engine wins. Include a concrete fund example such as EMT enrichment landing in SQL because it is a join. The note must show evidence and a clear owner, not just assertion.
+
+</details>
+
+<details><summary><b>96.</b> Why might a Polars streaming query produce a different memory profile than a non-streaming one for the same logic?</summary>
+
+Streaming executes the plan in bounded batches, keeping peak memory roughly constant regardless of data size, whereas the default engine may materialize large intermediates and spike memory. For a big group-by or join, streaming trades some operator support and possibly speed for a flat, predictable footprint. Choosing it is about fitting larger-than-memory work onto one node, not about going faster per se.
+
+</details>
+
+<details><summary><b>97.</b> What is the concrete risk of running the same NAV transformation in PySpark and Snowpark without a portable definition?</summary>
+
+You now maintain two implementations of the same business rule in two APIs that can diverge with any edit, and you must keep them provably equivalent forever, doubling test burden and audit surface. A drift between them means two different "official" NAVs depending on which platform ran. A portable definition (one Ibis expression or one dbt model) collapses this to a single source of truth.
+
+</details>
+
+<details><summary><b>98.</b> How do you give a reviewer confidence that the Polars, PySpark, and dbt SQL results are byte-for-byte equivalent on the sample?</summary>
+
+Run all three, write outputs in a canonical sorted column order, and compare with an exact equality or a stable hash of the sorted result, then show the comparison passes and the row counts match. Document any deliberate type or null-handling alignment you applied to make them agree. Equivalence proven by code, not by eyeballing a few rows, is what stands up in review and audit.
+
+</details>
+
+<details><summary><b>99.</b> How do you express a windowed (per-group) calculation in Polars without a `groupby-apply`, and what is the idiom called?</summary>
+
+Use an expression with `.over("group_col")`, for example `pl.col("amount").sum().over("fund")` to get a per-fund total broadcast back onto each row, or a ranking expression over the group for ordered logic. This is the window-expression idiom and it stays inside Polars's optimized, vectorized engine rather than dropping into per-group Python. It is the Polars analogue of a PySpark `Window` spec and avoids the slow apply path entirely.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the architect's decision rule for the transformation layer in one sentence.</summary>
+
+Keep set-based joins and aggregations in dbt SQL for lineage and testability, push custom logic into native engine expressions before reaching for any UDF (and choose Arrow/pandas UDFs over scalar Python when a UDF is unavoidable), pick single-node Polars under ~100GB and Spark above it based on your own timings, and use a portable layer like Ibis when one definition must run across many engines. The whole rule exists so every NAV number has one auditable place it was computed. That is the standard the architect owns and every team inherits.
+
+</details>
+
+
+## Phase 3 · 5.6.1 + 5.6.3 Orchestration (Airflow + Dagster, task- vs asset-oriented) — 100 self-test questions
+
+<details><summary><b>1.</b> What is the core job of a data orchestrator, and why does this lesson call it the platform's "nervous system"?</summary>
+
+An orchestrator schedules, sequences, and monitors the units of work in a data platform, guaranteeing that tasks run in the right order, at the right time, with the right dependencies satisfied. It is the nervous system because every other component — ingestion, transformation, quality checks — fires under its control, so a failure there silently corrupts everything downstream. In a fund platform it is what guarantees the NAV pipeline ran, in order, exactly once per valuation day rather than producing yesterday's prices in today's report.
+
+</details>
+
+<details><summary><b>2.</b> What is an Airflow DAG, and why "directed acyclic graph"?</summary>
+
+A DAG (directed acyclic graph) is the Airflow object that defines a pipeline as a set of tasks with directional dependencies between them and no cycles. "Directed" means each edge points from an upstream task to a downstream one; "acyclic" means a task can never depend on itself transitively, which would make the schedule undefinable. Airflow uses the DAG structure to decide what can run in parallel and what must wait.
+
+</details>
+
+<details><summary><b>3.</b> What is the difference between an operator and a task in Airflow?</summary>
+
+An operator is a template class describing a single unit of work — for example `BashOperator`, `PythonOperator`, or a provider's `SQLExecuteQueryOperator` — while a task is a specific instantiation of an operator inside a DAG. You author with operators, but at runtime Airflow schedules task instances, one per logical date the DAG covers. Confusing the two leads to the common error of thinking the operator "runs" when in fact it is the task instance that does.
+
+</details>
+
+<details><summary><b>4.</b> What is a sensor in Airflow and what problem does it solve?</summary>
+
+A sensor is a special operator that waits for a condition to become true before letting downstream tasks proceed — for example a file landing in object storage, a partition appearing, or an external job finishing. It solves the problem of clock-time scheduling being wrong when a pipeline must start on data readiness rather than at a fixed hour. A `FileSensor` or `S3KeySensor` waiting for the day's price file is the canonical fund-data use.
+
+</details>
+
+<details><summary><b>5.</b> What is the difference between `poke` and `reschedule` mode for a sensor, and why does it matter operationally?</summary>
+
+In `poke` mode a sensor holds a worker slot for its entire wait, repeatedly checking the condition; in `reschedule` mode it releases the slot between checks and is re-queued, freeing capacity. `reschedule` is strongly preferred for long waits because a fleet of `poke` sensors can deadlock the cluster by occupying every slot. The gotcha is that `reschedule` has coarser timing granularity, so it is unsuitable for sub-minute polling.
+
+</details>
+
+<details><summary><b>6.</b> What does it mean for an Airflow task to be idempotent, and why is it non-negotiable?</summary>
+
+An idempotent task produces the same result whether it runs once or many times for the same logical interval — typically by overwriting or deleting-then-inserting a partition rather than blindly appending. It is non-negotiable because Airflow reruns tasks on retry, on backfill, and on manual clear, so a non-idempotent task silently double-counts. A NAV aggregation that `INSERT`s without first clearing the target day's rows will inflate totals on every rerun.
+
+</details>
+
+<details><summary><b>7.</b> How would you make a "load today's prices into a table" task idempotent?</summary>
+
+Scope the write to the run's logical interval and make it overwrite that scope: delete the target partition (or rows for that valuation date) and then insert, or use an upsert/`MERGE` keyed on the natural key. The pattern is "delete-write" or "truncate-insert" per partition, never bare `INSERT INTO`. This way a retry or a backfill of that date recomputes the same partition rather than appending duplicates.
+
+</details>
+
+<details><summary><b>8.</b> What is the Airflow `logical_date` (formerly `execution_date`) and why is it a frequent source of confusion?</summary>
+
+The `logical_date` is the start of the data interval a run represents, not the wall-clock time the run actually executes. For a daily DAG, the run for the interval covering June 12 typically executes after that interval ends, so the run "for June 12" starts on June 13. The confusion is treating it as "now"; idempotent tasks must template their queries on this interval, not on `datetime.now()`.
+
+</details>
+
+<details><summary><b>9.</b> Why should an Airflow task never call `datetime.now()` to decide which data to process?</summary>
+
+Because `datetime.now()` returns the moment of execution, which differs on retries, backfills, and delayed runs, breaking idempotency and reproducibility. The task would process a different window every time it ran, making a backfill of a past date pull today's data. Instead you template on the run's data interval (`{{ data_interval_start }}` / `{{ data_interval_end }}`) so the same logical date always recomputes the same window.
+
+</details>
+
+<details><summary><b>10.</b> What is the Airflow scheduler responsible for, and what is the executor responsible for?</summary>
+
+The scheduler parses DAGs, evaluates dependencies and schedules, and decides which task instances are ready to run; the executor is the mechanism that actually places those task instances onto compute and runs them. Separating the two lets the same scheduling logic drive very different runtimes. A common mistake is blaming "the scheduler" for slow task execution when the bottleneck is really an under-provisioned executor.
+
+</details>
+
+<details><summary><b>11.</b> Compare the `LocalExecutor`, `CeleryExecutor`, and `KubernetesExecutor`.</summary>
+
+`LocalExecutor` runs tasks as subprocesses on the scheduler host — simple, single-machine, fine for dev or small workloads. `CeleryExecutor` distributes tasks to a pool of long-running worker processes via a message broker (Redis/RabbitMQ), giving horizontal scale with persistent workers. `KubernetesExecutor` launches each task in its own ephemeral pod, giving per-task isolation and resource limits at the cost of pod-startup latency.
+
+</details>
+
+<details><summary><b>12.</b> When would the `KubernetesExecutor` be the wrong choice despite its isolation benefits?</summary>
+
+When tasks are numerous and short-lived, because the per-task pod startup overhead (image pull, scheduling, init) can dwarf the actual work, making throughput collapse. Heterogeneous-resource, long-running, or strongly-isolated tasks justify the overhead; thousands of two-second tasks do not. For that profile a `CeleryExecutor` with warm workers, or batching the work into fewer tasks, performs far better.
+
+</details>
+
+<details><summary><b>13.</b> What does the `catchup` parameter control on an Airflow DAG?</summary>
+
+`catchup` controls whether, when a DAG is unpaused or newly added, the scheduler creates runs for all past intervals between the start date and now, or only the most recent one. With `catchup=True` it fills in every missed interval; with `catchup=False` it schedules only the latest interval. It governs automatic backfilling on activation, distinct from a manually triggered backfill.
+
+</details>
+
+<details><summary><b>14.</b> In recent Airflow, what is the practical default behavior of `catchup`, and how can you set it globally?</summary>
+
+Modern Airflow guidance and the example projects favor `catchup=False`, and you can set the cluster-wide default via the config `scheduler.catchup_by_default=False` so DAGs do not silently backfill on first activation. The reason is that an accidental `catchup=True` on a DAG with an old start date can spawn hundreds of runs at once and overwhelm the cluster. Always set `catchup` explicitly per DAG rather than relying on memory of the default.
+
+</details>
+
+<details><summary><b>15.</b> What is the difference between `catchup` and a `backfill`?</summary>
+
+`catchup` is the scheduler automatically creating runs for missed intervals when a DAG becomes active, whereas a backfill is an explicit, operator-initiated rerun of a chosen date range — historically via the `airflow dags backfill` CLI. Catchup is a property of normal scheduling; backfill is a deliberate operations action, typically after a logic fix. Both rely on the same idempotency contract to be safe.
+
+</details>
+
+<details><summary><b>16.</b> You fixed a bug in a transformation and need to recompute the last 30 days in Airflow. How do you do it safely?</summary>
+
+Run a backfill over that 30-day date range — for example `airflow dags backfill` with `--start-date` and `--end-date` (or clear those task instances in the UI) — so each daily interval is recomputed against the fixed logic. Safety depends entirely on the tasks being idempotent so each partition is overwritten, not appended. Afterward you verify by checking which partitions changed (row counts, checksums, or a reconciliation total).
+
+</details>
+
+<details><summary><b>17.</b> What is Airflow data-aware scheduling, and how does it differ from cron scheduling?</summary>
+
+Data-aware scheduling triggers a DAG when an upstream piece of data is updated rather than when a clock time arrives. A producer task marks a logical data object as updated on completion, and any DAG that consumes that object is scheduled in response. This replaces fragile time guesses ("the file should be ready by 6am") with a true dependency on readiness.
+
+</details>
+
+<details><summary><b>18.</b> In Airflow 3, what was the "Dataset" concept renamed to, and why does the rename matter conceptually?</summary>
+
+In Airflow 3 the feature formerly called a Dataset was renamed to an Asset, aligning Airflow's vocabulary with the asset-oriented model and broadening it toward event-driven scheduling. The rename matters because it signals that the consumer-DAG-triggers-on-data idea is now first-class, not a bolt-on, and it eases comparison with Dagster's asset language. Older tutorials using `Dataset` map onto the new `Asset` API.
+
+</details>
+
+<details><summary><b>19.</b> What is an `AssetWatcher` in Airflow 3 and what new capability does it unlock?</summary>
+
+An `AssetWatcher` continuously monitors an external source such as a message queue or storage event stream and updates the corresponding asset — and thus triggers consumer DAGs — the moment a relevant event arrives. It unlocks genuinely event-driven workflows, moving beyond both fixed cron and intra-Airflow producer-consumer links. For fund data this means a DAG can fire on the actual arrival of a SWIFT message or a price file rather than polling.
+
+</details>
+
+<details><summary><b>20.</b> How does asset/dataset-based scheduling let you express "rebuild gold when silver finishes" without a cron?</summary>
+
+You declare the silver tables as assets that the silver DAG's tasks update on success, and you schedule the gold DAG on those assets rather than on a `schedule_interval`. Airflow then runs gold automatically whenever the upstream silver assets are all updated. This removes the brittle "gold runs at 7am and hopes silver finished by then" coupling that breaks the first time silver is slow.
+
+</details>
+
+<details><summary><b>21.</b> What is XCom in Airflow and what is it intended for?</summary>
+
+XCom (cross-communication) is Airflow's mechanism for tasks to pass small pieces of metadata to one another — an identifier, a count, a path — stored in the metadata database. It is intended for lightweight control data, not for moving the actual datasets between tasks. Returning a value from a task pushes an XCom that downstream tasks can pull by key.
+
+</details>
+
+<details><summary><b>22.</b> Why is "XCom abuse" listed as an orchestrator anti-pattern?</summary>
+
+Because XCom is backed by the metadata database and was designed for tiny values, pushing large payloads — a DataFrame, a file's contents, thousands of rows — bloats and can destabilize that database and the scheduler. The correct pattern is to write the data to durable storage (object store, table) and pass only a reference through XCom. Treating XCom as a data bus is a reliable way to bring an Airflow deployment to its knees.
+
+</details>
+
+<details><summary><b>23.</b> Why is "business logic in DAG files" an anti-pattern, and what is the fix?</summary>
+
+DAG files are parsed by the scheduler frequently — on every parse loop — so heavy logic, imports, or external calls at module top level slow parsing and can time out, and they make the pipeline untestable. The fix is to keep DAG files thin: define structure and dependencies there, and put the actual transformation logic in importable, unit-testable functions or external tools. A DAG file should read like a table of contents, not the book.
+
+</details>
+
+<details><summary><b>24.</b> What goes wrong when top-level code in a DAG file makes network or database calls at parse time?</summary>
+
+The scheduler executes top-level code every parse cycle, so a network/DB call there runs constantly — not when the task runs — hammering the external system and slowing or failing DAG parsing. This is distinct from code inside a task's callable, which runs only at execution time. The rule is: nothing expensive or side-effecting at module scope; defer it into the operator's execution.
+
+</details>
+
+<details><summary><b>25.</b> What are sensible retry settings for a flaky external dependency, and why not just set retries very high?</summary>
+
+Configure a modest `retries` count with an exponential `retry_delay` (and optionally `retry_exponential_backoff`) so transient blips self-heal without a human. You avoid very high retry counts because they mask real, persistent failures, delay the page that should wake on-call, and can amplify load on a struggling upstream. Retries are for transient faults; a deterministic bug will fail identically every attempt.
+
+</details>
+
+<details><summary><b>26.</b> What is an Airflow SLA (or its successor concept), and what does it give on-call?</summary>
+
+An SLA expresses how long a task or DAG is expected to take, so that if it overruns, Airflow records a miss and can alert — surfacing "the NAV pipeline is late" before a human notices the report is missing. It gives on-call a proactive signal about lateness distinct from outright failure. The gotcha is that an SLA miss is not the same as a failure: a task can be on time yet wrong, or late yet eventually succeed.
+
+</details>
+
+<details><summary><b>27.</b> What information should a sane on-call page contain when a pipeline task fails?</summary>
+
+It should name the failing DAG/asset and task, the logical date/partition affected, the error class and a link to the logs, the blast radius (what downstream is now blocked or stale), and a hint of the runbook step. The goal is that the responder can triage without first reconstructing context at 3am. A page that says only "task failed" with no partition or downstream impact wastes the critical first minutes.
+
+</details>
+
+<details><summary><b>28.</b> Define "software-defined asset" (SDA) in Dagster.</summary>
+
+A software-defined asset is a declarative object describing a persistent thing your pipeline produces — a table, a file, an ML model — together with the computation that materializes it and its dependencies on other assets. You declare the asset and what it depends on; Dagster derives the execution graph from those declarations. This inverts Airflow's task-first model: you describe the data products, and the orchestration falls out.
+
+</details>
+
+<details><summary><b>29.</b> What is the fundamental difference between task-oriented and asset-oriented orchestration?</summary>
+
+Task-oriented orchestration (classic Airflow) centers on the work to do — "run this task, then that task" — and any notion of the data produced is implicit. Asset-oriented orchestration (Dagster) centers on the data products themselves — "this table depends on those tables" — and derives the tasks needed to keep them up to date. The shift gives you lineage and freshness as built-in properties rather than things you bolt on.
+
+</details>
+
+<details><summary><b>30.</b> Give a one-line fund-industry example each of task-oriented and asset-oriented thinking.</summary>
+
+Task-oriented: "at 18:00 run extract_prices, then run compute_nav, then run publish_report" — the schedule is a sequence of jobs. Asset-oriented: "the nav_per_share asset depends on validated_prices and shares_outstanding, rebuild it whenever either upstream changes" — the schedule is implied by the data graph. The asset framing answers "is today's NAV up to date and what fed it?" directly.
+
+</details>
+
+<details><summary><b>31.</b> Why does asset-orientation give you lineage "for free"?</summary>
+
+Because in the asset model you explicitly declare each asset's dependencies in code, the orchestrator already holds the full producer-consumer graph and can render it as lineage without a separate metadata-scraping step. In task-orientation the data dependencies live only in the heads of the engineers, so lineage must be reconstructed externally. The declaration that drives scheduling is the same declaration that draws the lineage.
+
+</details>
+
+<details><summary><b>32.</b> What is an asset partition in Dagster?</summary>
+
+A partition slices an asset into independently-materializable units along a dimension — most commonly a date, e.g. one partition per valuation day. Each partition has its own materialization status and can be backfilled or rematerialized in isolation. Daily partitions are exactly how you model "one NAV computation per business day" and recompute a single bad day without touching the rest.
+
+</details>
+
+<details><summary><b>33.</b> How do partitions make a Dagster backfill precise?</summary>
+
+Because each partition is an independent unit with its own materialization, a backfill targets a specific set of partition keys (e.g. the last 30 dates) and recomputes exactly those, leaving others untouched. You can then list which partition keys were materialized to prove the scope. This is more legible than clearing a date range of task instances because the unit of recompute is the data slice itself.
+
+</details>
+
+<details><summary><b>34.</b> What is a Dagster asset check, and how does it differ from a freshness check?</summary>
+
+An asset check is a test bound to a specific asset that runs against its data — e.g. "row count > 0", "no null ISINs", "NAV total reconciles" — and reports pass/fail/severity alongside the asset. A freshness check specifically verifies the asset was updated recently enough. Binding the check to the asset means its result appears in lineage and gates downstream automation, unlike a standalone test in a separate system.
+
+</details>
+
+<details><summary><b>35.</b> How would you express a NAV-total reconciliation as an asset check?</summary>
+
+Define an asset check on the gold NAV asset that recomputes the fund-level total from the underlying share-class rows and compares it, within tolerance, to an independently sourced control total, failing with `ERROR` severity on mismatch. Bound to the asset, the check's red status is visible in the catalog and can block publication. The mechanism turns "we trust the numbers" into a structural gate that fails loudly when share-class NAVs do not sum to the fund total.
+
+</details>
+
+<details><summary><b>36.</b> What does Dagster's freshness checking do, and which factory builds an update-time-based one?</summary>
+
+Freshness checking flags an asset as overdue when it has not been updated within an acceptable window, turning staleness into an explicit alertable signal. The factory `build_last_update_freshness_checks` builds a check based on the asset's last-update time against a maximum allowed lag. You must also wire a sensor or schedule (e.g. `build_sensor_for_freshness_checks`) so the check actually evaluates rather than sitting dormant.
+
+</details>
+
+<details><summary><b>37.</b> A Dagster freshness check never fires even though the asset is stale. What is the first thing to check?</summary>
+
+Confirm that something is actually evaluating the check — freshness checks do not run themselves, so you need a schedule or the `build_sensor_for_freshness_checks` sensor enabled. A defined-but-unevaluated check is the most common cause of silent staleness. Second, verify the lag threshold and the asset's recorded last-update events are what you expect.
+
+</details>
+
+<details><summary><b>38.</b> What is declarative automation in Dagster?</summary>
+
+Declarative automation lets you attach a condition to each asset describing when it should be kept up to date, and Dagster derives "what needs to run" from the assets' states rather than from hand-wired cron triggers. You declare intent ("eager: update whenever a dependency updates") and the daemon computes and launches the necessary materializations. It replaces a web of explicit sensors and schedules with a per-asset policy.
+
+</details>
+
+<details><summary><b>39.</b> Which API powers Dagster declarative automation, and which older API did it replace?</summary>
+
+Declarative automation is powered by `AutomationCondition`, attached to assets, which replaced the now-deprecated `AutoMaterializePolicy`. `AutomationCondition`s are composable boolean expressions, making them far more customizable and operable at scale than the old policy enum. Existing `AutoMaterializePolicy` objects are auto-converted to `AutomationCondition`s, so migration can proceed asset by asset.
+
+</details>
+
+<details><summary><b>40.</b> What does `AutomationCondition.eager()` do, and where would you use it?</summary>
+
+`AutomationCondition.eager()` tells Dagster to update an asset automatically whenever any of its dependencies are updated, propagating upstream changes downstream without a clock trigger. You use it to wire "rebuild gold when silver materializes" so the gold layer rebuilds on data readiness, not on a cron guess. It is the asset-model equivalent of Airflow asset-based scheduling.
+
+</details>
+
+<details><summary><b>41.</b> How would you express "rebuild daily on a cron, OR whenever the code version changes" in Dagster?</summary>
+
+Compose conditions with boolean operators, e.g. `AutomationCondition.on_cron("@daily") | AutomationCondition.code_version_changed()`, and attach the result to the asset. Dagster evaluates the combined condition and materializes when either branch is satisfied. Composability is the headline advantage of `AutomationCondition` over the old single-policy model.
+
+</details>
+
+<details><summary><b>42.</b> Why is "rebuild gold when silver materializes" with declarative automation better than a cron offset?</summary>
+
+A cron offset ("run gold at 07:00 because silver usually finishes by 06:45") is a guess that breaks the first time silver is late, producing gold from stale or partial inputs. Declarative automation with `eager` ties gold's rebuild to the actual materialization event of silver, so gold runs exactly when its inputs are ready and never before. This converts a timing assumption into a data-readiness fact.
+
+</details>
+
+<details><summary><b>43.</b> How does Dagster's local development loop typically differ from Airflow's?</summary>
+
+Dagster emphasizes a fast local loop where you run the UI (`dagster dev`) and materialize assets interactively, with assets being plain Python functions that are straightforward to unit test in isolation. Airflow's classic loop centers on a scheduler parsing DAG files and is historically heavier to iterate on locally. The asset-as-function design is a large part of why the Dagster dev loop feels tighter.
+
+</details>
+
+<details><summary><b>44.</b> What command starts the Dagster development server, and what does it give you?</summary>
+
+`dagster dev` starts the local web UI plus the daemon, giving you the asset graph, the ability to materialize assets and partitions on demand, check results, run logs, and the automation evaluation view. It is the primary inner-loop tool for building and debugging assets locally. The browser-based asset graph is where you see lineage and freshness without extra tooling.
+
+</details>
+
+<details><summary><b>45.</b> What is a Dagster job, and how does it relate to assets?</summary>
+
+A job in Dagster is a selectable, runnable target — often a selection of assets to materialize together, or a graph of ops — that schedules and sensors can attach to. With the asset model you frequently define jobs as asset selections (e.g. "all silver assets") rather than authoring ops directly. Jobs give you a unit to schedule and to scope a run, layered on top of the asset graph.
+
+</details>
+
+<details><summary><b>46.</b> What is the role of the Dagster daemon?</summary>
+
+The daemon is the long-running process that drives schedules, sensors, run queuing, and automation-condition evaluation — it is what turns declared intent into launched runs. Without the daemon running, schedules do not tick and `AutomationCondition`s never evaluate, so assets that should auto-update sit still. It is the Dagster analog of the part of the Airflow scheduler that emits runs.
+
+</details>
+
+<details><summary><b>47.</b> Why might an architect prefer Dagster's asset model for a regulated fund platform?</summary>
+
+Because lineage and freshness are intrinsic, an auditor's question "which inputs produced this NAV, and was each fresh?" is answered directly from the orchestrator rather than reconstructed. Asset checks bind data-quality and reconciliation gates structurally to the products themselves. This makes the platform's correctness story demonstrable, which is exactly what DORA-style operational-resilience and audit expectations push toward.
+
+</details>
+
+<details><summary><b>48.</b> Why might a fund-admin shop nonetheless run Airflow rather than Dagster?</summary>
+
+Airflow is the incumbent with the largest hiring pool, the broadest provider/operator ecosystem, and managed offerings on every cloud, so it is often the lower-risk institutional default. A six-person team inheriting an Airflow estate, or one whose vendors ship Airflow operators, may rationally stay. The architect's job is to weigh that incumbency and skills reality against Dagster's lineage/freshness advantages, not to assume the newer tool wins.
+
+</details>
+
+<details><summary><b>49.</b> What is Prefect, in one or two lines of market awareness?</summary>
+
+Prefect is a Python-native orchestrator that lets you turn ordinary functions into flows and tasks with decorators, emphasizing a dynamic, code-first model and a hybrid execution where the control plane is hosted but work runs in your infrastructure. It is a credible Airflow alternative, particularly where teams want minimal DAG boilerplate. For this lesson it is awareness-level, not a hands-on target.
+
+</details>
+
+<details><summary><b>50.</b> What kind of authoring experience does Mage offer, and who is it aimed at?</summary>
+
+Mage is an open-source pipeline tool whose differentiator is a notebook-like, block-based authoring surface where each block is a step you build and preview interactively, with scheduling built in. It targets teams wanting a lighter, more visual build loop than classic Airflow DAG authoring. For this lesson it is awareness-level — know its block-based, interactive pitch and that it competes in the same lightweight-orchestrator space as Prefect.
+
+</details>
+
+<details><summary><b>51.</b> What is Azure Data Factory (ADF), and why does it appear as "the Azure reality"?</summary>
+
+ADF is Azure's managed data-integration and orchestration service, offering pipelines, a large library of connectors, and a low-code visual authoring surface, billed per activity/integration-runtime usage. It appears as the Azure reality because in an Azure-committed enterprise it is frequently already paid for and mandated, so any FOSS recommendation must survive comparison to it. The architect must be able to map a Dagster/Airflow design onto ADF and argue the trade-offs.
+
+</details>
+
+<details><summary><b>52.</b> What is "Workflow Orchestration Manager" in the Azure context?</summary>
+
+Workflow Orchestration Manager is Azure Data Factory's managed Apache Airflow offering, letting you run Airflow DAGs as a service within ADF rather than self-hosting the scheduler. It is Azure's answer to "we want real Airflow but managed", comparable in spirit to AWS MWAA and GCP Cloud Composer. It matters because it can blunt the "but ADF is already in our agreement" objection while still giving you genuine Airflow.
+
+</details>
+
+<details><summary><b>53.</b> Name the three big-cloud managed-Airflow services and their providers.</summary>
+
+AWS offers MWAA (Managed Workflows for Apache Airflow), GCP offers Cloud Composer, and Azure offers managed Airflow via Workflow Orchestration Manager within Data Factory. All three run upstream Airflow so your DAGs are largely portable across them. The differences that matter at build-vs-buy level are pricing model, upgrade cadence, and the degree of lock-in to each cloud's surrounding services.
+
+</details>
+
+<details><summary><b>54.</b> What dimensions belong in a build-vs-buy evaluation of a managed orchestrator?</summary>
+
+Pricing model (per-environment, per-activity, per-DCU/worker, idle cost), upgrade cadence and how quickly new engine versions land, lock-in to the surrounding cloud ecosystem, operational burden removed versus control surrendered, and the team's skills. You weigh the saved ops effort against reduced flexibility and recurring cost. For a small team the "we don't want to run a scheduler at 2am" factor often dominates.
+
+</details>
+
+<details><summary><b>55.</b> What is `pg_cron`, and when is it the right tool instead of Airflow or Dagster?</summary>
+
+`pg_cron` is a Postgres extension that schedules SQL commands inside a single database on a cron schedule. It is the right tool when the entire need is periodic SQL in one database — refreshing a materialized view, a nightly cleanup, a scheduled `VACUUM` — with zero extra infrastructure to run. It deliberately stays inside that database and adds no new moving parts.
+
+</details>
+
+<details><summary><b>56.</b> When is `pg_cron` the wrong tool, and what do you reach for instead?</summary>
+
+It is wrong as soon as you have cross-system DAGs, inter-task dependencies, backfills, retries, or lineage, because `pg_cron` has no dependency graph and no observability — it just fires SQL on a timer. For anything with real orchestration semantics you reach for Dagster or Airflow. Using `pg_cron` to chain multi-step, multi-system pipelines reinvents an orchestrator badly and blindly.
+
+</details>
+
+<details><summary><b>57.</b> A daily Airflow DAG produced no runs after you unpaused it, even though its start date is months ago. First thing to check?</summary>
+
+Check `catchup` and the schedule/start-date interaction: with `catchup=False` the scheduler creates only the latest interval, and if no full interval has elapsed since the start date plus schedule, no run is due yet. Confirm the DAG is actually unpaused and the scheduler is healthy. The classic trap is expecting historical runs to appear when `catchup=False` deliberately suppresses them.
+
+</details>
+
+<details><summary><b>58.</b> An Airflow sensor seems to "hang forever" and your cluster slows to a crawl. What is the likely cause?</summary>
+
+Likely a fleet of `poke`-mode sensors each holding a worker slot while waiting, starving the executor of capacity — a sensor deadlock. The waiting condition may never have been met, or there simply aren't enough slots for both sensors and real work. The fix is to switch long waits to `reschedule` mode and/or set a `timeout`, and to consider data-aware/event-driven triggering instead of polling.
+
+</details>
+
+<details><summary><b>59.</b> After a 30-day backfill you find some daily totals doubled. What does that tell you?</summary>
+
+It tells you the task is not idempotent — it appended to the target partition instead of overwriting it, so each backfilled date added a second copy on top of the existing one. The fix is to make the write delete-then-insert (or upsert) scoped to the run's partition before reprocessing, then re-backfill from clean. Doubling after a rerun is the signature symptom of a missing idempotency contract.
+
+</details>
+
+<details><summary><b>60.</b> Your Airflow scheduler is slow and DAGs appear with a lag. The DAG files import heavy libraries at the top. Connection?</summary>
+
+Yes — the scheduler parses every DAG file on each parse loop, so heavy top-level imports and any top-level work run repeatedly and inflate parse time, delaying when runs are scheduled. Move heavy imports and logic inside task callables so they execute only at task runtime, and keep module scope thin. This is the "business logic in DAG files" anti-pattern manifesting as scheduler lag.
+
+</details>
+
+<details><summary><b>61.</b> In Dagster you ran a 30-day backfill after a logic fix. How do you prove exactly which partitions recomputed?</summary>
+
+Inspect the materialization records for the asset and list the partition keys with new materialization timestamps from the backfill — the asset's partition status in the UI or the event log shows precisely which dates were rematerialized. Because each partition is an independent unit, the set of recomputed keys is explicit, not inferred. You can cross-check by diffing row counts or a reconciliation total per partition before and after.
+
+</details>
+
+<details><summary><b>62.</b> Why does the asset model make "which partitions recomputed and why" easy to answer, where task-orientation makes it hard?</summary>
+
+In the asset model the partition is the unit of materialization and each one carries its own status and event history, so the recomputed set is literally enumerable. In task-orientation you cleared a range of task instances whose relationship to data slices is conventional, not enforced, so you must reason about it externally. The asset model records the data-level fact; the task model records only the job-level fact.
+
+</details>
+
+<details><summary><b>63.</b> What does "exactly once per valuation day" mean for a NAV pipeline, and how does the orchestrator help enforce it?</summary>
+
+It means the NAV for a given valuation date is computed once, completely, in dependency order, and not silently recomputed or skipped — the report reflects that day's data and only that day's. The orchestrator enforces it by tying the run to the valuation-date partition, gating downstream steps on upstream success, and making reruns idempotent so a retry corrects rather than duplicates. Without that discipline a missed upstream file yields yesterday's prices in today's report.
+
+</details>
+
+<details><summary><b>64.</b> How does an orchestrator catch a "missed upstream file silently produces yesterday's prices" failure?</summary>
+
+By making the consuming step depend on the actual arrival/freshness of the file — a sensor, an asset update event, or a freshness check — so absence blocks or alerts rather than letting a stale prior partition be reused. The dependency turns "file didn't arrive" into a visible failed/overdue state instead of a quiet success on old data. The alternative, a fixed-time job that reads "whatever is there", is exactly how the transfer agent finds out from a client.
+
+</details>
+
+<details><summary><b>65.</b> What does idempotency buy you specifically in a regulated restatement scenario?</summary>
+
+It lets you rerun a corrected computation for an affected valuation date and trust that the result replaces the bad partition cleanly, with no duplication, giving a reproducible recompute you can defend to an auditor. Combined with partitioning, you can recompute exactly the impacted days. Without idempotency, a restatement rerun risks producing new, differently-wrong numbers, compounding the original error.
+
+</details>
+
+<details><summary><b>66.</b> How would an asset check encode the rule "every published share class must have an ISIN"?</summary>
+
+Define an asset check on the published holdings/NAV asset asserting that no row has a null or malformed `ISIN`, failing with error severity if any do. Bound to the asset, a violation is visible in lineage and can block publication of that partition. This turns a data-quality rule into a structural gate so a share class missing its `ISIN` never silently reaches the EMT/EPT consumer.
+
+</details>
+
+<details><summary><b>67.</b> What is an ISIN, and why is it a natural key to validate in a fund orchestration check?</summary>
+
+An ISIN (International Securities Identification Number) is the 12-character standard identifier for a security, including fund share classes. It is a natural key because downstream consumers — EMT/EPT files, transfer-agency records, reporting — join on it, so a missing, duplicated, or malformed ISIN corrupts the whole feed. An asset check validating ISIN presence and format guards that join surface at the point of production.
+
+</details>
+
+<details><summary><b>68.</b> What are EMT/EPT files, and where does orchestration fit in producing them?</summary>
+
+EMT (European MiFID Template) and EPT (European PRIIPs Template) are standardized data exchange files conveying product and cost information for funds to distributors and PRIIP manufacturers. Orchestration ensures the upstream NAV, cost, and reference-data assets are fresh and validated before the EMT/EPT generation step runs, and that it runs once per cycle. Asset checks on completeness (every share class present) protect the feed from silent gaps.
+
+</details>
+
+<details><summary><b>69.</b> How does data-aware/event-driven scheduling improve handling of an incoming SWIFT message in a fund pipeline?</summary>
+
+Instead of a clock-based job hoping the SWIFT message has landed, an event-driven trigger (an Airflow `AssetWatcher` on the queue, or a sensor) fires processing the instant the message arrives. This reduces latency and removes the "ran too early, message wasn't there" failure mode. The pipeline reacts to the actual data event rather than to an assumption about timing.
+
+</details>
+
+<details><summary><b>70.</b> What is a LEI, and why might an orchestrated reference-data pipeline track its freshness?</summary>
+
+An LEI (Legal Entity Identifier) is a 20-character ISO 17442 code identifying a legal entity in financial transactions, and LEIs have a validity/renewal lifecycle. A reference-data pipeline tracks freshness so that lapsed or stale LEI records are flagged before they flow into regulatory reporting. A freshness check on the LEI reference asset turns "this entity's LEI hasn't been refreshed" into an alert rather than a downstream rejection.
+
+</details>
+
+<details><summary><b>71.</b> How does orchestration discipline relate to DORA's operational-resilience expectations?</summary>
+
+DORA (the EU Digital Operational Resilience Act) pushes financial entities toward demonstrable, recoverable, monitored ICT operations, and an orchestrator with explicit dependencies, retries, alerting, lineage, and reproducible backfills is precisely the evidence of that control. Being able to show "the NAV pipeline ran in order, was monitored, and can be recomputed deterministically" is operational resilience made concrete. A pile of unmonitored cron jobs is the opposite of what DORA expects.
+
+</details>
+
+<details><summary><b>72.</b> A stakeholder asks "prove today's NAV report used the right prices". How does the right orchestration design answer this?</summary>
+
+With asset lineage you trace the NAV asset back through its declared dependencies to the exact validated-prices partition and tag/snapshot used, and with freshness/asset checks you show those inputs passed their gates for that valuation date. The orchestrator already holds this graph, so the answer is a query, not a forensic reconstruction. This is the core argument for asset-oriented orchestration in a regulated context.
+
+</details>
+
+<details><summary><b>73.</b> Why is a cron-only "stack of scheduled scripts" risky for a NAV pipeline even if each script works?</summary>
+
+Because cron has no dependency awareness, no retry/idempotency contract, no lineage, and no visibility into whether upstream actually finished — so a slow or missing upstream silently lets a downstream script run on stale data. Each script working in isolation says nothing about the pipeline being correct as a whole. The orchestrator exists precisely to encode and enforce the between-step guarantees cron cannot.
+
+</details>
+
+<details><summary><b>74.</b> What should the comparison memo for a 6-person fund-data team on Azure actually compare?</summary>
+
+It should compare dev loop (iteration speed and testability), backfill ergonomics, lineage and freshness support, ongoing operational burden, and the team's skill demands across Dagster, Airflow, and ADF — ending in a defended recommendation. It must explicitly address the "ADF is already in our Azure agreement" objection rather than ignoring cost. The deliverable is a decision a CAB can act on, not a feature checklist.
+
+</details>
+
+<details><summary><b>75.</b> How do you counter "but ADF is already included in our Azure agreement" when recommending Dagster?</summary>
+
+Acknowledge the sunk-cost reality, then argue on total cost and fit: weigh ADF's per-activity billing and weaker lineage/asset semantics against the engineering cost of building lineage, freshness, and testable transforms around it, and the team's productivity on each. If asset-level lineage and freshness materially reduce audit and incident cost for a regulated NAV pipeline, that value can outweigh ADF being "free". The honest answer may also be hybrid — Airflow on Azure's managed offering — if skills and lock-in dominate.
+
+</details>
+
+<details><summary><b>76.</b> What is the danger of putting non-idempotent business logic directly into operator parameters templated on the wrong date?</summary>
+
+If the templated date is `now()` or a misunderstood `execution_date`, every retry or backfill processes a different or wrong window, and a non-idempotent write then layers inconsistent results on top of each other. You get partitions that neither match their label nor reproduce on rerun. Correctness requires both the right interval template (`data_interval_start/end`) and an idempotent write.
+
+</details>
+
+<details><summary><b>77.</b> What is the difference between a task failing and a task producing wrong-but-green output, and why does it matter for on-call?</summary>
+
+A failing task is loud — it pages and blocks downstream — whereas wrong-but-green output passes, propagates, and is discovered only by a consumer or auditor later. It matters because retries and SLAs catch failures but not silent correctness errors. This is exactly why asset checks (reconciliation, row counts, ISIN completeness) exist: to convert silent data-wrong into a loud, gating failure.
+
+</details>
+
+<details><summary><b>78.</b> Why can a pipeline be "code-green" yet "data-wrong", and which orchestration feature catches it?</summary>
+
+Schema and unit tests verify the code's shape and logic but not that the produced data is correct for this run — a valid query can still drop rows or shift a total. Asset checks that run against the actual materialized data (counts, reconciliations, distribution checks) catch the data-level defect the green code did not. Binding those checks to assets makes the catch structural and visible in lineage.
+
+</details>
+
+<details><summary><b>79.</b> How do retries, SLAs/freshness alerts, and asset checks divide the failure-handling responsibility?</summary>
+
+Retries absorb transient, self-healing faults (a blip in a network call); SLAs/freshness alerts catch lateness and staleness even when nothing errored; asset checks catch data that is present and on time but wrong. Together they cover the three distinct failure shapes — flaky, late, and incorrect. Relying on retries alone leaves you blind to late and to wrong.
+
+</details>
+
+<details><summary><b>80.</b> What is a "freshness alert" meant to detect that a retry never would?</summary>
+
+A freshness alert detects that an asset has not been updated within its acceptable window — staleness — which is invisible to retries because no task errored; the data simply did not refresh on time or at all. It surfaces "the NAV inputs are older than allowed" before a consumer reads stale numbers. Retries only fire on failures, so a quietly-skipped upstream slips past them entirely.
+
+</details>
+
+<details><summary><b>81.</b> Why is "one comparison DAG" in Airflow worth building even if you choose Dagster?</summary>
+
+Because Airflow is the incumbent in most fund-admin shops, so market fluency — being able to read, author, and critique a real Airflow DAG with a sensor, idempotent tasks, and deliberate `catchup` — is a hiring and architecture-credibility requirement. Building one forces you to feel the task-oriented model concretely rather than describe it secondhand. It also makes your Dagster-vs-Airflow memo credible because you have run both.
+
+</details>
+
+<details><summary><b>82.</b> In Airflow, how do you wire a sensor, idempotent tasks, and deliberate catchup into one branch of a pipeline?</summary>
+
+Start the branch with a sensor waiting on the input's readiness (file/partition/asset), follow with tasks whose writes are partition-scoped delete-then-insert so reruns are safe, and set `catchup` explicitly to match whether you want historical intervals filled. Each task templates on the run's data interval, never on `now()`. The result is a branch that starts on readiness, reruns safely, and backfills predictably.
+
+</details>
+
+<details><summary><b>83.</b> What does "declarative" mean in "declarative automation", contrasted with imperative triggers?</summary>
+
+Declarative means you state the desired condition for an asset to be up to date and let the system figure out and execute what is needed, whereas imperative means you hand-wire each trigger, sensor, and schedule yourself. With declarative automation you say "keep gold eager on silver"; with imperative you write a sensor that watches silver and launches gold. The declarative form scales better and drifts less because intent, not plumbing, is the source of truth.
+
+</details>
+
+<details><summary><b>84.</b> Why does hand-wiring many sensors and schedules become an anti-pattern at scale?</summary>
+
+Because each hand-wired trigger is a piece of bespoke plumbing that can drift out of sync with the actual data dependencies, multiplying maintenance and creating gaps where something silently fails to fire. As the asset count grows, the combinatorics of cross-dependencies overwhelm manual wiring. Declarative automation derives the triggers from declared dependencies, so the plumbing cannot drift from the graph.
+
+</details>
+
+<details><summary><b>85.</b> What is the relationship between Airflow asset-based scheduling and Dagster declarative automation conceptually?</summary>
+
+Both move from clock-time triggering to data-readiness triggering: Airflow schedules consumer DAGs when producer tasks update assets, and Dagster materializes assets when their `AutomationCondition` (e.g. `eager`) is satisfied by upstream updates. They are the same instinct — react to data events, not the clock — expressed in each tool's model. Dagster's version is more deeply integrated because the asset is the primitive, not an annotation on tasks.
+
+</details>
+
+<details><summary><b>86.</b> How would you decide between daily-partitioned assets and a single unpartitioned asset for NAV data?</summary>
+
+Use daily partitions when you need to compute, backfill, and reason about each valuation day independently — which is exactly the NAV case, since restatements and freshness are per-day. An unpartitioned asset suits data with no meaningful time slicing or where full recompute is cheap and total. For NAV, partitions give precise backfills and per-day freshness/audit, so they are the right default.
+
+</details>
+
+<details><summary><b>87.</b> What is the risk of over-partitioning an asset, and how do you spot it?</summary>
+
+Over-partitioning (e.g. per-minute when you only ever consume daily) explodes the number of partitions, slowing the UI, the daemon's evaluation, and backfills, while adding no analytical value. You spot it when partition counts reach into the hundreds of thousands and automation evaluation or the asset graph becomes sluggish. Choose the partition grain to match how you actually query, backfill, and audit the data.
+
+</details>
+
+<details><summary><b>88.</b> Why should an asset check that gates publication usually have `ERROR` severity rather than `WARN`?</summary>
+
+Because `ERROR` is the severity that should block downstream publication and page on-call, whereas `WARN` merely records a concern without stopping the flow. A reconciliation or ISIN-completeness failure on a NAV feed is publish-blocking, so it must be `ERROR`. Using `WARN` for a gate would let bad data through while creating the false comfort that "a check exists".
+
+</details>
+
+<details><summary><b>89.</b> When is `WARN` the appropriate severity for an asset check?</summary>
+
+When the condition is a soft signal worth surfacing but not worth halting the pipeline — e.g. a row count slightly outside a typical range that is plausible, or an early-warning threshold ahead of a hard `ERROR` limit. You might pair a `WARN` and an `ERROR` check on the same asset at different thresholds. The principle is: block on what must not ship, alert-only on what merely merits a look.
+
+</details>
+
+<details><summary><b>90.</b> A Dagster asset shows as "stale" in the UI. What does staleness mean here?</summary>
+
+Staleness means Dagster has detected that the asset's upstream dependencies or code version changed since the asset was last materialized, so its current materialization may no longer reflect its inputs. It is a derived signal from the dependency graph and versions, distinct from a freshness check on update time. It tells you a rematerialization is warranted to bring the asset back in line with its inputs.
+
+</details>
+
+<details><summary><b>91.</b> How does code-version awareness help Dagster decide what to rerun?</summary>
+
+Dagster can track an asset's code version and mark dependents as stale when the version changes, and an `AutomationCondition` like `code_version_changed()` can trigger rematerialization on that change. This means a logic fix can automatically propagate recomputation to affected assets rather than relying on a human to remember. It ties "the transformation changed" directly to "recompute what depends on it".
+
+</details>
+
+<details><summary><b>92.</b> Why is "the same declaration drives both scheduling and lineage" a powerful property?</summary>
+
+Because there is a single source of truth — the asset's declared dependencies — there is no second, drift-prone metadata system to keep in sync; what runs and what the lineage shows are guaranteed consistent. In task-oriented setups the lineage is reconstructed separately and can diverge from reality. One declaration, two derived outputs, no drift, is why asset-orientation reduces a whole class of "the docs say X but the pipeline does Y" bugs.
+
+</details>
+
+<details><summary><b>93.</b> What is the operational cost difference between running self-hosted Airflow and a managed offering like MWAA or Composer?</summary>
+
+Self-hosted Airflow means you own the scheduler, executor, database, upgrades, scaling, and patching, trading recurring engineering toil for full control and no per-environment vendor markup. Managed offerings remove most of that toil for a recurring fee and a fixed upgrade cadence, at the cost of some configuration flexibility and cloud lock-in. For a small team the removed 2am-pager toil often justifies the managed premium.
+
+</details>
+
+<details><summary><b>94.</b> What does "lock-in" specifically mean when evaluating ADF versus portable Airflow DAGs?</summary>
+
+Lock-in is the degree to which your pipelines are bound to one vendor's proprietary surface so that leaving is costly. ADF pipelines authored in its visual/JSON model and tied to Azure-specific activities are harder to lift to another cloud than Airflow DAGs, which run on any managed-Airflow offering. The architect weighs that portability against the convenience of ADF's native Azure integration and existing agreement.
+
+</details>
+
+<details><summary><b>95.</b> A new Dagster asset with `AutomationCondition.eager()` never auto-materializes when its upstream updates. First checks?</summary>
+
+First confirm the Dagster daemon is running, since automation conditions are evaluated by the daemon — without it, nothing materializes automatically. Then verify the upstream is actually emitting materialization events the condition can observe, and that the asset's dependency on that upstream is correctly declared. A defined-but-unevaluated condition (no daemon) is the most common cause.
+
+</details>
+
+<details><summary><b>96.</b> Why is "exactly once" easier to reason about with partitioned assets than with a long-running streaming job?</summary>
+
+A partitioned batch asset has a discrete, named unit (the valuation-day partition) whose materialization is recorded, so "did June 12 run exactly once?" is a direct lookup. A continuous stream has no such natural per-day boundary, so exactly-once becomes a harder property of offsets and checkpoints. For daily NAV the partitioned-batch framing matches the business cadence and makes the guarantee inspectable.
+
+</details>
+
+<details><summary><b>97.</b> How does a deliberate `catchup` configuration support a clean 30-day backfill in Airflow?</summary>
+
+Setting `catchup` deliberately means you control whether normal scheduling already filled those intervals, so a subsequent manual backfill over 30 days has predictable, non-overlapping scope. If `catchup` were accidentally `True` with an old start date, you could get a confusing tangle of auto and manual runs. Deciding `catchup` up front keeps "what the scheduler did automatically" and "what I backfilled deliberately" cleanly separable.
+
+</details>
+
+<details><summary><b>98.</b> After a backfill in both tools, how do you record "which partitions recomputed and how you proved it"?</summary>
+
+List the recomputed partition keys (Dagster: the asset's materialized partition statuses/event log; Airflow: the cleared/rerun task-instance date range) and attach evidence per partition — changed row counts, a reconciliation total, or a checksum before and after. The proof is the per-partition delta, not merely "the backfill ran". Recording it makes the recompute auditable and turns the exercise into the kind of evidence a regulator or CAB accepts.
+
+</details>
+
+<details><summary><b>99.</b> What is the trade-off between ADF's low-code visual authoring and a code-first orchestrator like Dagster or Airflow?</summary>
+
+ADF's visual/JSON authoring lowers the barrier for analysts and is fast for simple connector-driven movement, but it resists the software-engineering practices — version control diffs, unit testing, code review, modular reuse — that code-first orchestrators make natural. A code-first DAG or asset definition lives in Git, is testable, and is reviewable in a PR, which matters enormously for a regulated, auditable platform. The architect weighs ADF's accessibility against the engineering rigor that Python-defined pipelines bring to change control.
+
+</details>
+
+<details><summary><b>100.</b> Summarize, in two minutes' worth, the architect's case for choosing asset-oriented orchestration for a regulated fund platform.</summary>
+
+Asset-orientation makes the data products — NAV, validated prices, reference data — the primitives, so lineage and freshness come built in and answer auditors' "what fed this and was it fresh?" directly. Asset checks bind reconciliation, ISIN completeness, and row-count gates structurally to the products, turning silent data-wrong into loud, publish-blocking failures, and declarative automation rebuilds downstream on real data readiness instead of cron guesses. The trade-off is the incumbency and hiring weight of Airflow plus the gravity of an existing ADF agreement, which a sound memo weighs explicitly before recommending — Dagster where lineage and audit cost dominate, Airflow where skills and ecosystem do.
+
+</details>
+
+
+## Phase 3 · 9.2.2 Data versioning & write-audit-publish — 100 self-test questions
+
+<details><summary><b>1.</b> What is the write-audit-publish (WAP) pattern in one sentence?</summary>
+
+WAP is a data-loading pattern where you first write new data to a staging area that consumers cannot see, then run automated checks (audit) against it, and only publish it to the consumer-visible table if the checks pass. The point is that the audit gate is structural rather than a promise: bad data is physically isolated until proven good. In a fund context this is why a corrupted price file can be caught before it ever reaches the gold layer that feeds the NAV calculation.
+
+</details>
+
+<details><summary><b>2.</b> Why do auditors and regulators favour the WAP pattern over a plain "load then validate" pipeline?</summary>
+
+Because in WAP the isolation is structural — the data simply is not visible to consumers until the check passes — whereas "load then validate" relies on humans reacting to an alert after bad data is already live. Auditors want a control they can see in the system design, not a procedure someone might skip under deadline pressure. A demonstrable audit branch that never fast-forwarded on red is far stronger evidence than a log line saying someone meant to roll back.
+
+</details>
+
+<details><summary><b>3.</b> In a fund-administration platform, what is the concrete cost of NOT having a WAP gate before the gold layer?</summary>
+
+Without WAP a corrupted price file lands directly in the gold layer, the NAV is computed and published wrong, and the remediation becomes a formal restatement letter to investors and regulators rather than a quietly deleted staging branch. The restatement is expensive, reputation-damaging, and may trigger regulatory reporting obligations. The architectural difference is whether a bad load is a non-event or an incident.
+
+</details>
+
+<details><summary><b>4.</b> What is an Iceberg snapshot?</summary>
+
+A snapshot is an immutable, point-in-time record of the complete state of an Iceberg table — the set of data files that make up the table at the moment of a commit. Every write operation creates a new snapshot, and the table's metadata keeps a list of them, forming the lineage you can time-travel through. Branches and tags are simply named references that point at specific snapshots.
+
+</details>
+
+<details><summary><b>5.</b> What is an Iceberg branch?</summary>
+
+An Iceberg branch is a named, independently mutable reference to a snapshot that has its own lifecycle and retention policy; writes to a branch create new snapshots on that branch without affecting other branches. This lets you stage changes on, say, an `audit` branch in isolation from `main`. Branches are the mechanism that makes table-level write-audit-publish possible inside a single Iceberg table.
+
+</details>
+
+<details><summary><b>6.</b> What is an Iceberg tag, and how does it differ from a branch?</summary>
+
+A tag is a named reference to a single, fixed snapshot — it points at one snapshot and is not advanced by writes, making it effectively immutable, whereas a branch moves forward as you commit to it. You use a branch for ongoing work (staging, audit) and a tag to permanently mark a snapshot of record, such as the exact state used for a given valuation date's NAV. Tags are the natural fit for immutable audit markers.
+
+</details>
+
+<details><summary><b>7.</b> What is the name of Iceberg's default branch?</summary>
+
+The default branch is called `main`. When you query a table normally you read from `main`, and operations that don't specify a branch write to `main`. Every Iceberg table has a `main` branch implicitly, and other branches are created relative to it.
+
+</details>
+
+<details><summary><b>8.</b> Write the Spark SQL to create an Iceberg branch named `audit` on table `prod.db.prices`.</summary>
+
+`ALTER TABLE prod.db.prices CREATE BRANCH audit` (the branch name is normally back-quoted in real DDL). This creates a branch pointing at the current snapshot of `main` with default retention. You would then direct your staging writes to that branch, validate, and only fast-forward `main` if the checks pass.
+
+</details>
+
+<details><summary><b>9.</b> How do you create an Iceberg branch from a specific historical snapshot rather than the current one?</summary>
+
+Use the `AS OF VERSION` clause, for example `ALTER TABLE prod.db.prices CREATE BRANCH `replay` AS OF VERSION 3`. This roots the new branch at snapshot id 3 instead of the current head of `main`. It is useful when you need to re-stage work from a known-good prior state, for instance to reproduce a NAV run from a particular point in the lineage.
+
+</details>
+
+<details><summary><b>10.</b> Write the Spark SQL to create an Iceberg tag named `EOM-01` at snapshot version 30, retained for 180 days.</summary>
+
+`ALTER TABLE prod.db.prices CREATE TAG `EOM-01` AS OF VERSION 30 RETAIN 180 DAYS`. This pins an immutable marker to snapshot 30 and tells Iceberg to keep that reference for 180 days. End-of-month tags like this are exactly how you preserve the snapshot a month-end NAV was computed from.
+
+</details>
+
+<details><summary><b>11.</b> What happens if you try to `CREATE TAG` with a name that already exists, and how do you intentionally move a tag?</summary>
+
+A plain `CREATE TAG` on an existing name fails because the tag already exists; to intentionally repoint it you use `CREATE OR REPLACE TAG` (or `REPLACE TAG`), which advances the named reference to a new snapshot. The gotcha is that replacing an audit tag silently rewrites your evidence of which snapshot a figure used, so audit tags should be treated as write-once and never replaced. Use replace only for moving working markers, not for tags of record.
+
+</details>
+
+<details><summary><b>12.</b> What does the `RETAIN <n> DAYS` clause control when creating a branch or tag?</summary>
+
+`RETAIN <n> DAYS` sets the maximum reference age — how long the named branch or tag reference itself is kept before it becomes eligible for expiry. It governs the lifetime of the pointer, not directly the data files, though expiring the reference can make its snapshots collectable. For an audit tag you want this set long enough to cover your regulatory retention window.
+
+</details>
+
+<details><summary><b>13.</b> What does `WITH SNAPSHOT RETENTION 2 SNAPSHOTS` mean in `CREATE BRANCH ... RETAIN 7 DAYS WITH SNAPSHOT RETENTION 2 SNAPSHOTS`?</summary>
+
+It sets a branch-level snapshot retention policy: keep at least 2 of the most recent snapshots on that branch regardless of age. This is independent of the 7-day reference age and protects a minimum number of snapshots from expiration. It lets a busy branch retain just a couple of recent states without holding everything forever.
+
+</details>
+
+<details><summary><b>14.</b> Which two retention dimensions can a branch carry, and what is the difference?</summary>
+
+A branch can carry a maximum reference age (how long the branch reference lives, set via `RETAIN ... DAYS` / `max-ref-age-ms`) and a snapshot retention policy on the branch (a minimum number of snapshots and/or a maximum snapshot age via `min-snapshots-to-keep` and `max-snapshot-age-ms`). The first decides when the branch pointer itself expires; the second decides which snapshots on the branch survive expiration runs. Tuning both lets you keep an audit branch lean without losing the snapshots you must retain.
+
+</details>
+
+<details><summary><b>15.</b> How do you read from a specific Iceberg branch in Spark SQL?</summary>
+
+Use the branch identifier, for example `SELECT * FROM prod.db.prices VERSION AS OF 'audit'` or the dot-suffix form `prod.db.prices.branch_audit`. This lets you validate the staged data on the `audit` branch with the same queries you would run on `main`. Being able to point your existing DQ checks at the branch is what makes WAP cheap to bolt on.
+
+</details>
+
+<details><summary><b>16.</b> How do you read the state of a table as of a tag named `EOM-01`?</summary>
+
+Use `SELECT * FROM prod.db.prices VERSION AS OF 'EOM-01'`, which resolves the tag to its pinned snapshot and reads that exact state. Because a tag never moves, this query is reproducible forever (until the tag is expired). That reproducibility is the whole audit story: the same tag always returns the same data a NAV report was computed from.
+
+</details>
+
+<details><summary><b>17.</b> What is the `fast_forward` procedure in Iceberg and when do you call it?</summary>
+
+`fast_forward` advances one branch to the head of another when the target is an ancestor of the source — for example `CALL catalog.system.fast_forward('prod.db.prices', 'main', 'audit')` moves `main` to the latest snapshot of `audit`. You call it as the "publish" step of WAP, after the audit checks on the `audit` branch pass. Because it is a fast-forward (no merge conflict resolution), the published state on `main` is exactly the validated state.
+
+</details>
+
+<details><summary><b>18.</b> In the WAP flow, what is the consequence of the audit checks failing on the staging branch?</summary>
+
+If the checks fail you simply do not call `fast_forward`, so `main` never advances and the bad data stays quarantined on the `audit` branch where no consumer reads it. You then alert and hold the branch for inspection, or drop it. The defining property is that "do nothing" already protects production — there is no rollback to perform because nothing was published.
+
+</details>
+
+<details><summary><b>19.</b> What does the table property `write.wap.enabled` do?</summary>
+
+Setting `write.wap.enabled=true` puts the table into write-audit-publish mode so that writes tagged with a WAP id are staged only — they create snapshots that are not reflected in the table's current state until explicitly published. It is the table-level switch that turns on the staged-write behaviour. Without it, the WAP id mechanism does not stage writes.
+
+</details>
+
+<details><summary><b>20.</b> What does the Spark session property `spark.wap.id` control?</summary>
+
+`spark.wap.id` assigns an identifier to the writes performed in that session so that, with `write.wap.enabled=true`, the resulting snapshot is staged under that id instead of becoming the table's live state. Later you publish by referencing that id. It is how you label a batch of staged writes for a subsequent audit-and-publish decision.
+
+</details>
+
+<details><summary><b>21.</b> What does the `publish_changes` procedure do?</summary>
+
+`publish_changes` takes a staged WAP id and publishes its changes into the current table state by cherry-picking the staged snapshot, creating a new snapshot from it without altering or removing the original. For example `CALL catalog.system.publish_changes('prod.db.prices', 'wap-2026-06-13')`. It is the WAP-id flavour of "publish", as opposed to the branch-fast-forward flavour.
+
+</details>
+
+<details><summary><b>22.</b> There is a known issue with `publish_changes` and multiple snapshots sharing one WAP id — what is it?</summary>
+
+If multiple snapshots in the table carry the same `wap.id`, `publish_changes` only cherry-picks the earliest matching snapshot and silently ignores the others (tracked as Iceberg issue #14953). The gotcha is that staged changes can be quietly dropped, so you should ensure one WAP id maps to one staged snapshot, or prefer the branch-based WAP flow. Silent data loss in a regulated pipeline is exactly the kind of surprise to design out.
+
+</details>
+
+<details><summary><b>23.</b> What does the `cherry_pick_snapshot` procedure do?</summary>
+
+`cherry_pick_snapshot` applies the changes from an existing snapshot onto the current table state, creating a new snapshot, without removing the original — for example `CALL catalog.system.cherry_pick_snapshot('prod.db.prices', 8)`. It is the lower-level building block that publish-style operations use. Only append and dynamic-overwrite snapshots can be cherry-picked.
+
+</details>
+
+<details><summary><b>24.</b> Which kinds of snapshots can be cherry-picked or published in Iceberg, and why does that limit matter?</summary>
+
+Only append and dynamic-overwrite snapshots can be successfully cherry-picked or published. This matters because if your staged write was, say, a full overwrite or a row-level delete, the simple publish procedures may not apply and you must rethink the WAP mechanics. Knowing the limit up front prevents designing a WAP pipeline that cannot actually publish its staged writes.
+
+</details>
+
+<details><summary><b>25.</b> Compare the two ways Iceberg can implement WAP: branch-based vs WAP-id-based.</summary>
+
+Branch-based WAP writes to a named branch (e.g. `audit`), validates by reading that branch, and publishes with `fast_forward`; WAP-id-based WAP uses `write.wap.enabled` plus `spark.wap.id` to stage snapshots under an id and publishes with `publish_changes`/`cherry_pick_snapshot`. The branch approach is more explicit, easier to inspect, and avoids the multiple-same-id gotcha. Most modern Iceberg WAP designs prefer branches for that clarity.
+
+</details>
+
+<details><summary><b>26.</b> What is an "audit branch" use case in Iceberg's own terminology?</summary>
+
+The audit-branch use case is writing incoming data to a dedicated branch, running data-quality validations against that branch in isolation, and fast-forwarding `main` only when the validations pass. It is Iceberg's documented canonical example of branching, and it is precisely the WAP gate. The branch is the quarantine; the fast-forward is the release.
+
+</details>
+
+<details><summary><b>27.</b> What is the difference between Iceberg time travel via snapshot id and via a tag?</summary>
+
+Time travel by snapshot id (`VERSION AS OF <id>`) targets a numeric snapshot that means little to a human and may be expired, whereas a tag gives that snapshot a stable, human-meaningful name with its own retention. For audit you want tags, because "the snapshot for valuation date 2026-06-12" is a far stronger reference than "snapshot 41872" that someone might expire. Tags turn time travel into a durable audit narrative.
+
+</details>
+
+<details><summary><b>28.</b> How would you demonstrate, using tags alone, which snapshot a given day's NAV report was computed from?</summary>
+
+You tag the published snapshot with the valuation date at publish time, for instance a tag named `nav-2026-06-12` created with `CREATE TAG`, and later run `SELECT * FROM ... VERSION AS OF 'nav-2026-06-12'` to reproduce the exact input data. Because the tag is immutable and never moves, the query reproduces the precise state the NAV used. That is the audit deliverable: a named, reproducible pointer to the data of record.
+
+</details>
+
+<details><summary><b>29.</b> What is snapshot expiration in Iceberg and why is it relevant to a versioning strategy?</summary>
+
+Snapshot expiration (e.g. via `expire_snapshots`) removes old snapshots and their orphaned data files to reclaim storage, but it can delete the very history you rely on for audit. It is relevant because branch and tag retention policies protect referenced snapshots from expiration, so your audit tags survive while unreferenced clutter is cleaned up. Getting retention wrong can either bloat storage or destroy required history.
+
+</details>
+
+<details><summary><b>30.</b> A teammate created an audit tag but it disappeared after a maintenance job. What is the first thing to check?</summary>
+
+Check the tag's reference age / retention against the maintenance schedule — a tag created with a short `RETAIN ... DAYS` (or default) can become eligible for expiry, after which a snapshot-expiration job removes it. The fix is to recreate audit tags with a retention long enough to cover the regulatory window. Always set explicit, generous retention on audit markers rather than relying on defaults.
+
+</details>
+
+<details><summary><b>31.</b> Why does WAP at the Iceberg level only protect a single table?</summary>
+
+Iceberg branches and tags are per-table references, so a branch isolates and an audit gate protects exactly that one table's writes — there is no cross-table atomicity. If a load must update several tables consistently (e.g. prices and FX rates together), table-level branching cannot guarantee they publish as one unit. That gap is precisely what lake-level tools like lakeFS and Nessie address.
+
+</details>
+
+<details><summary><b>32.</b> What problem does lakeFS solve that Iceberg branching does not?</summary>
+
+lakeFS provides Git-like versioning across the whole data lake — many objects and many tables at once — rather than within a single table, so you can branch, validate, and merge a consistent set of files spanning multiple datasets atomically. Iceberg branches are scoped to one table; lakeFS branches span the repository. You reach for lakeFS when a change must be all-or-nothing across several tables or raw files.
+
+</details>
+
+<details><summary><b>33.</b> In lakeFS, what is a repository?</summary>
+
+A lakeFS repository is the top-level versioned namespace over a location in object storage — conceptually like a Git repo for a portion of your data lake. It contains branches, commits, and the objects they reference, all backed by a bucket in S3, Azure Blob, GCS, or an S3-compatible store like MinIO. Everything you version in lakeFS lives inside a repository.
+
+</details>
+
+<details><summary><b>34.</b> What is a branch in lakeFS, and is creating one expensive?</summary>
+
+A lakeFS branch is an isolated, writable line of development over the repository's data, and creating one is a cheap metadata-only operation that copies no objects (zero-copy). You get a consistent view of the whole repository that you can modify without affecting other branches. This is what makes spinning up a full staging environment for an entire lake nearly free.
+
+</details>
+
+<details><summary><b>35.</b> What is a commit in lakeFS?</summary>
+
+A commit in lakeFS is an immutable checkpoint capturing a complete, consistent snapshot of the repository at a point in time, identified by a commit id. It records the exact state of all objects on a branch, so you can always return to it. Commits are what give lakeFS its reproducibility and rollback guarantees across many tables at once.
+
+</details>
+
+<details><summary><b>36.</b> What is a merge in lakeFS and why is it useful for WAP across many tables?</summary>
+
+A lakeFS merge atomically updates one branch with the changes from another, so a whole set of multi-table changes either becomes visible together or not at all. For WAP this means you stage a coordinated load on a branch, validate it, and merge to `main` in one atomic step — no half-published state. That cross-table atomicity is the key thing table-level Iceberg branching cannot give you.
+
+</details>
+
+<details><summary><b>37.</b> How does lakeFS achieve zero-copy branching over object storage?</summary>
+
+lakeFS stores version metadata that maps logical paths to the underlying immutable objects in your bucket, so a branch is just a new set of metadata references rather than duplicated data. It acts as a virtual filesystem that routes reads to the correct physical objects. Because branching only writes metadata, it is fast and atomic regardless of data size.
+
+</details>
+
+<details><summary><b>38.</b> What are lakeFS hooks and how do they relate to WAP?</summary>
+
+lakeFS hooks are configured actions that run automatically on events such as pre-merge or post-create-branch, allowing you to run validations and block a merge if they fail. A pre-merge hook is effectively the audit gate of WAP at the lake level: the merge (publish) cannot complete unless the checks pass. This makes the data-quality gate a structural part of the merge, not an external step someone runs by hand.
+
+</details>
+
+<details><summary><b>39.</b> Which object stores does lakeFS support, and why does that matter for an on-prem or EU deployment?</summary>
+
+lakeFS works over AWS S3, Azure Blob Storage, Google Cloud Storage, and any S3-compatible store such as MinIO or Dell ECS. This matters because a regulated EU fund administrator may need data resident in Azure or in an on-prem MinIO cluster, and lakeFS layers on top without forcing a specific cloud. The same Git-for-data model runs wherever the bucket lives.
+
+</details>
+
+<details><summary><b>40.</b> What is Project Nessie?</summary>
+
+Nessie is a transactional catalog for data lakes that adds Git-like semantics — branches, tags, commits, and hashes — at the catalog level, primarily for Iceberg tables. Instead of versioning files or a single table, it versions the catalog's view of all tables and namespaces. It is the catalog-level seam for multi-table consistency.
+
+</details>
+
+<details><summary><b>41.</b> How does Nessie differ from lakeFS in where it sits in the stack?</summary>
+
+Nessie operates at the catalog level — it versions table pointers and metadata for tables (typically Iceberg) registered in the catalog — whereas lakeFS operates at the object-storage level, versioning the raw files themselves. Nessie knows about tables and commits each Iceberg transaction as a Nessie commit; lakeFS knows about objects and paths. They solve overlapping problems from different layers.
+
+</details>
+
+<details><summary><b>42.</b> How does Nessie enable something close to a multi-table transaction?</summary>
+
+You create a Nessie branch, perform a series of table operations (each an Iceberg/Nessie commit) on that branch, and then merge the branch back into `main` atomically, so all the table changes become visible together. This approximates a multi-table transaction with optimistic concurrency control. It is how you keep, say, a fact table and its dimension updates consistent on publish.
+
+</details>
+
+<details><summary><b>43.</b> In Nessie terminology, what is a commit hash?</summary>
+
+A Nessie hash is a hexadecimal string identifying a particular commit — a consistent snapshot of all tables at that point in time. Branches and tags are human-friendly names that ultimately resolve to a hash. You can reference a hash directly for fully reproducible, immutable reads, much like a Git commit SHA.
+
+</details>
+
+<details><summary><b>44.</b> When you use Nessie as the catalog for Iceberg, what happens to each Iceberg transaction?</summary>
+
+Each Iceberg transaction becomes a Nessie commit, so the catalog records a version of the whole namespace rather than only the single table's snapshot. This lifts versioning from per-table to catalog-wide. As a result you get cross-table point-in-time consistency that plain Iceberg snapshots, scoped to one table, cannot provide.
+
+</details>
+
+<details><summary><b>45.</b> What is DVC and what is it primarily used for?</summary>
+
+DVC (Data Version Control) is a tool that brings Git-like versioning to large files, datasets, and ML model artifacts by storing lightweight pointer files in Git while the actual data lives elsewhere. It is file/artifact oriented, aimed at ML reproducibility, and for this lesson it is awareness-only rather than a core platform tool. You version a dataset or model the way you version code, without bloating the Git repo.
+
+</details>
+
+<details><summary><b>46.</b> What is a `.dvc` file and what does it contain?</summary>
+
+A `.dvc` file is a small text pointer that DVC commits to Git in place of the large data file; it contains the data's content hash (typically an MD5) plus metadata needed to locate the real data. Git tracks the tiny pointer while the bytes stay in the DVC cache and remote. This is how DVC keeps Git repositories small while still versioning gigabyte-scale data.
+
+</details>
+
+<details><summary><b>47.</b> How does DVC store the actual data, and what is content-addressable storage in this context?</summary>
+
+DVC moves the real file into a local cache (by default `.dvc/cache`) that is content-addressable — files are stored under their content hash, so identical content is stored once. The `.dvc` pointer's hash maps to the cached object's path. Content addressing deduplicates data and guarantees that a given hash always refers to exactly the same bytes.
+
+</details>
+
+<details><summary><b>48.</b> What do `dvc push` and `dvc pull` do?</summary>
+
+`dvc push` uploads the data objects from your local DVC cache to a configured remote (S3, Azure Blob, GCS, etc.), and `dvc pull` downloads them back, typically after a `git pull` or `git clone` resolves the `.dvc` pointers. This separates code sync (Git) from data sync (DVC remote). It lets collaborators reconstruct the exact dataset that matches a given commit.
+
+</details>
+
+<details><summary><b>49.</b> Why is DVC a poor fit as the primary versioning layer for a regulated fund-data warehouse?</summary>
+
+DVC versions whole files as opaque blobs with no notion of tables, schemas, transactions, or SQL-level time travel, so it cannot give you a query like "show the table as of valuation date." It is built for ML datasets and model artifacts, not for the transactional, table-aware, audit-gated workflows a fund warehouse needs. For that you want Iceberg branches/tags or lakeFS/Nessie, not DVC.
+
+</details>
+
+<details><summary><b>50.</b> What is the core trade-off between table-level versioning (Iceberg) and lake-level versioning (lakeFS/Nessie)?</summary>
+
+Table-level Iceberg versioning is built into the table format with no extra service to run, but it cannot coordinate changes across multiple tables atomically; lake-level versioning (lakeFS/Nessie) adds cross-table/cross-file atomicity at the cost of operating another moving part in your stack. You choose based on whether your consistency boundary is a single table or many. Each granularity buys a different guarantee at a different operational cost.
+
+</details>
+
+<details><summary><b>51.</b> When is table-level Iceberg branching sufficient, and how would you justify that to a change-advisory board?</summary>
+
+It is sufficient when each load's consistency boundary is a single table — the corrupted-price scenario where you only need to gate writes to one table before they reach consumers. You justify it by noting there is no extra service to deploy, monitor, or secure, so the operational and audit surface is minimal. The argument is: simplest control that fully covers the risk wins.
+
+</details>
+
+<details><summary><b>52.</b> When is lakeFS-style lake-level versioning worth the extra moving part?</summary>
+
+It is worth it when a single logical change must update several tables or raw files consistently and publish atomically — for example a fund load that updates prices, FX, and holdings together, where any partial publish would corrupt the NAV. lakeFS/Nessie give you one branch and one atomic merge across all of them. The extra service earns its keep precisely when table-by-table gating would leave windows of inconsistency.
+
+</details>
+
+<details><summary><b>53.</b> How do Snowflake zero-copy clones approximate data branching, and where do they fall short?</summary>
+
+A Snowflake clone (`CREATE TABLE ... CLONE`) creates new metadata pointers to the source's existing micro-partitions, giving an isolated, independently writable copy with virtually no storage cost — similar in spirit to a branch. It falls short because there is no built-in merge or fast-forward back to the source, and no native branch/merge workflow; you would script promotion yourself. So clones give cheap isolation but not true branch-merge versioning.
+
+</details>
+
+<details><summary><b>54.</b> What is Snowflake's zero-copy cloning mechanism under the hood?</summary>
+
+Cloning creates a new set of metadata pointers that reference the same immutable micro-partitions as the source, so the clone initially consumes almost no additional storage. When either the clone or the source changes, Snowflake writes new micro-partitions for the changed data (copy-on-write) and the clone diverges only for what was modified. Unchanged data continues to be shared via pointers.
+
+</details>
+
+<details><summary><b>55.</b> Can a Snowflake clone be taken from a past point in time, and how?</summary>
+
+Yes — the `CLONE` statement can include Time Travel syntax such as `AT (TIMESTAMP => ...)` or `BEFORE (STATEMENT => ...)` to clone the object as it existed at that moment. This combines cloning with Time Travel to reproduce a prior state cheaply. It is how Snowflake approximates "branch from an old snapshot," within the Time Travel retention window.
+
+</details>
+
+<details><summary><b>56.</b> What is the default and maximum Time Travel retention in Snowflake, and why does it constrain its use as a versioning tool?</summary>
+
+Snowflake Time Travel retention is configurable per object from 0 up to 90 days (the 90-day maximum requires Enterprise edition). It constrains versioning because once data ages past the retention window it is no longer queryable via Time Travel and clones from before that point are impossible. For multi-year regulatory retention you cannot rely on Time Travel alone; you need explicit, durable markers like Iceberg tags.
+
+</details>
+
+<details><summary><b>57.</b> In the lesson's "Do" exercise, what is step one of adding WAP to the Dagster pipeline?</summary>
+
+Step one is to make every load write to an Iceberg `audit` branch instead of writing directly to `main`. This converts the pipeline so that new data is staged and invisible to consumers by default. It is the structural change that makes the subsequent audit-and-publish gate possible.
+
+</details>
+
+<details><summary><b>58.</b> After writing to the `audit` branch in the Dagster WAP pipeline, what runs next?</summary>
+
+The existing data-quality asset checks run against the `audit` branch — the same checks you already had, just pointed at the staged data instead of `main`. On green you fast-forward publish to `main`; on red you alert and hold the branch for inspection. Reusing the existing checks is why bolting WAP onto an Iceberg pipeline is relatively cheap.
+
+</details>
+
+<details><summary><b>59.</b> How do Dagster asset checks fit the WAP audit step?</summary>
+
+Dagster asset checks are the automated validations that constitute the "audit" in write-audit-publish; you run them against the staged `audit` branch and gate the publish on their result. A passing set of checks triggers the `fast_forward` to `main`; a failing set blocks it and raises an alert. The asset-check result is the green/red signal that drives the gate.
+
+</details>
+
+<details><summary><b>60.</b> In the corrupted-load exercise, what failure should the WAP gate catch — and what is the expected outcome?</summary>
+
+You deliberately inject a load with prices off by 100x for one ISIN; the DQ checks on the `audit` branch should flag the anomaly, so the gate never fast-forwards to `main`. The expected outcome is that the corrupted data is never visible to the gold consumer and remains quarantined on the branch with a full audit trail. That is the "done-when" proof that the control works.
+
+</details>
+
+<details><summary><b>61.</b> A price-off-by-100x corruption passes your WAP checks and reaches gold. What is the first thing to investigate?</summary>
+
+First check whether your data-quality checks actually cover that failure mode — a 100x error implies a missing or too-loose range/reasonableness check on price, so the audit step had nothing to fail on. The WAP plumbing can be perfect, but it only protects against what the checks test. The fix is to add a bounded-range or day-over-day variance check that catches order-of-magnitude price jumps.
+
+</details>
+
+<details><summary><b>62.</b> Why does the lesson have you tag each published snapshot with the valuation date?</summary>
+
+Tagging each published snapshot with its valuation date creates an immutable, human-meaningful audit marker so you can later time-travel back to the exact data a given day's NAV used. It turns the snapshot lineage into an auditable story keyed on the business date auditors care about. Demonstrating that time-travel-by-tag is one of the lesson's done-when criteria.
+
+</details>
+
+<details><summary><b>63.</b> What are the three done-when criteria for this lesson, in essence?</summary>
+
+First, a deliberately corrupted load never becomes visible to the gold consumer and you can show the audit trail; second, you can demonstrate which snapshot a given day's NAV report was computed from using tags alone; third, you can explain to a CAB when table-level branching suffices versus when lake-level versioning is worth the extra moving part. Together they prove the gate works, the lineage is auditable, and you can reason about granularity. They map directly onto the WAP control, the audit story, and the architectural judgement.
+
+</details>
+
+<details><summary><b>64.</b> What is an ISIN and why is per-ISIN data quality central to the WAP exercise?</summary>
+
+An ISIN (International Securities Identification Number) is the 12-character standard identifier for a security, and the WAP exercise corrupts the price of one specific ISIN. Per-ISIN checks matter because a single bad instrument can poison a NAV even when the rest of the load is fine, so the audit step must validate at instrument granularity. WAP isolates the whole load, but the checks must be fine-grained enough to catch one rogue ISIN.
+
+</details>
+
+<details><summary><b>65.</b> How does WAP relate to the integrity of a Luxembourg fund's NAV publication?</summary>
+
+NAV must be struck from validated inputs, and WAP guarantees that prices and other inputs reaching the gold layer have passed the audit gate, so a bad input cannot silently flow into the published NAV. For a Luxembourg-domiciled fund this protects against a wrong NAV going to the transfer agent and investors. The structural gate is the difference between a caught load and a restatement.
+
+</details>
+
+<details><summary><b>66.</b> How could published Iceberg tags support an EMT/EPT file production audit trail?</summary>
+
+EMT and EPT (European MiFID/PRIIPs templates) are produced from validated fund data, and tagging the exact snapshot used to generate a given file lets you reproduce precisely the inputs behind that template later. If a regulator questions a value, you time-travel to the tagged snapshot and show the source data unchanged. The tag is the immutable evidence linking the template to its data of record.
+
+</details>
+
+<details><summary><b>67.</b> Why is multi-table atomicity (lakeFS/Nessie) attractive for a transfer-agency load that updates several related tables?</summary>
+
+A transfer-agency load may update subscriptions, redemptions, and holdings tables that must stay mutually consistent for downstream NAV and reporting, and lakeFS/Nessie let you stage all of them on one branch and merge atomically. Table-level Iceberg branching would publish each table independently, risking a window where holdings and subscriptions disagree. The lake-level branch makes the whole consistent set go live as one unit.
+
+</details>
+
+<details><summary><b>68.</b> How might a LEI-keyed reference-data update benefit from branch-based staging?</summary>
+
+An LEI (Legal Entity Identifier) reference-data refresh can be large and occasionally wrong, so staging it on an `audit` branch lets you validate entity records (e.g. no orphaned LEIs, no duplicate mappings) before any consumer sees them. Only on green do you fast-forward to `main`. This keeps a faulty counterparty-reference load from cascading into downstream reports.
+
+</details>
+
+<details><summary><b>69.</b> In a SWIFT-message-driven settlement feed, where does WAP add value?</summary>
+
+SWIFT-driven feeds can carry malformed or out-of-sequence messages, and staging the parsed records on an audit branch lets you run validation (field formats, mandatory tags, reconciliation totals) before publishing to the consumer tables. A failing batch is held, not published, so downstream settlement views never ingest corrupt data. WAP turns "react to a bad feed" into "never expose a bad feed."
+
+</details>
+
+<details><summary><b>70.</b> How does data versioning support DORA-style operational-resilience expectations?</summary>
+
+DORA (Digital Operational Resilience Act) pushes financial entities toward demonstrable controls and recoverability, and versioned data with audit branches and immutable tags gives you both a structural quality gate and a provable rollback/recovery point. You can show the regulator the control that stopped a bad load and the tag you would recover to. Versioning thus turns resilience claims into evidence.
+
+</details>
+
+<details><summary><b>71.</b> Under UCITS/AIFMD oversight, why is reproducibility of a historical NAV input so important?</summary>
+
+UCITS and AIFMD frameworks demand that fund administrators can substantiate reported values, so being able to reproduce the exact data that fed a past NAV is a compliance necessity, not a nicety. Immutable Iceberg tags (or Nessie/lakeFS commits) give you that reproducibility by name and date. Without it, answering "what did the NAV on date X use?" becomes a forensic reconstruction.
+
+</details>
+
+<details><summary><b>72.</b> How do you "walk the failure path end to end" for a corrupted load in the WAP pipeline?</summary>
+
+You inject the corruption, observe the write land on the `audit` branch, watch the DQ asset checks fail, confirm `main` is never fast-forwarded, verify the gold consumer still reads clean data, and inspect the held branch and alert. End-to-end means you trace from injection through quarantine to the absence of any consumer impact. Doing this once is how you prove the control rather than assume it.
+
+</details>
+
+<details><summary><b>73.</b> A `fast_forward` call fails with an error that `main` is not an ancestor of `audit`. What does that mean and how do you fix it?</summary>
+
+Fast-forward requires the target branch (`main`) to be an ancestor of the source (`audit`); the error means `main` advanced independently after `audit` was created, so the histories diverged. The fix is to re-create or rebase the `audit` branch from the current `main`, re-run the checks, and fast-forward again. In a pipeline you avoid this by branching `audit` from the latest `main` at the start of each load.
+
+</details>
+
+<details><summary><b>74.</b> Why must the consumer-facing read path point at `main` (or a published tag) rather than the `audit` branch?</summary>
+
+Because the whole protection of WAP rests on consumers reading only the published reference; if a consumer query targets the `audit` branch it would see unvalidated, possibly corrupt staged data. The read path must be pinned to `main` or a specific published tag. A misconfigured consumer reading the staging branch silently defeats the gate.
+
+</details>
+
+<details><summary><b>75.</b> What is the risk of leaving many stale `audit` branches around, and how do you manage it?</summary>
+
+Stale audit branches accumulate snapshots and pin data files, bloating storage and cluttering the metadata, and they can confuse operators about which branch is live. You manage it with branch reference-age retention so unmerged branches expire automatically, plus a pipeline step that drops a branch once it is published or definitively failed. Hygiene here keeps expiration jobs effective and the table readable.
+
+</details>
+
+<details><summary><b>76.</b> Why is "merge" in lakeFS atomic, and why does atomicity matter for publishing?</summary>
+
+A lakeFS merge updates the target branch's metadata to incorporate the source's committed state in a single operation, so either the entire change set is applied or none of it is. Atomicity matters because partial publication of a multi-table change would create a window of inconsistency that downstream NAV or reporting could read. Atomic merge guarantees consumers never see a half-published state.
+
+</details>
+
+<details><summary><b>77.</b> How does a lakeFS pre-merge hook implement the "audit" gate of WAP at lake scale?</summary>
+
+A pre-merge hook runs a validation when a merge into a protected branch is attempted and can block the merge if the validation fails, so the publish (merge) cannot happen on red. This is exactly the audit step, enforced structurally at the lake level across all the files in the change. The merge is the publish; the hook is the audit it must pass.
+
+</details>
+
+<details><summary><b>78.</b> What does it cost operationally to run lakeFS compared to relying on Iceberg branches alone?</summary>
+
+lakeFS is an additional service you must deploy, secure, monitor, scale, back up, and integrate with your engines and authentication — operational surface that Iceberg branches (built into the table format) do not add. You also take on its metadata store as a dependency. The trade is real cross-lake versioning in exchange for a new component in your reliability and security perimeter.
+
+</details>
+
+<details><summary><b>79.</b> What does it cost operationally to run Nessie compared to Iceberg branches alone?</summary>
+
+Nessie is a separate catalog service with its own backing store that must be deployed and made highly available, and all your engines must be configured to use it as the catalog. In return you get catalog-level, multi-table Git semantics. The cost is another stateful service on the critical path between engines and tables, which you must operate to the same standard as the warehouse.
+
+</details>
+
+<details><summary><b>80.</b> Why is "the audit step is structural, not a promise" the key phrase for explaining WAP to an auditor?</summary>
+
+Because it captures that the control is enforced by the system design — data is physically isolated until the check passes — rather than depending on a person following a procedure that could be skipped. Auditors can verify a structural control by inspecting the pipeline; they cannot verify a promise. This framing is what makes WAP a credible control in a regulated environment.
+
+</details>
+
+<details><summary><b>81.</b> How do Iceberg branches give you environment isolation (e.g. dev/test) within one table?</summary>
+
+You can create separate branches off the same table and read/write each independently, so a dev or test workflow operates on its own branch without touching `main` or other branches. This isolates experimentation from production state. It is a lighter-weight alternative to copying the whole table for a sandbox.
+
+</details>
+
+<details><summary><b>82.</b> How does branch-level retention differ from tag-level retention in intent?</summary>
+
+Branch retention typically protects a working line that moves forward — you may keep a minimum number of recent snapshots and expire old ones — whereas tag retention protects a single fixed snapshot you want to preserve for a long, often regulatory, period. Intent differs: branches are about an evolving line's lifecycle, tags about preserving a specific moment. Audit markers therefore live on tags with long retention.
+
+</details>
+
+<details><summary><b>83.</b> What is the relationship between Iceberg metadata files and the branch/tag references?</summary>
+
+Iceberg's table metadata records all snapshots plus the named references (branches and tags) and the snapshot each points to, so branches and tags are entries in metadata rather than separate copies of data. Resolving a branch or tag is a metadata lookup that yields a snapshot id. This is why creating a branch or tag is cheap — it just adds a reference.
+
+</details>
+
+<details><summary><b>84.</b> If two writers commit to the same Iceberg branch concurrently, what guarantees keep the branch consistent?</summary>
+
+Iceberg uses optimistic concurrency with atomic metadata swaps: each commit is validated against the current branch state and only one wins a conflicting race, with the loser retrying. This keeps the branch's snapshot lineage linear and consistent. It is the same mechanism that protects `main`, applied per branch.
+
+</details>
+
+<details><summary><b>85.</b> Why can table-level versioning leave a "window of inconsistency" that lake-level versioning closes?</summary>
+
+When two related tables are published independently (table-level), there is a moment where one is updated and the other is not, so a reader can see an inconsistent combination. Lake-level versioning publishes the related change as one atomic merge, eliminating that window. For coupled fund data like prices-and-FX, closing that window can be the difference between a correct and an incorrect NAV.
+
+</details>
+
+<details><summary><b>86.</b> How would you choose between Nessie and lakeFS when you need multi-table versioning?</summary>
+
+Choose Nessie when your data is Iceberg tables in a catalog and you want catalog-aware, table-level transactions and Git semantics that understand tables; choose lakeFS when you must version arbitrary objects and many file types across the lake, not just catalog-registered tables. The deciding factor is whether your consistency boundary is "tables in a catalog" or "objects in a bucket." Nessie is table-aware; lakeFS is file/object-aware.
+
+</details>
+
+<details><summary><b>87.</b> What is "branch retention" protecting against if you set it too aggressively low?</summary>
+
+If branch reference age is too low, the branch pointer expires quickly and a maintenance run can collect its snapshots before you finish staging or auditing, effectively losing your in-flight work. The symptom is staging branches vanishing mid-pipeline. Set retention comfortably longer than your longest load-plus-audit cycle, and longer still for anything that must persist for inspection.
+
+</details>
+
+<details><summary><b>88.</b> Why is it dangerous to expire snapshots without accounting for tags in a regulated platform?</summary>
+
+An aggressive `expire_snapshots` run that ignores retained references could, if a required tag's retention has lapsed, remove the snapshot an auditor needs to reproduce a historical NAV. The danger is destroying evidence you are obliged to keep. The safeguard is long, explicit retention on audit tags so expiration can never reach them.
+
+</details>
+
+<details><summary><b>89.</b> How do you demonstrate the audit trail of a blocked corrupted load?</summary>
+
+You show the `audit` branch still holding the staged corrupt snapshot, the DQ check result recording the failure, the absence of a fast-forward on `main`, and the consumer view returning only clean data. Together these artefacts are the audit trail: what was caught, where it was held, and that it never reached gold. The trail is the proof that the control fired.
+
+</details>
+
+<details><summary><b>90.</b> What is the difference between Snowflake Time Travel and true branch-merge versioning?</summary>
+
+Time Travel lets you read or clone a past state within a retention window, but it has no notion of an isolated mutable branch you validate and then merge back — there is no fast-forward or atomic publish of staged changes. True branch-merge (Iceberg/lakeFS/Nessie) gives you a parallel line you can build on and publish deliberately. Time Travel is read-back-in-time; branch-merge is stage-and-promote.
+
+</details>
+
+<details><summary><b>91.</b> Why does the lesson position DVC as "awareness only" rather than hands-on?</summary>
+
+Because DVC's file/artifact orientation does not match this platform's needs — transactional, table-aware, audit-gated versioning of warehouse data — so you should recognise what it is and where it fits (ML datasets/models) without building the pipeline on it. The hands-on tools are Iceberg branches and lakeFS. Knowing DVC exists prevents you from reaching for it on the wrong problem.
+
+</details>
+
+<details><summary><b>92.</b> A consumer reports seeing data that later "disappeared." How could a misconfigured WAP setup cause this?</summary>
+
+If the consumer query was inadvertently pointed at the `audit` branch (or read a staged WAP-id snapshot) and that branch was later dropped or never published, the data would appear and then vanish. The root cause is a read path not pinned to `main`/published tags. The fix is to enforce that consumers only ever resolve to the published reference.
+
+</details>
+
+<details><summary><b>93.</b> Why is fast-forward (rather than a content merge) the right publish primitive for single-table WAP?</summary>
+
+Fast-forward simply moves `main` to the validated head of `audit` without recomputing or reconciling content, so what becomes live is byte-for-byte the exact state you audited. A content merge could combine in changes you did not validate. For WAP you want the published state to equal the audited state, which fast-forward guarantees.
+
+</details>
+
+<details><summary><b>94.</b> How does versioning help with the "deleted branch instead of a restatement letter" outcome the lesson highlights?</summary>
+
+When a bad load is isolated on a branch and never published, remediation is just dropping or holding that branch — a quiet internal action with no consumer impact, hence no restatement. Without versioning the bad load is already live, so remediation escalates to a formal restatement to investors and regulators. Versioning converts a potential incident into a non-event.
+
+</details>
+
+<details><summary><b>95.</b> What metadata would you capture at publish time to make a snapshot fully auditable?</summary>
+
+At minimum the valuation/business date (as a tag), the snapshot id, the set of DQ checks that passed, the pipeline run id, and the source files ingested. This ties the published state to a business date and to the evidence that it passed the gate. With that captured, reproducing and defending a historical figure is a lookup, not an investigation.
+
+</details>
+
+<details><summary><b>96.</b> Why might you tag both the source/input snapshot and the published output for a NAV run?</summary>
+
+Tagging the validated input snapshot lets you reproduce exactly what fed the calculation, while tagging the published output records the result of record; together they document the complete computation provenance. If a figure is questioned you can show both the inputs and the published state by name. This is stronger audit evidence than a single tag.
+
+</details>
+
+<details><summary><b>97.</b> How does optimistic concurrency in Nessie compare to Iceberg's per-table concurrency?</summary>
+
+Nessie applies optimistic concurrency at the catalog/commit level across potentially many tables, so a branch merge or commit either succeeds against the current catalog state or is rejected for retry, coordinating multiple tables; Iceberg's optimistic concurrency operates per table on a single table's metadata. Nessie's scope is the namespace; Iceberg's is the table. That broader scope is what enables multi-table consistency.
+
+</details>
+
+<details><summary><b>98.</b> What does it mean that lakeFS "acts as a virtual filesystem" for your data?</summary>
+
+It means lakeFS presents versioned, branch-scoped logical paths to clients and internally routes each read or write to the correct immutable object in the underlying bucket. Clients address data through lakeFS (e.g. via its S3-compatible gateway) and get a consistent branch view. The virtual-filesystem layer is what makes branches and commits transparent to engines.
+
+</details>
+
+<details><summary><b>99.</b> When a CAB asks "why add lakeFS instead of using Iceberg branches," what is the crisp answer?</summary>
+
+Because the change in question must update several tables or raw files consistently and publish atomically, which per-table Iceberg branches cannot guarantee, whereas a single lakeFS branch and atomic merge can. If the change were single-table, Iceberg branching would suffice and lakeFS would be unjustified overhead. The answer turns on the consistency boundary of the change.
+
+</details>
+
+<details><summary><b>100.</b> Summarise the decision rule for choosing data-versioning granularity in this lesson.</summary>
+
+Use table-level Iceberg branches/tags when the consistency and audit boundary is a single table — the cheapest control with no extra service; step up to lake-level lakeFS/Nessie when a change must be atomic and versioned across multiple tables or files, accepting the operational cost of another service. Match the granularity to the consistency boundary, and never pay for cross-lake versioning you do not need. The architect's job is justifying that choice to the CAB, not defaulting to the heaviest tool.
+
+</details>
+
+
+## Phase 3 · 9.3.1 CI/CD for data platforms — 100 self-test questions
+
+<details><summary><b>1.</b> What does CI/CD stand for, and what is the one-sentence purpose of each half for a data platform?</summary>
+
+CI is Continuous Integration — every change is merged frequently into a shared branch and automatically built and tested — and CD is Continuous Delivery (or Deployment) — passing changes are automatically released to an environment. For a data platform the point is that engineering standards (lint, tests, dbt builds, data checks) become an enforceable gate before code reaches the Monday NAV run, rather than relying on reviewer goodwill.
+
+</details>
+
+<details><summary><b>2.</b> Why does the lesson argue that "the deployment pipeline is where engineering standards become enforceable"?</summary>
+
+A standard that is only written in a wiki is advisory; a standard wired into a required CI check is a hard gate that nobody can bypass under deadline pressure. The architect's job is to define what "cannot merge" means so that, for example, a broken dbt test physically blocks the PR instead of riding into production on a Friday afternoon.
+
+</details>
+
+<details><summary><b>3.</b> In GitHub Actions, what is a workflow?</summary>
+
+A workflow is a configurable automated process defined by a YAML file in the `.github/workflows/` directory of the repository. It is triggered by events (such as `pull_request` or `push`), and it contains one or more jobs; a repo can have many workflow files, each handling a different concern like PR checks or nightly builds.
+
+</details>
+
+<details><summary><b>4.</b> Where must GitHub Actions workflow files live, and in what format are they written?</summary>
+
+They must live in the `.github/workflows/` directory at the root of the repository, and they are written in YAML (`.yml` or `.yaml`). GitHub automatically discovers any workflow file placed there; the filename is cosmetic, but the `name:` key and triggers inside determine how it appears and when it runs.
+
+</details>
+
+<details><summary><b>5.</b> What is a job in GitHub Actions, and what is its relationship to a runner?</summary>
+
+A job is a set of steps that execute on the same runner (a virtual machine or container), sharing its filesystem and environment for the duration of the job. Each job runs in a fresh, isolated runner instance by default, so state does not leak between jobs unless you explicitly pass it via artifacts, caches, or job outputs.
+
+</details>
+
+<details><summary><b>6.</b> What is a step versus an action in a GitHub Actions job?</summary>
+
+A step is a single task within a job — either a shell command (`run:`) or an invocation of an action (`uses:`) — and steps run sequentially in the same runner. An action is a reusable, packaged unit of code (for example `actions/checkout`) that a step calls via `uses:`, letting you compose workflows from shared building blocks.
+
+</details>
+
+<details><summary><b>7.</b> By default, do jobs in a workflow run in parallel or in sequence?</summary>
+
+By default, jobs run in parallel, each on its own runner. To force ordering you use the `needs:` key so that one job waits for another to finish successfully; for example a `deploy` job with `needs: [test]` will only start after `test` passes.
+
+</details>
+
+<details><summary><b>8.</b> What does the `needs:` keyword do, and give a data-pipeline example.</summary>
+
+`needs:` declares a dependency so a job waits until the listed job(s) complete successfully before it starts. For a data repo you might have `publish-docs` declare `needs: [build]`, ensuring the dbt docs site is only published after the full `dbt build` job has gone green.
+
+</details>
+
+<details><summary><b>9.</b> What event would you use to trigger a workflow when someone opens or updates a pull request?</summary>
+
+You use the `pull_request` event in the `on:` block. You can refine it with activity types such as `opened`, `synchronize`, and `reopened`, and restrict it to certain target branches with `branches:`; this is the canonical trigger for the per-PR check suite.
+
+</details>
+
+<details><summary><b>10.</b> How do you trigger a workflow only when code is merged into the default branch?</summary>
+
+You use `on: push` filtered to that branch, for example `on: { push: { branches: [main] } }`, because a completed merge results in a push to the target branch. This is how the per-merge workflow (full `dbt build` plus docs publish) is distinguished from the per-PR workflow.
+
+</details>
+
+<details><summary><b>11.</b> What is the difference between the `pull_request` and `pull_request_target` events, and why does it matter for security?</summary>
+
+`pull_request` runs the workflow from the PR's head commit with a read-only token and no access to secrets for forked PRs, while `pull_request_target` runs the workflow from the base branch with full secret access. `pull_request_target` is dangerous with untrusted forks because it can expose secrets to attacker-controlled code, so you avoid it unless you fully understand and constrain it.
+
+</details>
+
+<details><summary><b>12.</b> What is a matrix build in GitHub Actions, and when is it useful for a data team?</summary>
+
+A matrix build uses `strategy.matrix` to run the same job many times across combinations of variables (such as Python versions or warehouse targets), spawning one parallel job per combination. A data team might matrix across `python-version: [3.11, 3.12]` to confirm the loader works on both, or across multiple sample schemas to test the dbt project on each.
+
+</details>
+
+<details><summary><b>13.</b> In a matrix, what does `fail-fast: true` (the default) do, and when would you set it to `false`?</summary>
+
+With `fail-fast: true`, as soon as any matrix job fails GitHub cancels all the other in-progress matrix jobs, saving compute. You set `fail-fast: false` when you want every combination to run to completion regardless of others failing — useful when you need the full picture of which Python versions or warehouse targets break, not just the first one.
+
+</details>
+
+<details><summary><b>14.</b> How do you limit how many matrix jobs run at once, and why might you?</summary>
+
+You set `strategy.max-parallel:` to cap the number of matrix jobs running concurrently. For a data repo this throttles how many simultaneous warehouse connections or sample-schema builds you spin up, which matters when the warehouse has a connection limit or you are paying per concurrent compute slot.
+
+</details>
+
+<details><summary><b>15.</b> What is an environment in GitHub Actions (the `environment:` key on a job)?</summary>
+
+An environment is a named deployment target (such as `staging` or `production`) that a job references via the `environment:` key, and it can carry its own protection rules and its own scoped secrets. Referencing an environment is what activates gates like required reviewers and wait timers before the job is allowed to run.
+
+</details>
+
+<details><summary><b>16.</b> What is the difference between repository secrets, environment secrets, and organization secrets?</summary>
+
+Repository secrets are available to all workflows in one repo, organization secrets can be shared across many repos in the org (with optional repo-access policies), and environment secrets are only available to a job that references that specific environment and only after its protection rules pass. Environment secrets are the tightest scope, which is why warehouse production credentials belong there rather than as plain repository secrets.
+
+</details>
+
+<details><summary><b>17.</b> How do you read a secret inside a workflow step?</summary>
+
+You reference it through the `secrets` context, for example `${{ secrets.WAREHOUSE_PASSWORD }}`, typically by assigning it to an `env:` variable for a step. GitHub automatically masks secret values in logs, but only the exact stored string — a transformed or base64-decoded version can still leak, which is a common gotcha.
+
+</details>
+
+<details><summary><b>18.</b> Are secrets automatically passed to workflows triggered by pull requests from forks?</summary>
+
+No — for `pull_request` runs originating from a fork, secrets are not provided and the `GITHUB_TOKEN` is read-only, which prevents an attacker from opening a PR to exfiltrate your credentials. This is the safe default; intentionally exposing secrets to fork PRs requires the riskier `pull_request_target` event and careful guarding.
+
+</details>
+
+<details><summary><b>19.</b> What is the `GITHUB_TOKEN`, and what is GitHub's recommended default permission posture for it?</summary>
+
+The `GITHUB_TOKEN` is an automatically generated, short-lived token created for each workflow run to authenticate against the repository. GitHub recommends configuring the default to read-only and granting only the specific write scopes a workflow needs via the `permissions:` key, applying least privilege so a compromised step cannot push code or alter settings.
+
+</details>
+
+<details><summary><b>20.</b> How do you restrict the `GITHUB_TOKEN` to only the permissions a job needs?</summary>
+
+You add a `permissions:` block at the workflow or job level listing only required scopes, for example `permissions: { contents: read, pull-requests: write }`. Setting `permissions: {}` grants nothing; this least-privilege scoping limits the blast radius if a malicious dependency runs in a step.
+
+</details>
+
+<details><summary><b>21.</b> What does pinning an action to a full commit SHA (rather than a tag) protect against?</summary>
+
+Pinning `uses:` to a 40-character commit SHA, for example `actions/checkout@<sha>`, guarantees you run exactly the reviewed code, because a tag like `@v4` is mutable and could be re-pointed by a compromised maintainer to malicious code. It is a supply-chain hardening practice that trades a little convenience (manual updates) for reproducibility and tamper-resistance.
+
+</details>
+
+<details><summary><b>22.</b> What does `actions/checkout` do, and why is it almost always the first step?</summary>
+
+`actions/checkout` clones your repository into the runner's workspace so subsequent steps can see the code. It is first because a fresh runner starts empty — without checkout there are no files to lint, no dbt project to build, and no tests to run.
+
+</details>
+
+<details><summary><b>23.</b> What is the purpose of `concurrency` in a workflow, and how does it help a data repo?</summary>
+
+The `concurrency` key groups runs (by a key such as branch or PR) and ensures only one runs at a time, with `cancel-in-progress: true` cancelling superseded runs. For a data repo this stops two CI builds racing against the same sample schema and prevents wasted warehouse spend when someone pushes three commits in a minute.
+
+</details>
+
+<details><summary><b>24.</b> What is `ruff`, and why is it the linter of choice in this lesson's CI?</summary>
+
+`ruff` is an extremely fast Python linter (and formatter) written in Rust by Astral that consolidates the checks of many older tools. It is chosen for CI because it runs in milliseconds, so the lint gate adds almost no time to every PR while still catching style and correctness issues before review.
+
+</details>
+
+<details><summary><b>25.</b> What command runs the ruff linter in CI, and what is the difference from the formatter?</summary>
+
+`ruff check .` runs the linter (rule violations, unused imports, likely bugs), while `ruff format --check .` verifies formatting without rewriting files. In CI you typically run `ruff check .` and `ruff format --check .` so the pipeline fails on either a lint violation or unformatted code, rather than silently reformatting.
+
+</details>
+
+<details><summary><b>26.</b> Per the lesson, what belongs in the per-PR workflow for a data repo?</summary>
+
+The per-PR workflow runs ruff lint, the unit tests (`uv run pytest`), and a `dbt build --select state:modified+` against a prod-like sample schema. The idea is to give fast, cheap, change-scoped feedback on every PR without rebuilding the entire warehouse.
+
+</details>
+
+<details><summary><b>27.</b> Per the lesson, what belongs in the per-merge workflow that does not belong in the per-PR one?</summary>
+
+The per-merge workflow runs the full `dbt build` (not just modified models) and publishes the dbt docs site. These are the heavier, slower, and side-effecting steps you only want once a change is actually accepted into the default branch.
+
+</details>
+
+<details><summary><b>28.</b> Why split work into "what runs per PR" versus "what runs per merge" instead of running everything everywhere?</summary>
+
+PRs happen constantly and need fast, cheap feedback, so you run only change-scoped checks; merges are rarer and authoritative, so you can afford the full build and the publish side-effects there. The split optimizes both developer iteration speed and CI cost — every CI minute on a warehouse is real money.
+
+</details>
+
+<details><summary><b>29.</b> Why must this lesson use `uv run pytest` rather than bare `pytest` or `python -m pytest`?</summary>
+
+`uv run` executes the command inside the project's uv-managed virtual environment with locked dependencies, guaranteeing the same interpreter and package versions the project pins. Bare `python`/`pip` in this repo's convention is disallowed because it risks running against an undefined global environment, producing CI results that do not match local runs.
+
+</details>
+
+<details><summary><b>30.</b> What does `dbt build` do that running `dbt run` and `dbt test` separately does not as cleanly?</summary>
+
+`dbt build` runs and tests resources together in dependency order — it builds a model, immediately tests it, and stops a downstream model if an upstream test fails. This catches a failure at the point it occurs and prevents building on top of data that already violated a contract, which is exactly what you want in CI.
+
+</details>
+
+<details><summary><b>31.</b> What does the dbt selector `state:modified+` mean?</summary>
+
+`state:modified` selects only the nodes that changed relative to a comparison (deferred) state, and the trailing `+` extends the selection to all downstream dependents of those changed nodes. So `state:modified+` builds the changed models plus everything that depends on them, which is the heart of "slim CI."
+
+</details>
+
+<details><summary><b>32.</b> What is "slim CI" in dbt, and why does it matter financially?</summary>
+
+Slim CI builds and tests only what changed and its downstream descendants, rather than rebuilding the whole project on every PR. It matters because warehouse compute is billed per query/second, so on a large project rebuilding everything per PR can cost orders of magnitude more than building the handful of modified models.
+
+</details>
+
+<details><summary><b>33.</b> What does dbt `defer` do, and why is it required for slim CI to work?</summary>
+
+`defer` tells dbt to resolve any `ref()` to a model that is not in the current selection by pointing at the production build's artifacts instead of rebuilding it. Without defer, building only modified models would fail because their upstream dependencies would not exist in the CI schema; defer lets unselected refs resolve to the already-built prod objects.
+
+</details>
+
+<details><summary><b>34.</b> For slim CI, what artifact does dbt compare against to decide what "modified" means?</summary>
+
+It compares against the `manifest.json` from a previous (production) run, supplied via `--state <path>`. dbt diffs the current project's manifest against that stored manifest to determine which nodes changed, so a fresh, trustworthy production manifest must be available to the CI job.
+
+</details>
+
+<details><summary><b>35.</b> What is a "prod-like sample schema," and why build against it in PR CI rather than against full production?</summary>
+
+It is a small, representative subset of production data in a separate schema that has the same structure and edge cases but a fraction of the volume. You build against it so CI exercises real SQL on real-shaped data cheaply and safely, without touching production tables or paying to scan full data on every PR.
+
+</details>
+
+<details><summary><b>36.</b> What does it mean to "publish dbt docs," and why only on merge?</summary>
+
+`dbt docs generate` produces a static documentation site (lineage graph, model descriptions, column docs) from the project and catalog, which you then host. You publish it only on merge because the docs should reflect the accepted state of the default branch, not every speculative PR, and generating/hosting on every PR is wasteful.
+
+</details>
+
+<details><summary><b>37.</b> A PR's slim-CI `dbt build --select state:modified+` builds zero models even though the author changed a model. What is the first thing to check?</summary>
+
+Check that the `--state` manifest and `--defer` configuration point at a valid, recent production run — if the comparison manifest is missing or identical, dbt sees nothing as "modified." Also confirm the changed file actually altered a node dbt tracks (a YAML-only or whitespace change may not register), and that `--select` was passed correctly.
+
+</details>
+
+<details><summary><b>38.</b> What is a deployment gate, and what is its analogue in traditional change management?</summary>
+
+A deployment gate is an automated or manual check that must pass before a deployment to a protected environment proceeds. Its analogue is the change-advisory board (CAB) approval in ITIL change management — the required-reviewer gate is the lightweight, auditable, in-pipeline version of that sign-off.
+
+</details>
+
+<details><summary><b>39.</b> How do you require human approval before a job deploys to production in GitHub Actions?</summary>
+
+You configure the `production` environment with "required reviewers," then attach `environment: production` to the deploy job; the run pauses and waits for an approver before that job executes. This turns the merge-then-deploy flow into a controlled, logged checkpoint instead of an automatic push.
+
+</details>
+
+<details><summary><b>40.</b> How many required reviewers can an environment have, and how many must approve for the job to proceed?</summary>
+
+You can list up to six users or teams as required reviewers on an environment, and only one of them needs to approve for the job to proceed. You can additionally enable "prevent self-review" so the person who triggered the deployment cannot be the one who approves it.
+
+</details>
+
+<details><summary><b>41.</b> What is the "prevent self-review" setting, and why does it matter in a regulated shop?</summary>
+
+"Prevent self-review" stops the user who initiated a deployment from approving their own deployment, even if they are a listed reviewer. In a regulated fund-administration context this enforces segregation of duties — the person making the change cannot unilaterally release it to the production NAV pipeline, which is exactly the four-eyes control auditors expect.
+
+</details>
+
+<details><summary><b>42.</b> What is a wait timer in a GitHub Actions environment, and what range is allowed?</summary>
+
+A wait timer delays a job for a fixed period after it is triggered before it can run, configurable from 1 minute up to 43,200 minutes (30 days). It gives a window to abort a bad release or to align deployments with a maintenance schedule — for example holding a release until after the daily NAV cut-off.
+
+</details>
+
+<details><summary><b>43.</b> What is the maximum number of deployment protection rules you can enable on a single environment?</summary>
+
+A maximum of six deployment protection rules can be enabled on one environment at the same time. This cap covers built-in rules (required reviewers, wait timer, branch restrictions) plus custom third-party protection rules combined.
+
+</details>
+
+<details><summary><b>44.</b> What are deployment branch rules on an environment, and why use them for production?</summary>
+
+Deployment branch rules restrict which branches or tags may deploy to an environment, with options for no restriction, protected branches only, or named branch/tag patterns. For production you typically restrict deploys to `main` (or release tags) so a feature branch can never accidentally deploy straight to the production warehouse.
+
+</details>
+
+<details><summary><b>45.</b> On the free GitHub plans, what is the catch with environment required reviewers in private repositories?</summary>
+
+On GitHub Free, Pro, or Team, required reviewers (and other environment protection rules) for private/internal repositories require a paid tier — on the free plan they only work for public repositories. So a private regulated repo needs at least GitHub Team or Enterprise to enforce the reviewer gate.
+
+</details>
+
+<details><summary><b>46.</b> A deploy job is stuck "waiting" and never runs. What environment setting is the most likely cause?</summary>
+
+The environment most likely has a protection rule pending — a required reviewer has not approved, or a wait timer has not elapsed. Check the environment's deployment-protection status in the run; the job will sit in a "Waiting" state by design until the gate is satisfied or the run is cancelled.
+
+</details>
+
+<details><summary><b>47.</b> What does "secrets hygiene" mean in a CI context, and why is it a first-class architect concern?</summary>
+
+Secrets hygiene means minimizing the existence, scope, lifetime, and exposure of credentials used by the pipeline — preferring short-lived tokens, least privilege, and tight scoping. It is an architect concern because the CI system holds the keys to the warehouse, so a sloppy secret is a direct path to the production fund data.
+
+</details>
+
+<details><summary><b>48.</b> What is OIDC in the GitHub Actions context, and what problem does it solve?</summary>
+
+OIDC (OpenID Connect) lets a workflow request a short-lived, signed identity token from GitHub and exchange it with a cloud provider for temporary credentials, so no long-lived cloud keys are stored as GitHub secrets. It solves the problem of static access keys that never expire and leak — there is simply no standing secret to steal.
+
+</details>
+
+<details><summary><b>49.</b> Which permission must a job declare to use OIDC, and what does it actually grant?</summary>
+
+The job must declare `permissions: { id-token: write }`, which allows the workflow to request (fetch) and use GitHub's OIDC JWT. Importantly it does not grant write access to any resource — it only permits minting and presenting the identity token, which the cloud side then trades for scoped credentials.
+
+</details>
+
+<details><summary><b>50.</b> With OIDC, what does the cloud side need to be configured to trust?</summary>
+
+The cloud provider must register GitHub's OIDC issuer as a federated identity provider and define a trust policy that scopes which repository, branch, environment, or subject claim may assume which role. This means even a valid GitHub token only yields credentials for the specific repo/branch you authorized, not the whole org.
+
+</details>
+
+<details><summary><b>51.</b> Name the GitHub-maintained actions that exchange an OIDC token for cloud credentials on AWS and Azure.</summary>
+
+On AWS you use `aws-actions/configure-aws-credentials`, and on Azure you use `azure/login`; each takes the OIDC JWT and returns short-lived cloud credentials. These replace storing a long-lived access key or service-principal secret in GitHub.
+
+</details>
+
+<details><summary><b>52.</b> Why are long-lived warehouse keys stored as GitHub secrets a worse posture than OIDC, even though both "work"?</summary>
+
+A long-lived key exists indefinitely, so if it leaks (in a log, a fork, a compromised action) it stays valid until someone manually rotates it, and it is often over-privileged. OIDC tokens are minted per run, expire in minutes, and are scoped by a trust policy, so a leak has a tiny window and limited blast radius.
+
+</details>
+
+<details><summary><b>53.</b> What does "least-privilege token for the warehouse" mean in practice for a CI service account?</summary>
+
+It means the CI credential can only do what CI needs — for example create/read in the CI sample schema and read production for defer — and nothing more, with no rights to drop production tables or alter grants. You scope it through the warehouse's role/grant system, so even a fully compromised CI run cannot delete the production NAV history.
+
+</details>
+
+<details><summary><b>54.</b> Beyond OIDC, name two concrete secrets-hygiene practices an architect should mandate.</summary>
+
+Mandate environment-scoped secrets gated by required reviewers (so prod credentials are only reachable on approved prod jobs), and mandate regular rotation plus immediate revocation on suspected exposure. A third is forbidding `echo` of secret-derived values and ensuring no secret is transformed in a way that defeats GitHub's automatic log masking.
+
+</details>
+
+<details><summary><b>55.</b> What is GitOps in one sentence?</summary>
+
+GitOps is an operating model in which the desired state of your system is declared in Git and an automated controller continuously reconciles the running system to match that declared state. Git becomes the single source of truth, and changes happen by committing to Git rather than by manual imperative commands against the system.
+
+</details>
+
+<details><summary><b>56.</b> What does "declarative desired state" mean, and how does it differ from an imperative script?</summary>
+
+Declarative means you describe the end state you want (this many replicas, this config, this version) and let the system figure out how to reach it, whereas imperative means you specify the exact steps to execute. Declarative state is idempotent and auditable — re-applying the same manifest is safe and the manifest itself is the record of intent.
+
+</details>
+
+<details><summary><b>57.</b> What is Argo CD, and what kind of CD does it perform?</summary>
+
+Argo CD is a declarative, GitOps continuous-delivery tool for Kubernetes that keeps a cluster's running state in sync with manifests stored in Git. It is a pull-based CD controller running inside (or near) the cluster, as opposed to a push-based pipeline that runs `kubectl apply` from the CI runner.
+
+</details>
+
+<details><summary><b>58.</b> In Argo CD, what is the source of truth and what is the role of the application controller?</summary>
+
+The Git repository holding the manifests is the source of truth, and the application controller continuously compares the live cluster state against that desired state. When they diverge it reports the difference and, if configured, takes action to bring the cluster back into line with Git.
+
+</details>
+
+<details><summary><b>59.</b> What does the Argo CD status "OutOfSync" mean?</summary>
+
+"OutOfSync" means the live state in the cluster no longer matches the desired state declared in Git — something drifted, or Git changed and has not yet been applied. It is the signal that a reconciliation (sync) is needed; with auto-sync enabled Argo CD applies the change, otherwise it waits for a manual sync.
+
+</details>
+
+<details><summary><b>60.</b> What is "drift" in GitOps, and how does Argo CD's self-heal respond to it?</summary>
+
+Drift is when the running system is changed out-of-band (someone runs `kubectl edit` directly) so it diverges from Git. With self-heal enabled, Argo CD detects the divergence and reverts the cluster back to the Git-declared state, making Git-bypassing manual changes effectively non-persistent.
+
+</details>
+
+<details><summary><b>61.</b> Roughly how often does Argo CD poll the Git repository by default, and what is the alternative to polling?</summary>
+
+By default Argo CD reconciles on a timer of about every three minutes (roughly 180 seconds, computed as 120 seconds plus up to 60 seconds of jitter). The alternative to polling is a Git webhook that notifies Argo CD immediately on a push, cutting the detection delay from minutes to seconds.
+
+</details>
+
+<details><summary><b>62.</b> Why does this lesson treat Argo CD at only "awareness" level for now?</summary>
+
+Because Argo CD's value appears once you are deploying to Kubernetes, which is a later phase — at this stage you only need to understand the GitOps concept (declarative desired state reconciled from Git) so the architecture makes sense later. The actionable CI/CD work here is GitHub Actions; Argo CD is forward-looking context, not a current build target.
+
+</details>
+
+<details><summary><b>63.</b> How does the GitOps pull model differ from a push-based CI deploy, and why can pull be safer?</summary>
+
+In a push model, the CI runner holds cluster credentials and runs `kubectl apply` outward into the cluster; in a pull model, an in-cluster controller (Argo CD) reads Git and applies changes from inside. Pull can be safer because the cluster credentials never leave the cluster — CI only needs to write manifests to Git, not to hold production cluster admin keys.
+
+</details>
+
+<details><summary><b>64.</b> Your dbt CI job for an EMT-file pipeline passes all schema tests but a `WHERE` change silently dropped several Luxembourg share classes. Did the per-PR slim CI in this lesson catch it, and what would?</summary>
+
+Plain slim CI as described here (lint, unit tests, `dbt build --select state:modified+`) will not catch a silent row-count change because the affected models still build and their schema tests still pass. Catching it requires data-aware CI — a row/column data-diff between the prod build and the PR build — which is the subject of the next lesson; slim CI proves the code is green, not that the data is right.
+
+</details>
+
+<details><summary><b>65.</b> For a Luxembourg fund administrator, why is a non-bypassable CI gate a control objective and not just an engineering nicety?</summary>
+
+Because regulators (and DORA-style operational-resilience expectations) require demonstrable change controls over systems producing official figures like NAV; a required CI check that blocks merges is auditable evidence that no change reaches production untested. Without it, the firm cannot show that the Monday NAV run was produced by reviewed, tested code rather than by an unverified Friday hotfix.
+
+</details>
+
+<details><summary><b>66.</b> How does the GitHub Actions environment-approval flow map to the four-eyes / segregation-of-duties control auditors expect on a NAV pipeline?</summary>
+
+The required-reviewer gate forces a second person to approve before the production deploy job runs, and "prevent self-review" stops the author approving their own change — together implementing four-eyes. Because every approval is logged with who and when, it doubles as the audit trail proving the control operated for each release.
+
+</details>
+
+<details><summary><b>67.</b> How would you sketch the equivalent of a GitHub Actions environment-with-approval as an Azure DevOps pipeline?</summary>
+
+In Azure DevOps you model deployment targets as Environments and attach Approvals and checks (approver lists, business hours, branch control, gates) to the environment, and your YAML pipeline uses a deployment job targeting that environment. The required-reviewer concept maps to an Approval check, and the protected-environment-with-secrets concept maps to a service connection plus variable group scoped to that environment.
+
+</details>
+
+<details><summary><b>68.</b> What is the Azure DevOps analogue of a GitHub Actions "workflow," and of a "job that targets an environment"?</summary>
+
+A GitHub Actions workflow maps to an Azure DevOps pipeline (also YAML-defined), and a job targeting an environment maps to an Azure DevOps deployment job (`deployment:`) that references an Environment carrying its approvals and checks. Knowing this mapping lets you redesign the same CI/CD gates for an EU enterprise that mandates Azure DevOps.
+
+</details>
+
+<details><summary><b>69.</b> Why might an EU enterprise regulated shop mandate Azure DevOps over GitHub Actions, and what should the architect be able to do about it?</summary>
+
+Many EU enterprises standardize on the Microsoft/Azure stack for data-residency, procurement, and existing-tooling reasons, so Azure DevOps is the corporate default. The architect should be able to map their GitHub Actions design — workflows, environments, approvals, secrets — onto Azure DevOps pipelines, environments, and variable groups well enough to satisfy the mandate without redesigning the control model.
+
+</details>
+
+<details><summary><b>70.</b> A workflow file fails immediately with a YAML parse/validation error before any job runs. What is the first thing to check?</summary>
+
+Check the YAML indentation and structure, because GitHub Actions is strict YAML and a single mis-indented key (for example `steps:` under the wrong level, or tabs instead of spaces) breaks the whole file. Use the Actions tab's annotation, which points to the offending line, and remember YAML forbids tabs for indentation.
+
+</details>
+
+<details><summary><b>71.</b> A required check is not blocking merges even though CI clearly failed. What repository setting is most likely missing?</summary>
+
+Branch protection (or a ruleset) on the target branch must list that check as a required status check; without it, GitHub runs the check but does not enforce its result on merge. Add the check name to the branch's required status checks so a failure makes the merge button unavailable.
+
+</details>
+
+<details><summary><b>72.</b> What is the difference between Continuous Delivery and Continuous Deployment?</summary>
+
+Continuous Delivery means every change that passes CI is kept in a deployable state and can be released with a manual approval, whereas Continuous Deployment removes that final manual step and releases automatically. For a regulated NAV pipeline, Continuous Delivery (with a required-reviewer gate) is usually preferred so a human sign-off remains in the loop.
+
+</details>
+
+<details><summary><b>73.</b> Why is it dangerous to put a long-lived warehouse password in plaintext in a workflow YAML file or `.env` committed to the repo?</summary>
+
+Anyone with read access to the repo — and the entire Git history forever — can see it, and it will be replicated to every fork and clone. Secrets must live in GitHub's encrypted secrets store (ideally environment-scoped) or be eliminated entirely via OIDC; a credential in Git history is considered compromised even after deletion and must be rotated.
+
+</details>
+
+<details><summary><b>74.</b> What does `if: github.event_name == 'push'` accomplish on a step or job in a combined workflow?</summary>
+
+It conditionally runs that step/job only for push events, so you can keep PR-only and merge-only logic in one file and branch on the trigger. This is a common way to share setup steps while running the heavier full `dbt build` and docs-publish only on the merge (push to `main`).
+
+</details>
+
+<details><summary><b>75.</b> What are job `outputs`, and how are they consumed by a later job?</summary>
+
+A job can expose values via its `outputs:` map, and a dependent job reads them through `needs.<job_id>.outputs.<name>`. This passes small pieces of state (like a computed schema name or a build ID) between otherwise-isolated jobs without writing files.
+
+</details>
+
+<details><summary><b>76.</b> What is the role of `actions/cache` (or the built-in caching) in speeding up a data-repo CI run?</summary>
+
+Caching stores and restores dependency directories (the uv/pip cache, the dbt packages) between runs keyed by a lockfile hash, so the runner does not re-download everything each time. For a Python+dbt repo this can cut minutes off every PR, directly lowering CI cost, as long as the cache key changes when dependencies change.
+
+</details>
+
+<details><summary><b>77.</b> A CI run passes locally but the dbt build fails in GitHub Actions with a connection error to the warehouse. What are the first two things to check?</summary>
+
+First, confirm the warehouse credentials/connection profile are present in CI as the correct environment secrets (and that the job references the right environment), since local uses your own profile. Second, check network reachability — IP allow-lists on the warehouse may block GitHub-hosted runner IP ranges, requiring a self-hosted runner or an allow-listed egress.
+
+</details>
+
+<details><summary><b>78.</b> Why is "the Monday NAV run is the test environment" used as the cautionary tale in this lesson?</summary>
+
+It describes the failure mode where a broken change merges on Friday with no gate, so the first real execution against production data is the Monday NAV calculation — meaning production is doing the testing. The CI gate exists precisely so defects are caught in the pipeline on Friday, not discovered as wrong NAVs by clients on Monday.
+
+</details>
+
+<details><summary><b>79.</b> What is a self-hosted runner, and when would a regulated data shop need one instead of GitHub-hosted runners?</summary>
+
+A self-hosted runner is a machine you operate that executes GitHub Actions jobs, registered to your repo or org. A regulated shop needs one when CI must reach a warehouse or data inside a private network/VPC, or when data-residency rules forbid processing on GitHub's shared cloud runners — the runner sits inside the controlled network with the right egress and allow-listing.
+
+</details>
+
+<details><summary><b>80.</b> What does `concurrency` with `cancel-in-progress: true` keyed on the PR do when an author pushes three commits quickly?</summary>
+
+It cancels the earlier still-running CI runs for that PR and keeps only the newest, so you do not waste compute building stale commits. Without it, all three runs proceed in parallel, tripling warehouse usage for results you no longer care about.
+
+</details>
+
+<details><summary><b>81.</b> How do GitHub Actions environment secrets enforce that production warehouse credentials are only used on approved deploys?</summary>
+
+Environment secrets are only injected into a job that references that environment, and if the environment has required reviewers, the job (and thus the secret) is blocked until approval. So the production credential is physically unavailable to any job that has not passed the human gate.
+
+</details>
+
+<details><summary><b>82.</b> What is the difference between `dbt build` and `dbt compile` in a CI context?</summary>
+
+`dbt compile` only generates the executable SQL and the manifest without touching the warehouse, whereas `dbt build` actually runs and tests the resources against the warehouse. You might `dbt compile` for a cheap syntax/parse check, but the lesson's PR gate uses `dbt build` against a sample schema so it tests real execution, not just compilation.
+
+</details>
+
+<details><summary><b>83.</b> What is the danger of using `pull_request_target` to grant a fork PR access to warehouse secrets, and how would you instead test fork PRs?</summary>
+
+`pull_request_target` runs with the base branch's permissions and secrets but can be tricked into running attacker-controlled code from the PR, exfiltrating the warehouse credentials. The safer pattern is to run untrusted PR code with no secrets, and only run secret-requiring jobs after a maintainer reviews and labels the PR or re-runs it from a trusted context.
+
+</details>
+
+<details><summary><b>84.</b> What is an artifact in GitHub Actions, and what is a sensible use in a data CI pipeline?</summary>
+
+An artifact is a file or set of files uploaded from a run (via `actions/upload-artifact`) and retained for later download or use by another job. In data CI you might upload the dbt `manifest.json` and `run_results.json`, or a generated docs site, so a later job or a human can inspect what the build produced.
+
+</details>
+
+<details><summary><b>85.</b> How would you make the production dbt `manifest.json` available to PR jobs so slim CI can compute `state:modified+`?</summary>
+
+Have the merge/production workflow upload the `manifest.json` (as an artifact or to object storage like an S3/Azure bucket), and have the PR workflow download it and pass its location via `--state`. The PR job then diffs the current manifest against that production manifest to determine modified nodes.
+
+</details>
+
+<details><summary><b>86.</b> A teammate added a brand-new model and slim CI built it but skipped its upstream sources. Is that a bug?</summary>
+
+No — that is expected, because `state:modified+` builds the new node and its downstream dependents, while upstream refs are resolved via `defer` to the existing production artifacts rather than rebuilt. The upstream models did not change, so rebuilding them would only add cost without adding safety.
+
+</details>
+
+<details><summary><b>87.</b> What is the practical meaning of "you can explain every job in the workflow file" as a done-when criterion?</summary>
+
+It means you understand why each job exists, what it gates, what it costs, and what failure of it implies — not just that the YAML happens to be green. An architect who cannot explain a job cannot defend the control model to an auditor or safely change it, so comprehension is the real deliverable, not a passing badge.
+
+</details>
+
+<details><summary><b>88.</b> How does the per-PR-vs-per-merge split relate to "what each minute of CI costs"?</summary>
+
+Every CI minute consumes runner time and, for data jobs, warehouse compute that is billed — so putting expensive full builds only on the rare merge, and cheap slim builds on the frequent PR, minimizes spend while preserving safety. Being able to justify the split means quantifying that trade-off, not just asserting it.
+
+</details>
+
+<details><summary><b>89.</b> What is a "deliberately broken dbt test" PR meant to prove in this lesson's exercise?</summary>
+
+It proves the gate actually works end-to-end: the broken test makes a job fail, the failed required check blocks the merge, and the failure is legible in the PR's checks. Demonstrating the block (not just configuring it) is the evidence that "cannot merge" is real for your repo.
+
+</details>
+
+<details><summary><b>90.</b> When a PR check fails, what makes a failure "legible" in the PR, and why does the architect care?</summary>
+
+A legible failure shows clearly which job and step failed and surfaces the underlying error (the failing dbt test name, the assertion) in the PR's checks summary or annotations, so a developer can act without spelunking raw logs. The architect cares because an illegible failure gets ignored or bypassed, undermining the whole gate.
+
+</details>
+
+<details><summary><b>91.</b> What does `permissions: contents: read` alone (with everything else unset) achieve for a typical PR lint/test workflow?</summary>
+
+It gives the `GITHUB_TOKEN` only read access to repository contents — enough to check out and test code — and denies all write scopes, so a compromised step cannot push commits, open issues, or alter settings. For a pure lint/test PR job that needs no write-back, this minimal grant is the correct least-privilege setting.
+
+</details>
+
+<details><summary><b>92.</b> How does a Git webhook improve an Argo CD GitOps loop compared to default polling?</summary>
+
+Default polling means Argo CD only notices a Git change at its next reconcile (about every three minutes), whereas a webhook fires on push so Argo CD reconciles almost immediately. The webhook reduces deploy latency without changing the model — Git is still the source of truth; it just learns of changes faster.
+
+</details>
+
+<details><summary><b>93.</b> In GitOps, why is "the diff is the deployment" a useful mental model?</summary>
+
+Because deployments are expressed as commits to Git, the Git diff is the complete, reviewable, revertable record of exactly what changed in the desired state. Rolling back is `git revert` and re-sync, and every change has a PR, an author, and a review — which is precisely the auditability a regulated environment needs.
+
+</details>
+
+<details><summary><b>94.</b> What goes wrong if your slim-CI PR build and your production build use the same warehouse schema?</summary>
+
+Concurrent PR builds and production runs would collide on the same tables, with one overwriting or locking the other, producing flaky failures and potentially corrupting production data. Slim CI must build into an isolated, per-PR (or per-run) schema and defer reads to production, never write into the production schema.
+
+</details>
+
+<details><summary><b>95.</b> How can you give each PR run its own isolated dbt schema in CI?</summary>
+
+Generate a unique schema name per run (for example from the PR number or run ID) and pass it via a dbt custom schema/target configuration or an environment variable consumed by `generate_schema_name`. This guarantees concurrent PRs never clash, and you can drop the throwaway schema after the run to control cost.
+
+</details>
+
+<details><summary><b>96.</b> Why is it important that CI build steps for a data repo be idempotent and safe to re-run?</summary>
+
+CI frequently re-runs jobs (on retries, on new pushes), so a build that is not idempotent could double-insert, leave partial state, or fail on the second run, producing flaky and untrustworthy results. Building into fresh schemas and using `dbt build` (which recreates models deterministically) keeps re-runs clean.
+
+</details>
+
+<details><summary><b>97.</b> What is the security risk of a third-party action you reference with `uses:`, and what controls reduce it?</summary>
+
+A third-party action runs arbitrary code in your runner with access to whatever the job's token and secrets allow, so a malicious or compromised action can exfiltrate secrets. Controls include pinning to a commit SHA, minimizing the job's `permissions`, avoiding secrets in jobs that run untrusted actions, and preferring vetted/first-party actions.
+
+</details>
+
+<details><summary><b>98.</b> A `dbt build --select state:modified+ --defer --state ./prod-artifacts` run errors that it cannot find a relation that exists in production. What is the likely cause?</summary>
+
+The deferred relation is missing from the artifacts or the prod object was renamed/dropped relative to the manifest, so defer cannot resolve the `ref()` to a real production table. Refresh the `--state` artifacts from a current successful production run so the manifest matches what actually exists in the warehouse.
+
+</details>
+
+<details><summary><b>99.</b> How does requiring a passing CI check plus a required reviewer together implement a layered "cannot merge / cannot deploy" control?</summary>
+
+The passing required status check ensures code quality gates were met (lint, tests, slim build) before merge, and the environment's required reviewer ensures a human approves before the production deploy. Layering an automated quality gate with a human authorization gate gives both technical correctness and accountable sign-off, which is the control posture a regulated NAV platform needs.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the architect's deliverable for 9.3.1 in one or two sentences.</summary>
+
+The architect designs a CI/CD setup where a PR that breaks a dbt test cannot merge and every workflow job is justified, the PR-vs-merge split is cost-justified, secrets use OIDC and least privilege, production deploys pass a required-reviewer gate, and the design can be mapped onto Azure DevOps. The underlying goal is to make engineering and regulatory standards enforceable in the pipeline rather than advisory, so production is never the test environment.
+
+</details>
+
+
+## Phase 3 · 9.3.2 Data-aware CI — 100 self-test questions
+
+<details><summary><b>1.</b> What does "data-aware CI" mean and why does it exist on top of ordinary CI?</summary>
+
+Data-aware CI inspects the actual data a pipeline change produces, not just whether the code compiles and unit tests pass. It exists because the classic data regression is "code-green/data-wrong": every schema test passes yet the numbers silently shift. The two core techniques are change-aware selection (build only what changed, like dbt slim CI) and data diffing (compare prod data against the PR build) to catch what unit tests structurally cannot.
+
+</details>
+
+<details><summary><b>2.</b> Explain the phrase "code-green/data-wrong" with a concrete fund-data example.</summary>
+
+It means every test is green but the data is wrong. For example, a `WHERE` clause tweak that still passes every `not_null` and schema test can drop 3% of share classes from the EMT feed. Nothing in code or schema validation notices fewer rows; only comparing the row set before and after the change reveals the regression.
+
+</details>
+
+<details><summary><b>3.</b> Why can't unit tests alone catch a regression like a filter that drops rows?</summary>
+
+A unit test asserts a fixed expectation against fixed inputs, so it only catches what its author anticipated. A `WHERE` clause that removes 3% of rows still satisfies "column is not null" and "type is numeric" assertions, because the surviving rows are individually valid. Catching it requires comparing the output dataset against a known-good baseline, which is the job of a data diff, not a unit test.
+
+</details>
+
+<details><summary><b>4.</b> What is dbt "slim CI" in one sentence?</summary>
+
+Slim CI is a dbt pattern where CI builds only the models that changed in the PR plus their downstream dependents, instead of rebuilding the entire project. It relies on two features working together: `state:modified` selection to identify what changed, and `--defer` to resolve everything unselected to existing production tables.
+
+</details>
+
+<details><summary><b>5.</b> Which two dbt features must combine to make slim CI work?</summary>
+
+State comparison via the `state` selection method (`state:modified`) and deferral via `--defer` with `--state`. State selection picks only the nodes that changed plus downstream; defer lets those few models resolve their unchanged upstream `ref()`s to production tables instead of rebuilding them. Without defer you would still have to build the whole DAG to satisfy references.
+
+</details>
+
+<details><summary><b>6.</b> What artifact does the dbt `state` method compare against?</summary>
+
+It compares the current project against a previous `manifest.json` produced by an earlier dbt run, typically the last successful production deploy. You point dbt at it with `--state path/to/artifacts`, where the directory contains that prior `manifest.json`. The comparison is done at parse time by matching `unique_id`s between the two manifests.
+
+</details>
+
+<details><summary><b>7.</b> What does `state:modified` select?</summary>
+
+It selects all new nodes plus any existing nodes that changed in any way relative to the comparison manifest. It is effectively the union of every `state:modified.*` sub-selector plus resource-specific changes such as source `freshness` or exposure `maturity`. In slim CI you usually write `state:modified+` so downstream dependents are built too.
+
+</details>
+
+<details><summary><b>8.</b> What does the trailing `+` mean in `state:modified+`?</summary>
+
+The `+` is dbt's graph operator meaning "this node and everything downstream of it." So `state:modified+` selects the changed nodes plus all their descendants, which is exactly what you want in CI because a change to a model can break models built from it. A leading `+`, as in `+state:modified`, would instead pull in upstream ancestors.
+
+</details>
+
+<details><summary><b>9.</b> What does `state:new` select, and how does it differ from `state:modified`?</summary>
+
+`state:new` selects only nodes whose `unique_id` has no match in the comparison manifest, i.e. brand-new resources. `state:modified` is broader: it includes those new nodes and also existing nodes whose body, configs, contract, macros, or relation changed. Use `state:new` when you specifically want to act on additions only, for example running tests on newly added models.
+
+</details>
+
+<details><summary><b>10.</b> What does the `state:modified.body` sub-selector detect?</summary>
+
+It detects changes to the body of a node, which for a model is its compiled SQL and for a seed is its values. It is the most common trigger in practice because most PRs edit model SQL. It will not fire for a pure config or tag change that leaves the SQL text identical.
+
+</details>
+
+<details><summary><b>11.</b> What does `state:modified.configs` detect, and what does it deliberately exclude?</summary>
+
+It detects changes to any node config, but it deliberately excludes `database`, `schema`, `alias`, and `tags`. Those four are excluded because they affect where the relation lives rather than what it computes, and the first three are covered separately by `state:modified.relation`. This separation lets you choose whether a re-target should count as a "modification" for CI purposes.
+
+</details>
+
+<details><summary><b>12.</b> What does `state:modified.relation` detect?</summary>
+
+It detects changes to the database representation of a node — its `database`, `schema`, or `alias`. These are the parts that change which physical relation the model writes to or reads from. It is split out from `.configs` precisely because moving a model to a new schema is a different kind of risk than changing its logic.
+
+</details>
+
+<details><summary><b>13.</b> What does `state:modified.contract` detect, and why does it matter in a regulated estate?</summary>
+
+It detects changes to a model's enforced contract, specifically the `name` and `data_type` of its declared `columns`. It matters in regulated fund administration because a contract is a downstream promise: silently changing a NAV column from `numeric` to `text`, or renaming `isin`, would break consumers depending on a stable shape. Contract enforcement plus `.contract` selection makes that change visible and fail-loud in CI.
+
+</details>
+
+<details><summary><b>14.</b> What does `state:modified.macros` detect, and why is it easy to forget?</summary>
+
+It detects when a node depends, directly or indirectly, on a macro whose definition changed. It is easy to forget because a model's own SQL text may be byte-identical, yet its compiled output changes because a shared macro it calls was edited. Without `.macros` selection, a one-line edit to a widely-used macro could quietly alter dozens of models that slim CI never rebuilds.
+
+</details>
+
+<details><summary><b>15.</b> What does `state:modified.persisted_descriptions` detect and what is its precondition?</summary>
+
+It detects changes to relation-level or column-level `description` text, but only when `persist_docs` is enabled so those descriptions actually land in the database. Without `persist_docs`, a description edit has no warehouse effect and this sub-selector does not fire. It exists so documentation-to-database sync can be a CI trigger when you have opted into persisting docs.
+
+</details>
+
+<details><summary><b>16.</b> What is the difference between `state:modified` and `state:unmodified`?</summary>
+
+They are inverses. `state:modified` selects new or changed nodes; `state:unmodified` selects existing nodes that have no changes relative to the comparison manifest. `state:old` is similarly the inverse of `state:new`, selecting nodes that already existed in the comparison manifest.
+
+</details>
+
+<details><summary><b>17.</b> Why must you not point `--state` and `--target-path` at the same directory?</summary>
+
+Because dbt writes a fresh `manifest.json` into `--target-path` during parsing, and if that is the same folder you passed to `--state`, the comparison baseline is overwritten by the current run before the state comparison happens. The fix is to keep the prior `manifest.json` in a dedicated folder, write the new build to a different `--target-path`, or pass `--no-write-json` when reproducing.
+
+</details>
+
+<details><summary><b>18.</b> In slim CI, where does the comparison `manifest.json` typically come from?</summary>
+
+From your last successful production run. A common pattern is to have the production job upload its `target/manifest.json` as an artifact, then the CI job downloads it into a `--state` folder before running `dbt build --select "state:modified+" --defer --state ./prod-artifacts`. This makes "what changed since prod" the basis for selection.
+
+</details>
+
+<details><summary><b>19.</b> Describe exactly what `--defer` does in dbt.</summary>
+
+`--defer`, combined with `--state`, lets dbt resolve a `ref()` to the relation recorded in the state manifest instead of one built in the current run. It applies only to nodes that are not selected and do not already exist in the current target, so your few changed models can read their unchanged parents straight from production. It is what lets slim CI avoid rebuilding the whole DAG.
+
+</details>
+
+<details><summary><b>20.</b> Under `--defer`, what are the two conditions for a `ref()` to resolve to the state (prod) relation?</summary>
+
+The referenced node must not be among the selected nodes, and it must not already exist in the current target database. If both hold, dbt resolves the `ref()` to the relation from the state manifest. Passing `--favor-state` overrides the second condition so the state relation is preferred even when a same-named relation exists in the dev target.
+
+</details>
+
+<details><summary><b>21.</b> What does `--favor-state` change about deferral?</summary>
+
+Normally a deferred `ref()` only falls back to the state relation when the node does not exist in the current target; if a stale dev copy exists, dbt uses that. `--favor-state` flips the priority so dbt prefers the state (production) version for any unselected node, regardless of whether a dev copy exists. It is useful when leftover dev tables would otherwise shadow the canonical production data.
+
+</details>
+
+<details><summary><b>22.</b> What is the purpose of the separate `--defer-state` flag?</summary>
+
+`--defer-state` lets you use one manifest for state comparison (`--state`) and a different one for resolving deferred refs. This separates "which models logically changed" from "which production relations to fail over to," enabling more granular CI/CD setups. If you do not pass `--defer-state`, deferral uses the same manifest given to `--state`.
+
+</details>
+
+<details><summary><b>23.</b> Why are ephemeral models never deferred?</summary>
+
+Ephemeral models have no materialized relation; they are inlined as CTEs into the models that reference them, so they act as pass-throughs. There is no production table to defer a `ref()` to, so dbt always compiles them inline rather than resolving them from the state manifest. This is why deferral concerns only materialized models, seeds, and snapshots.
+
+</details>
+
+<details><summary><b>24.</b> Walk through what `dbt build --select "state:modified+" --defer --state ./prod-artifacts` does.</summary>
+
+dbt parses the project, compares it against the `manifest.json` in `./prod-artifacts`, and selects every changed node plus its downstream dependents. It then builds only those selected nodes; their unchanged upstream `ref()`s resolve to the production relations from the state manifest via defer. `build` also runs the tests on the selected nodes, so you validate the slice you actually changed.
+
+</details>
+
+<details><summary><b>25.</b> A slim CI run errors with "relation does not exist" for an upstream model you did not change. What is the first thing to check?</summary>
+
+Check that `--defer` is actually set and that `--state` points at a valid `manifest.json` from a run where that upstream model was built in production. The error means the unchanged parent was neither selected nor resolvable from the state manifest, so dbt looked for it in your empty CI schema. Usually the cause is a missing or stale state artifact, or defer not being passed at all.
+
+</details>
+
+<details><summary><b>26.</b> Why does slim CI normally run `dbt build` rather than `dbt run` plus a separate `dbt test`?</summary>
+
+`dbt build` interleaves model materialization and testing in DAG order, so a model's tests run immediately after it is built and a failing test stops its downstream models. In CI this gives fail-fast behaviour on the exact slice you selected. Running `run` then `test` separately would build everything before any test fires and loses that ordering guarantee.
+
+</details>
+
+<details><summary><b>27.</b> What does slim CI fundamentally NOT protect you against?</summary>
+
+It does not protect you against code-green/data-wrong regressions, because it only changes which models get built, not whether the resulting data is correct. A filter that silently drops rows still passes every test that slim CI runs. To catch that class of bug you need a data diff comparing the PR output against production, which is a different layer from slim CI.
+
+</details>
+
+<details><summary><b>28.</b> How does slim CI save warehouse spend?</summary>
+
+By building only the changed models plus downstream instead of the whole project, and by reading unchanged parents from existing production tables via defer rather than recomputing them. On a large DAG this can turn a thousand-model rebuild into a handful of models per PR. The saving is proportional to how much of the DAG a typical PR leaves untouched.
+
+</details>
+
+<details><summary><b>29.</b> What is a SQLMesh "plan"?</summary>
+
+A plan is the computed difference between your local project state and a target environment's state, and it must be created and applied for any change to take effect. It enumerates added, removed, directly modified, and indirectly modified models, the data intervals that are missing, and the date range affected. You review the plan, then apply it to materialize the changes.
+
+</details>
+
+<details><summary><b>30.</b> What is the relationship between `sqlmesh plan` and `sqlmesh apply` (or applying a plan)?</summary>
+
+`sqlmesh plan` is the proposal step: it compares local code to a target environment and shows what would change, including categorization and backfill scope. Applying the plan is what actually materializes those changes in the environment, creating or updating model variants and running backfills. Nothing changes in the warehouse until the plan is applied.
+
+</details>
+
+<details><summary><b>31.</b> How does SQLMesh categorize a direct model change?</summary>
+
+It classifies the change as breaking, non-breaking, or forward-only (with metadata-only changes requiring no rebuild at all). The category determines which models get backfilled: breaking backfills the model and all downstream, non-breaking backfills only the model itself, and forward-only avoids creating a new physical table. SQLMesh can infer these categories automatically by analysing the change.
+
+</details>
+
+<details><summary><b>32.</b> What is a "breaking" change in SQLMesh and what does it backfill?</summary>
+
+A breaking change is one whose logic affects downstream results, the canonical example being adding a `WHERE` clause that filters rows. SQLMesh backfills both the modified model and all its downstream dependents, because their outputs can change as a consequence. It is the safest categorization but the most expensive because of the cascade of reprocessing.
+
+</details>
+
+<details><summary><b>33.</b> What is a "non-breaking" change in SQLMesh and what does it backfill?</summary>
+
+A non-breaking change is one whose effect cannot propagate to downstream models without their being modified too, the canonical example being adding a new column. SQLMesh backfills only the modified model; downstream models are not rebuilt because they cannot consume the new column until someone edits them to do so. This makes additive changes much cheaper than filtering changes.
+
+</details>
+
+<details><summary><b>34.</b> Why is "add a new column" non-breaking but "add a WHERE clause" breaking in SQLMesh?</summary>
+
+Adding a column only adds data that nothing downstream currently reads, so existing downstream outputs are unaffected and need no backfill. Adding a `WHERE` clause removes rows, which changes the model's output and therefore changes everything computed from it, so the whole downstream chain must be reprocessed. The distinction is whether existing downstream results can change.
+
+</details>
+
+<details><summary><b>35.</b> What is a "forward-only" change in SQLMesh?</summary>
+
+A forward-only change reuses the existing physical table instead of creating a new versioned one, so it incurs no backfill of historical data. New data flows forward under the existing structure, which is cheap, but it makes reverting hard because there is no separate prior physical table to swap back to. It is used when reprocessing all history is too expensive or unnecessary.
+
+</details>
+
+<details><summary><b>36.</b> What is the trade-off of choosing forward-only over a normal breaking change?</summary>
+
+Forward-only eliminates backfill cost by keeping the existing physical table, which is attractive for huge tables where reprocessing history is prohibitive. The cost is that reverting becomes complex, because you have not preserved a clean prior version to swap to, and historical rows are not retro-corrected. You trade reversibility and full recomputation for speed and spend.
+
+</details>
+
+<details><summary><b>37.</b> What is a "virtual update" in SQLMesh?</summary>
+
+A virtual update happens when no data is missing and only the environment's references need to point at already-built model versions. It imposes zero runtime cost because SQLMesh simply swaps pointers to pre-existing physical tables rather than recomputing anything. Promoting a fully-built dev change into prod is typically a virtual update.
+
+</details>
+
+<details><summary><b>38.</b> How does a virtual update differ from a backfill?</summary>
+
+A backfill executes model logic across date intervals to populate physical tables, which costs warehouse compute. A virtual update only re-points environment references at tables that already exist, costing essentially nothing. The whole point of SQLMesh's virtual layer is to do the expensive backfill once in a dev environment and then promote it to prod as a cheap virtual update.
+
+</details>
+
+<details><summary><b>39.</b> What is a SQLMesh virtual environment, mechanically?</summary>
+
+A virtual environment is a named collection of references (views) pointing to specific physical table variants, not a copy of the data itself. Each model modification produces a new variant with a unique fingerprint stored in its own physical table, and an environment just records which variant each model points to. This lets dev environments preview changes against shared physical data without duplicating it.
+
+</details>
+
+<details><summary><b>40.</b> How does SQLMesh achieve isolation between environments without copying data?</summary>
+
+Every model version gets a content fingerprint and its own physical table variant, and environments are just sets of pointers to those variants. A dev environment can point at new variants for the models it changed while sharing the unchanged production variants for everything else. So isolation is logical (different pointers) rather than physical (different copies), which is what keeps it cheap.
+
+</details>
+
+<details><summary><b>41.</b> What is special about the `prod` environment in SQLMesh?</summary>
+
+The `prod` environment is treated as the canonical target: it ensures all models are backfilled from their start dates up to the most recent completed interval, with no gaps. Non-prod environments can use flexible, narrower date ranges for cheap development. This guarantees production always has complete, contiguous history while dev environments stay fast.
+
+</details>
+
+<details><summary><b>42.</b> How does a typical SQLMesh dev-to-prod flow keep prod promotion cheap?</summary>
+
+You apply a plan to a dev environment, which backfills the changed model variants there and lets you inspect the data. Once you are satisfied, promoting to prod re-points prod's references at those already-built variants as a virtual update, with no re-backfill. The expensive computation happens once in dev; prod promotion is effectively free.
+
+</details>
+
+<details><summary><b>43.</b> In SQLMesh, what does "indirectly modified" mean in a plan?</summary>
+
+An indirectly modified model is one whose own code did not change but which depends on a model that did change in a breaking way. The plan lists these separately from directly modified models because they are affected through the DAG rather than by an edit. Whether they get backfilled follows from the categorization of the upstream change.
+
+</details>
+
+<details><summary><b>44.</b> Conceptually, what is data-diff?</summary>
+
+data-diff is an open-source tool that compares two tables, within one database or across different databases, and reports which rows and columns differ. In CI you point it at the production version of a table and the PR-built version to surface exactly which rows changed. It answers the "did the data actually change?" question that schema tests cannot.
+
+</details>
+
+<details><summary><b>45.</b> What algorithm does data-diff use to find differing rows efficiently?</summary>
+
+It uses a binary-search-over-checksums approach: it splits each table into segments, checksums each segment on both sides, and only when two segments' checksums disagree does it recurse, subdividing that segment and re-checksumming until it isolates the differing rows. This means only a handful of hash values cross the network in the common case, not the full row data. Performance is within an order of magnitude of `count(*)` when there are few differences.
+
+</details>
+
+<details><summary><b>46.</b> Why is data-diff's segment-checksum approach so IO-efficient?</summary>
+
+Because it transfers only small checksums across the network instead of shipping every row to one side for comparison. When segments match, a single hash confirms millions of rows are identical; only segments that differ are subdivided and re-hashed. So network and IO cost scales with the amount of actual difference, not the size of the tables.
+
+</details>
+
+<details><summary><b>47.</b> What is the difference between a row-level and a column-level diff?</summary>
+
+A row-level diff tells you which key rows are present, missing, or changed between the two tables. A column-level diff goes further and tells you, for matched rows, which specific columns hold different values and by how much. Column-level diffs are what reveal that, say, only the `nav_per_share` column drifted while everything else is identical.
+
+</details>
+
+<details><summary><b>48.</b> How does the managed Datafold product relate to open-source data-diff?</summary>
+
+Datafold is the commercial company behind the open-source data-diff library, and it offers a managed product that runs column-level diffs automatically in CI and posts the results on the pull request. The open-source tool gives you the diffing engine you run yourself; Datafold wraps it with CI integration, a UI, value-level diff summaries, and orchestration. The build-vs-buy question is whether that integration is worth the licence cost.
+
+</details>
+
+<details><summary><b>49.</b> What is the current maintenance status of the open-source data-diff repository?</summary>
+
+Datafold archived the open-source data-diff project; as of 17 May 2024 they stated they are no longer actively supporting or developing it, and the repository is read-only. This matters for a build-vs-buy memo because relying on the FOSS tool now means relying on an unmaintained, archived codebase. Datafold steered users toward its managed offering for ongoing diff-in-CI needs.
+
+</details>
+
+<details><summary><b>50.</b> Why does the archival status of open-source data-diff matter for a regulated shop?</summary>
+
+An unmaintained, archived dependency receives no security patches, bug fixes, or new database-adapter support, which is hard to justify in a regulated fund-administration estate under scrutiny like DORA. You either accept the operational risk of pinning an archived library, fork and maintain it yourself, or buy the managed Datafold product. The decision belongs in the build-vs-buy memo, with the maintenance risk stated explicitly.
+
+</details>
+
+<details><summary><b>51.</b> A data diff between prod and your PR build shows 0 row differences but the unit tests changed behaviour. What does that tell you?</summary>
+
+It tells you the change is data-neutral on the sample diffed: whatever the code now does, it produced identical output rows over the compared range. That is reassuring evidence the change is non-breaking in effect, though you must confirm the diff covered a representative date range and key set. A green diff is stronger evidence of safety than a green test suite for the code-green/data-wrong class of bug.
+
+</details>
+
+<details><summary><b>52.</b> When is slim CI alone sufficient, without diff-based CI?</summary>
+
+Slim CI alone is sufficient when your risk is mainly "did this build at all and pass its tests," your transformations are well covered by assertions, and the cost or latency of full data diffs is not justified. It cuts compute by building only what changed and catches build failures and test failures quickly. It stops being sufficient the moment silent data drift (rows dropped, values shifted) is a material risk your tests cannot see.
+
+</details>
+
+<details><summary><b>53.</b> When does diff-based CI pay for itself over slim CI?</summary>
+
+Diff-based CI pays off when silent data regressions are costly — for example a NAV or EMT feed where dropping share classes has regulatory and client impact — and where the warehouse spend or incident cost avoided exceeds the diff's own compute and licence cost. It is the only layer that directly catches code-green/data-wrong. The justification is usually framed as cost of one missed regression versus the recurring cost of diffing every PR.
+
+</details>
+
+<details><summary><b>54.</b> How would you frame the cost model comparing slim CI and diff-based CI?</summary>
+
+Slim CI's cost is the compute to build the changed slice; its benefit is fast failure detection on build and tests, but it misses silent data drift. Diff-based CI adds the compute to checksum-compare prod versus PR output (cheap when little changed, thanks to the segment algorithm) plus any licence cost; its benefit is catching regressions nothing else can. The model weighs incremental diff cost against the expected cost of a missed regression in your domain.
+
+</details>
+
+<details><summary><b>55.</b> In the lesson's hands-on, what is the "genuinely breaking" change you are asked to craft?</summary>
+
+A filter that silently drops rows — for example adding a `WHERE` clause that excludes a category of records. It is breaking because it changes the row set fed to everything downstream, yet it passes schema and not-null tests because the surviving rows are valid. It is the canonical case that slim CI's tests miss but a data diff catches.
+
+</details>
+
+<details><summary><b>56.</b> In the lesson's hands-on, what is the "non-breaking" change you are asked to craft?</summary>
+
+An added column — a new field appended to a model without altering existing rows or values. It is non-breaking because nothing downstream reads the new column until explicitly modified, so existing outputs are unchanged. It is the contrast case that should be cheap to ship and that SQLMesh categorizes as non-breaking automatically.
+
+</details>
+
+<details><summary><b>57.</b> For the breaking row-dropping change, what does the lesson expect dbt slim CI to report?</summary>
+
+That the change builds and the existing tests pass, so slim CI shows green even though rows were silently dropped — the change "slips through." The exercise is to record exactly what was built, what passed, and that the regression was not caught by slim CI alone. That gap is the motivation for adding a data diff.
+
+</details>
+
+<details><summary><b>58.</b> For the same two changes mirrored in SQLMesh, what are you recording?</summary>
+
+You run `sqlmesh plan` and record how it categorizes each change — the row-dropping filter as breaking and the added column as non-breaking — and what backfill each categorization proposes. The point is to show SQLMesh's automatic change categorization and the resulting backfill scope. You then compare that against what dbt slim CI did with the same changes.
+
+</details>
+
+<details><summary><b>59.</b> What does the lesson's final tabulation contain?</summary>
+
+A table of change × tool × caught/missed × compute cost — that is, for each of the two changes, whether dbt slim CI and SQLMesh caught or missed it and at what compute cost, closing with a one-paragraph recommendation. The recommendation states when slim CI suffices and when diff-based CI is worth it. It is the deliverable that turns the experiment into an actionable guideline.
+
+</details>
+
+<details><summary><b>60.</b> What are the three "Done when" criteria for this lesson?</summary>
+
+You can tell a team when slim CI is enough and when diff-based CI pays for itself; you can show one concrete change that dbt tests passed but a data diff would have caught; and you can explain SQLMesh's breaking/non-breaking decision for both of your changes. Together they prove you understand both the cost model and the mechanics of each tool. They map directly onto the tabulation and recommendation you produce.
+
+</details>
+
+<details><summary><b>61.</b> Why is `dbt build` preferred over `dbt run` in the slim CI step of this lesson?</summary>
+
+Because the experiment needs to record "what passed," and `dbt build` runs each model's tests right after building it in DAG order, giving a faithful pass/fail picture per node. Using `run` alone would build models without running their tests, hiding whether the change is test-green. The whole point of the breaking-change demo is that tests are green while data is wrong, so the tests must actually run.
+
+</details>
+
+<details><summary><b>62.</b> How do dbt's `state:modified` and SQLMesh's change categorization differ in philosophy?</summary>
+
+dbt's `state:modified` answers "which nodes changed so I can build only those," a selection optimization; it does not judge whether a change is safe. SQLMesh's categorization answers "is this change breaking or non-breaking, and therefore what must be backfilled," a correctness-driven decision. dbt leaves safety to your tests and any diff you bolt on; SQLMesh bakes change-impact reasoning into the tool.
+
+</details>
+
+<details><summary><b>63.</b> Does dbt slim CI tell you whether a change is breaking or non-breaking?</summary>
+
+No. `state:modified` only identifies that a node changed and selects it plus downstream for building; it makes no judgement about whether the change alters results in a harmful way. Determining breaking versus non-breaking impact is something you infer from a data diff or from SQLMesh's categorization, not from dbt's selection alone.
+
+</details>
+
+<details><summary><b>64.</b> What does SQLMesh automatically infer that dbt requires you to bolt on?</summary>
+
+SQLMesh automatically infers whether a change is breaking or non-breaking and therefore what to backfill, as part of `plan`. In the dbt world you must add a separate data-diff step (open-source data-diff or Datafold) to get comparable insight into data impact, because dbt's selection layer does not reason about results. This is the core philosophical contrast the lesson draws.
+
+</details>
+
+<details><summary><b>65.</b> Why might `state:modified` over-select compared to what truly changed?</summary>
+
+Because it fires on any tracked change including config, relation, contract, macros, and persisted descriptions, not only SQL body edits. A tag-driven config tweak or a macro edit can pull in many nodes whose computed output is actually unchanged. If you only care about logic changes you can narrow to `state:modified.body` plus the specific sub-selectors you consider risky.
+
+</details>
+
+<details><summary><b>66.</b> How would you select only models whose SQL logic changed, ignoring config-only edits?</summary>
+
+Use the body sub-selector: `dbt build --select "state:modified.body+" --defer --state ./prod-artifacts`. This restricts selection to nodes whose body (compiled SQL or seed values) changed, plus downstream, and ignores pure config, tag, or relation edits. It is a narrower, cheaper CI run when config churn would otherwise bloat the build.
+
+</details>
+
+<details><summary><b>67.</b> Scenario: a macro used by 40 models is edited but no model SQL changed. Which selector catches the impact and which misses it?</summary>
+
+`state:modified.macros` (and the umbrella `state:modified`) catches it, because those models indirectly depend on the changed macro even though their own body is unchanged. `state:modified.body` alone would miss it, because the model bodies are byte-identical. Forgetting `.macros` is a classic slim-CI blind spot for shared-macro edits.
+
+</details>
+
+<details><summary><b>68.</b> Why is comparing against an outdated state manifest dangerous in slim CI?</summary>
+
+Because selection is only as accurate as the baseline: a stale `manifest.json` makes dbt mis-judge what changed, potentially skipping models that genuinely differ from current prod or rebuilding ones that do not. Deferral can also resolve refs to relations that no longer match production. Always derive the state artifact from the latest successful prod run.
+
+</details>
+
+<details><summary><b>69.</b> What is the data-engineering meaning of "build only what changed plus downstream"?</summary>
+
+It means CI materializes the nodes whose definitions changed and every node reachable downstream from them in the DAG, leaving untouched ancestors to be read from production via defer. Downstream is included because a change can alter the inputs of dependents and thus their output. This is the precise scope `state:modified+` expresses.
+
+</details>
+
+<details><summary><b>70.</b> A NAV pipeline change passes all dbt tests but the daily NAV total shifts. Which CI layer would have caught it and how?</summary>
+
+A diff-based CI layer would catch it by comparing the PR build's NAV output against production and surfacing the changed rows or the shifted total at column level. dbt tests pass because each row is individually valid; only a value-level comparison reveals the aggregate drift. This is the textbook case where data-diff or Datafold earns its keep over slim CI.
+
+</details>
+
+<details><summary><b>71.</b> Why are EMT feeds a good motivating example for data-aware CI?</summary>
+
+Because EMT (European MiFID Template) feeds carry per-share-class cost and risk fields that downstream distributors rely on, so silently dropping or altering share-class rows has direct regulatory and client impact. A schema-valid change that drops 3% of share classes passes every test but corrupts the feed. Data diffing the EMT output before and after is what catches that.
+
+</details>
+
+<details><summary><b>72.</b> How would a data diff help validate a change to ISIN-keyed reference data?</summary>
+
+It would compare the PR build against production keyed on `isin`, reporting which ISINs were added, removed, or had changed attribute values. That immediately surfaces if a refactor accidentally dropped instruments or altered, say, a currency or domicile field. Row-level identity by ISIN plus column-level value comparison is exactly what the diff provides.
+
+</details>
+
+<details><summary><b>73.</b> In SQLMesh terms, would adding a new `lei` column to a counterparty model be breaking or non-breaking?</summary>
+
+Non-breaking. Adding the `lei` (Legal Entity Identifier) column introduces new data that no downstream model currently reads, so existing downstream outputs are unchanged and only the model itself is backfilled. SQLMesh would categorize it accordingly and avoid the expensive downstream cascade. It becomes relevant downstream only once a dependent model is edited to consume `lei`.
+
+</details>
+
+<details><summary><b>74.</b> In SQLMesh terms, would adding a `WHERE status = 'ACTIVE'` filter to a transfer-agency holdings model be breaking?</summary>
+
+Yes, breaking. The filter removes rows, changing the model's output and therefore the inputs to every downstream model, so SQLMesh backfills the model and all dependents. That cascade is exactly why such a change is risky and why a data diff on the holdings output is worthwhile even outside SQLMesh. It is the canonical silent-row-drop hazard for transfer-agency data.
+
+</details>
+
+<details><summary><b>75.</b> What does it mean that diff cost is "cheap when little changes"?</summary>
+
+Because of the segment-checksum algorithm, when most rows are identical the diff confirms huge swaths with a few matching hashes and only drills into the small differing regions. So a PR that changes very little produces a fast, cheap diff; a PR that rewrites everything produces an expensive one. The diff cost scales with the magnitude of difference, which usually aligns with how risky the change is.
+
+</details>
+
+<details><summary><b>76.</b> Why does diff-based CI complement rather than replace slim CI?</summary>
+
+Slim CI minimizes build cost and gives fast build/test feedback; diff-based CI validates the resulting data against production. They operate at different layers: one decides what to build, the other judges whether the output drifted. A mature setup runs slim CI to build the changed slice and then diffs that slice's output against prod, getting both speed and data-correctness assurance.
+
+</details>
+
+<details><summary><b>77.</b> How does defer change the relations a CI model reads from, and why is that safe?</summary>
+
+Deferred unselected `ref()`s read from the production relations recorded in the state manifest rather than from freshly built CI tables. It is safe for slim CI because those upstream models did not change in the PR, so production is the correct, up-to-date source for them. You are only rebuilding what changed and trusting prod for the unchanged remainder.
+
+</details>
+
+<details><summary><b>78.</b> What goes wrong if you run `dbt build --select state:modified+` without `--defer`?</summary>
+
+dbt will try to build the selected changed models, but their unchanged upstream `ref()`s have no relation in the empty CI schema and none is deferred to production, so the build fails with missing-relation errors. Without defer you would have to select and rebuild the entire upstream chain, defeating the "slim" goal. Defer is the mechanism that makes partial selection runnable.
+
+</details>
+
+<details><summary><b>79.</b> How do you generate the production `manifest.json` that slim CI compares against?</summary>
+
+Run dbt against production (for example `dbt build` or at minimum `dbt compile`/`dbt docs generate`) and capture the resulting `target/manifest.json`. Store it as a CI artifact or in object storage so each PR job can download it into a `--state` directory. It must reflect the current state of production for selection and defer to be accurate.
+
+</details>
+
+<details><summary><b>80.</b> Why might you run `dbt compile` rather than a full build just to produce a state manifest?</summary>
+
+Because `state` comparison only needs a parsed `manifest.json`, which `dbt compile` produces without materializing any tables. That gives you the comparison baseline cheaply when you do not need fresh production data, only the manifest. For deferral to work, though, the referenced production relations must still actually exist in the warehouse.
+
+</details>
+
+<details><summary><b>81.</b> What is the role of `unique_id` in dbt state comparison?</summary>
+
+`unique_id` is the stable identifier dbt uses to match a node in the current project against the same node in the comparison manifest. If a `unique_id` exists in current but not in the comparison manifest, the node is `state:new`; if it exists in both but differs, it is `state:modified`. Renaming a model changes its `unique_id`, so dbt sees it as a deletion plus a new node, not a modification.
+
+</details>
+
+<details><summary><b>82.</b> What happens in state comparison if you rename a dbt model file?</summary>
+
+Renaming the model changes its `unique_id`, so dbt does not recognize it as the same node; the old `unique_id` appears removed and the new one appears as `state:new`. The new node is selected and built, and any downstream models referencing it are also affected. Be aware this can produce a larger selection than the logical change implies.
+
+</details>
+
+<details><summary><b>83.</b> Why is "comparing the data before and after the change" the only reliable catch for a dropped-rows bug?</summary>
+
+Because the bug leaves every individual row valid and every schema invariant intact, so static and unit checks see nothing wrong; only the row set differs. Comparing the actual output rows against the prior baseline directly observes the missing rows. That before/after data comparison is the defining capability data diffs add to CI.
+
+</details>
+
+<details><summary><b>84.</b> In a build-vs-buy memo, what are the realistic options for diff-in-CI today?</summary>
+
+Buy Datafold for managed, integrated column-level diffs in CI; build on the open-source data-diff library accepting that it is archived and unmaintained; or build your own diffing using warehouse-native checksums and queries. Each trades integration, maintenance burden, and cost differently. The archival status of the FOSS tool pushes the realistic FOSS option toward "fork and maintain" rather than "depend as-is."
+
+</details>
+
+<details><summary><b>85.</b> What "pricing logic" should you understand about Datafold for the memo?</summary>
+
+You should understand how Datafold prices its managed diffing so you can weigh the recurring licence cost against the warehouse spend and incident cost it avoids. The build-vs-buy decision hinges on whether catching silent regressions automatically on every PR justifies that subscription versus self-hosting an unmaintained tool. The lesson explicitly asks you to know its pricing logic to write the memo.
+
+</details>
+
+<details><summary><b>86.</b> How does data-aware CI relate to the broader idea of shifting data quality "left"?</summary>
+
+Both slim CI and diff-based CI move data-quality detection earlier, into the pull-request stage, instead of waiting for a production incident or a downstream consumer to notice. Catching a dropped-share-class regression on the PR is far cheaper and less risky than catching it after the EMT feed has gone out. Shifting left means failing in CI, not in front of a regulator or client.
+
+</details>
+
+<details><summary><b>87.</b> Why is SQLMesh's automatic categorization described as reducing wasted backfill?</summary>
+
+Because by correctly labelling additive changes as non-breaking, SQLMesh backfills only the changed model and skips the downstream cascade that a naive "rebuild everything affected" approach would trigger. Only genuinely breaking changes pay the full downstream backfill cost. This targeted backfill is a direct warehouse-spend saving versus rebuilding the world on every change.
+
+</details>
+
+<details><summary><b>88.</b> If SQLMesh mis-categorizes a change as non-breaking when it is actually breaking, what is the risk?</summary>
+
+Downstream models would not be backfilled, so they would keep serving data computed from the old logic, producing a silent inconsistency between the changed model and its dependents. That is itself a code-green/data-wrong situation. This is why you review the plan's categorization rather than blindly applying it, and why understanding the breaking/non-breaking rules matters.
+
+</details>
+
+<details><summary><b>89.</b> How would you demonstrate, per the Done-when, "one change dbt tests passed but a data diff would have caught"?</summary>
+
+Ship the row-dropping `WHERE` clause through dbt slim CI and show all tests pass and the build is green. Then run a data diff (data-diff or Datafold) of the model's output against production and show it reports the dropped rows. The contrast — green tests, non-empty diff — is the concrete demonstration the lesson asks for.
+
+</details>
+
+<details><summary><b>90.</b> What is the difference between a "virtual environment" in SQLMesh and a dbt target schema?</summary>
+
+A dbt target schema is a physical namespace where CI or dev builds land actual tables, and reads come from there or from deferred prod relations. A SQLMesh virtual environment is a set of view-like references to fingerprinted physical table variants, sharing unchanged variants with prod and pointing at new variants only for changed models. SQLMesh's model avoids rebuilding shared data; dbt's defer instead reads shared data from prod.
+
+</details>
+
+<details><summary><b>91.</b> Why does SQLMesh store each model variant in its own physical table?</summary>
+
+So that distinct versions of a model can coexist, enabling environments to point at whichever variant they need and enabling cheap promotion and isolation. The unique fingerprint per variant means an environment swap is just re-pointing references, never copying or recomputing data. It is the foundation of zero-cost virtual updates.
+
+</details>
+
+<details><summary><b>92.</b> What does it mean that SQLMesh can do a "shallow clone" for forward-only previews on some warehouses?</summary>
+
+On engines like BigQuery, Databricks, and Snowflake, SQLMesh can use zero-copy (shallow) clones to let a dev environment preview a forward-only change against the production table's data without duplicating storage. The clone shares underlying data until modified, so previewing is cheap. That preview data is not promoted; only the forward-only change applies to prod.
+
+</details>
+
+<details><summary><b>93.</b> For a huge append-only fund-transactions table, which SQLMesh change type avoids reprocessing all history?</summary>
+
+A forward-only change, because it keeps the existing physical table and applies the new logic only going forward, avoiding a full historical backfill. For a massive append-only table, re-running all history would be prohibitively expensive, so forward-only is the pragmatic choice. The accepted cost is harder reversibility and no retroactive correction of historical rows.
+
+</details>
+
+<details><summary><b>94.</b> Why does the lesson pair dbt and SQLMesh rather than teach just one?</summary>
+
+Because they represent two philosophies of change safety: dbt's slim CI is a selection-and-defer optimization that leaves data-impact judgement to tests and external diffs, while SQLMesh builds change categorization and backfill reasoning into the tool. Comparing them on the same two changes shows what each catches, misses, and costs. The deliverable is an informed recommendation, not allegiance to one tool.
+
+</details>
+
+<details><summary><b>95.</b> What is the danger of relying solely on schema tests in a regulated NAV pipeline?</summary>
+
+Schema tests confirm types, nullability, and uniqueness but never confirm that the values or row counts match what production produced, so a logic change that shifts a NAV total or drops share classes sails through green. In a regulated context that silent error can reach clients and regulators before anyone notices. Data-aware CI (diffing output against prod) is what closes that gap.
+
+</details>
+
+<details><summary><b>96.</b> How does `state:modified.contract` interact with dbt model contracts for a SWIFT message model?</summary>
+
+If you have enforced a contract declaring, say, `bic` as a specific type, then changing that column's `name` or `data_type` triggers `state:modified.contract`, selecting the model so CI surfaces the breaking interface change. For a SWIFT-related model whose BIC field downstream consumers depend on, that early signal prevents a silent contract break. Without contract enforcement, the change would not be caught by this sub-selector.
+
+</details>
+
+<details><summary><b>97.</b> What is the first thing to check if slim CI selects far more models than your PR touched?</summary>
+
+Check which `state:modified` sub-selector is firing broadly — commonly a shared macro edit (`state:modified.macros`) or a project-wide config change (`state:modified.configs`) pulling in many nodes. Also verify the comparison manifest is the right baseline, since a wrong `--state` can make everything look modified. Narrowing to specific sub-selectors like `state:modified.body` confirms whether it is logic or config driving the breadth.
+
+</details>
+
+<details><summary><b>98.</b> What is the first thing to check if a SQLMesh plan proposes a surprisingly large backfill?</summary>
+
+Check the change categorization in the plan: a change you thought was additive may be categorized as breaking (for example because you altered a filter or join, not just added a column), triggering a downstream cascade. Review the directly and indirectly modified lists and the affected date range. If the categorization is wrong for your intent, reconsider the change or the date range rather than blindly applying.
+
+</details>
+
+<details><summary><b>99.</b> Why is a data diff's choice of comparison key (e.g. ISIN, or a surrogate key) important?</summary>
+
+Because the diff matches rows between prod and PR by that key to decide which are added, removed, or value-changed; a poor or non-unique key produces misleading or unmatchable results. Keying a holdings diff on `isin` plus a date, for instance, gives meaningful row identity, whereas keying on a non-unique field would scramble the comparison. Correct key selection is a prerequisite for a trustworthy diff.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the one-paragraph recommendation this lesson is building toward.</summary>
+
+That slim CI is the cheap default that catches build and test failures and minimizes compute, but it cannot see silent data drift; where the cost of a missed regression is high — as in NAV, EMT, or transfer-agency feeds — diff-based CI (open-source data-diff, with its archival caveat, or managed Datafold) pays for itself by catching code-green/data-wrong changes nothing else detects. SQLMesh offers a third path where breaking/non-breaking categorization and targeted backfill are built in. The right answer is a layered choice driven by the cost of a missed regression in your specific data domain.
+
+</details>
+
+
+## Phase 3 · 9.4.3 Integration testing for pipelines — 100 self-test questions
+
+<details><summary><b>1.</b> What is "integration testing" for a data pipeline, as distinct from unit testing?</summary>
+
+Integration testing exercises the seams where your code meets real external systems — the database, object store, message broker — instead of mocked stand-ins. The point is to prove the pipeline actually connects, authenticates, respects the real schema, and survives real type coercion and error codes. In a regulated fund shop, "it passed against the mock" is not evidence the loader works against the actual Postgres.
+
+</details>
+
+<details><summary><b>2.</b> Why does the lesson argue that pipelines "fail at the seams"?</summary>
+
+The business logic in a transform is usually simple and well-covered by unit tests; what breaks in production is the boundary — a dropped connection, a permission denied, a column type mismatch, an encoding surprise. Those failures only appear when real infrastructure is in the loop, so mocked tests pass forever while the real loader fails on the first `NUMERIC` overflow. Integration tests are the only honest test of those connections, schemas, and permissions.
+
+</details>
+
+<details><summary><b>3.</b> What is Testcontainers and what problem does it solve?</summary>
+
+Testcontainers is a library that spins up real, ephemeral Docker containers (Postgres, MinIO, Kafka, etc.) for the lifetime of a test, then tears them down automatically. It solves the "test against something real but disposable" problem: you get a genuine database with genuine type checking and error codes, not a mock, and you never depend on a hand-maintained shared test server. The Python flavour is the `testcontainers` package on PyPI.
+
+</details>
+
+<details><summary><b>4.</b> How do you install the Postgres module of Testcontainers in a uv-managed project?</summary>
+
+Add the extra-qualified package, for example `uv add "testcontainers[postgres]"`, which pulls the core library plus the Postgres module and its driver dependency. Per the project's rule you never call bare `pip`; uv manages the lockfile. You then import with `from testcontainers.postgres import PostgresContainer`.
+
+</details>
+
+<details><summary><b>5.</b> What is the import path for the Postgres container class in testcontainers-python?</summary>
+
+`from testcontainers.postgres import PostgresContainer`. The library is namespaced by module, so MinIO comes from `testcontainers.minio`, Kafka from `testcontainers.kafka`, and the generic building block `DockerContainer` from `testcontainers.core.container`. Importing from the wrong module is a common first-run `ModuleNotFoundError`.
+
+</details>
+
+<details><summary><b>6.</b> What does `PostgresContainer("postgres:16").get_connection_url()` return and why is it convenient?</summary>
+
+It returns a SQLAlchemy-compatible connection URL (e.g. `postgresql+psycopg2://test:test@localhost:49158/test`) pointing at the container's dynamically mapped host port. It is convenient because you can pass it straight into `sqlalchemy.create_engine(...)` without manually assembling host, port, user, password, and dbname. The port in the URL is the random host port, not the in-container `5432`.
+
+</details>
+
+<details><summary><b>7.</b> Why does Testcontainers map container ports to random host ports by default?</summary>
+
+To avoid collisions — if it always bound `5432`, two parallel test runs (or a real Postgres on your machine) would clash. The container exposes `5432` internally, and Docker maps it to a free ephemeral host port that Testcontainers discovers at runtime. You must therefore never hard-code `5432` for the host connection; ask the container what port it got.
+
+</details>
+
+<details><summary><b>8.</b> How do you find out which host port a container's internal port was mapped to?</summary>
+
+Call `container.get_exposed_port(5432)`, passing the in-container port number; it returns the host-side port as a string. Combined with `container.get_container_host_ip()` you can build a connection manually when you are not using `get_connection_url()`. Reading the mapped port at runtime is what makes parallel test execution safe.
+
+</details>
+
+<details><summary><b>9.</b> What does `get_container_host_ip()` give you and why not just hard-code `localhost`?</summary>
+
+It returns the host address to reach the container, which is usually `localhost` but can differ — for example inside Docker-in-Docker or certain remote-Docker setups it resolves to the daemon's address. Hard-coding `localhost` works on a plain Ubuntu laptop but breaks the moment the test runs inside CI's own container. Asking the API keeps the test portable across environments.
+
+</details>
+
+<details><summary><b>10.</b> Show the canonical context-manager pattern for a Postgres Testcontainer.</summary>
+
+`with PostgresContainer("postgres:16") as pg:` starts the container, yields it for the body, and stops it on exit even if an assertion fails. Inside you typically do `engine = sqlalchemy.create_engine(pg.get_connection_url())`. The `with` block guarantees cleanup, which is the whole point of throwaway infra — no orphaned containers after a failing test.
+
+</details>
+
+<details><summary><b>11.</b> Why pin an explicit image tag like `postgres:16` instead of `postgres:latest`?</summary>
+
+Pinning makes the test deterministic and reproducible — `latest` silently moves and can change behaviour, default config, or even the major version between runs, breaking tests for reasons unrelated to your code. In a regulated estate you also want the test image to match the production Postgres major version. A floating tag turns "tests went red overnight" into an unsolvable mystery.
+
+</details>
+
+<details><summary><b>12.</b> What is the Ryuk container and what does it do in a Testcontainers run?</summary>
+
+Ryuk is a small sidecar (the "resource reaper") that Testcontainers starts to clean up containers, networks, and volumes if your test process dies abruptly without running its teardown. It watches a labelled set of resources and removes them after the session, preventing leaked containers from piling up. You can disable it with `TESTCONTAINERS_RYUK_DISABLED=true`, but then you own cleanup yourself.
+
+</details>
+
+<details><summary><b>13.</b> A Testcontainers test hangs at startup pulling the image — what is happening and how do you make it predictable in CI?</summary>
+
+On first use Docker pulls the image from a registry, which can be slow or rate-limited; the test appears to hang until the pull completes. Pre-pull images in a CI cache step (or use a registry mirror) so the test only starts an already-present image. Pinning the tag also lets the layer cache hit instead of re-pulling.
+
+</details>
+
+<details><summary><b>14.</b> What is `wait_for_logs` and why is it sometimes needed even though the container "started"?</summary>
+
+`from testcontainers.core.waiting_utils import wait_for_logs` blocks until a given regex appears in the container's logs, e.g. waiting for `database system is ready to accept connections`. A container reporting "running" to Docker does not mean the service inside finished initialising, so connecting too early gives a connection-refused error. The Postgres module already waits, but for a generic `DockerContainer` you often add an explicit log or port readiness check yourself.
+
+</details>
+
+<details><summary><b>15.</b> Your test connects to the Postgres container and gets connection-refused intermittently — first thing to check?</summary>
+
+A readiness race: the container is up but Postgres has not yet opened its socket, especially right after `start()`. Confirm you are using a wait strategy (the `PostgresContainer` waits on the "ready to accept connections" log by default) and that you are connecting to the mapped host port from `get_connection_url()`, not `5432`. Retrying the connect with backoff or using `wait_for_logs` removes the flakiness.
+
+</details>
+
+<details><summary><b>16.</b> What is the test pyramid, in one sentence, and who popularised the modern framing referenced here?</summary>
+
+It is the idea that you should have many fast, cheap, isolated tests at the bottom, fewer integrated ones in the middle, and very few slow end-to-end tests at the top. The framing in this lesson follows Martin Fowler's "The Practical Test Pyramid". The shape comes from the cost and fragility of tests rising as you move up.
+
+</details>
+
+<details><summary><b>17.</b> How does the test pyramid map onto a data pipeline specifically?</summary>
+
+The base is unit SQL and pure-function transform tests; the middle is component/integration tests of the loader against a real containerised Postgres or MinIO; the thin top is an end-to-end run on a small sample dataset. Most of your assertions live at the bottom because they are fast and pinpoint failures, while the expensive full-pipeline runs stay few. The lesson's "why the top is thin" is the cost-and-speed argument.
+
+</details>
+
+<details><summary><b>18.</b> Why should the top of the data test pyramid be "thin"?</summary>
+
+End-to-end tests are slow, brittle, and hard to debug — a red E2E test tells you something broke but not where, and it ties up real infra. You keep a few as smoke tests to prove the whole flow wires together, then push detailed coverage down to fast, targeted layers. An inverted pyramid (mostly E2E) gives slow suites that everyone learns to ignore.
+
+</details>
+
+<details><summary><b>19.</b> What belongs in the unit layer versus the integration layer of a loader's tests?</summary>
+
+Unit tests cover pure logic with no I/O: parsing a holdings row, computing a NAV total, validating an ISIN check digit — these need no container and run in milliseconds. Integration tests cover the I/O seam: does the loader actually `INSERT`/upsert into real Postgres, does the `NUMERIC(18,4)` column reject overflow, does the MinIO read return the expected bytes. The split is "logic below, real connections above".
+
+</details>
+
+<details><summary><b>20.</b> What is a "golden dataset" in this context?</summary>
+
+A small, fixed, known-good input whose correct output you have computed and committed — for a fund pipeline, a tiny holdings file with a NAV total you worked out by hand. The test loads the golden input, runs the pipeline, and asserts the end state matches the expected golden output. It turns "looks about right" into a precise, repeatable pass/fail.
+
+</details>
+
+<details><summary><b>21.</b> What is snapshot (or "golden master") testing and what is its main risk?</summary>
+
+Snapshot testing captures the current output as a reference file and fails the test if a later run differs from it. Its strength is catching unintended changes cheaply; its main risk is "snapshot rot" — when output legitimately changes, people blindly re-bless the snapshot without reading the diff, so the test stops protecting anything. Review every snapshot update as carefully as code.
+
+</details>
+
+<details><summary><b>22.</b> Why use a small golden file rather than a copy of a real production extract?</summary>
+
+A small file keeps the test fast, lets you reason about and hand-verify the expected totals, and avoids dragging client PII or restricted data into the repo. A production-sized extract makes the test slow, opaque, and a data-governance liability. You want the smallest input that still exercises the edge cases you care about.
+
+</details>
+
+<details><summary><b>23.</b> How would you assert "row counts, checksums and the NAV reconciliation" after loading the golden dataset?</summary>
+
+Query `SELECT count(*)` and compare to the known row count; compute a checksum/hash over the loaded rows (e.g. an ordered `md5` of concatenated key columns) and compare to the committed value; and re-sum the position values to confirm the NAV reconciles to the golden total. Each assertion targets a different failure: missing rows, corrupted values, and arithmetic drift respectively.
+
+</details>
+
+<details><summary><b>24.</b> Why include a checksum assertion when you already check row counts and the NAV total?</summary>
+
+Row counts catch missing or duplicated rows but not corrupted field values, and a NAV total can coincidentally match even if individual positions are wrong (offsetting errors). A row-level checksum catches value-level corruption the aggregate hides. Layering the three assertions makes it very hard for a silent data error to slip through.
+
+</details>
+
+<details><summary><b>25.</b> What is idempotency and why is it the property this lesson tests?</summary>
+
+An operation is idempotent if running it once and running it many times leaves the same end state — re-running the loader must not duplicate rows or change totals. Pipelines get retried (cron overlaps, failed-and-rerun jobs, replayed files), so non-idempotent loaders silently double-count, which in a NAV context is a reconciliation break. The lesson makes idempotency a testable property by running the loader twice and asserting identical state.
+
+</details>
+
+<details><summary><b>26.</b> Describe the "double-run idempotency" test step by step.</summary>
+
+Start the containers, run the loader against the golden input, and capture the end state (row counts and a checksum). Run the exact same loader a second time against the same containers, then assert the new end state is byte-identical to the first. If it differs — extra rows, a changed total — the loader is not idempotent and the test fails.
+
+</details>
+
+<details><summary><b>27.</b> What database mechanism most commonly makes a loader idempotent, and what error does its absence cause in the double-run test?</summary>
+
+An upsert — `INSERT ... ON CONFLICT (key) DO UPDATE` (or `DO NOTHING`) keyed on a natural/business key — so the second run updates instead of inserting duplicates. Without it, the second run appends a full duplicate set, so row counts double and the NAV total doubles. The lesson explicitly has you break the upsert to watch the idempotency assertion fail.
+
+</details>
+
+<details><summary><b>28.</b> The double-run test passes but in production you still get duplicates after a rerun — what subtle gap might the test have missed?</summary>
+
+The conflict target may not match the true business key — e.g. you upsert on a surrogate id that changes per run, or you forgot that a real file can contain the same holding under two as-of dates. Production data has key collisions and edge cases the golden file lacks. The fix is to model the real uniqueness constraint and add golden cases that exercise it.
+
+</details>
+
+<details><summary><b>29.</b> How do you deliberately break the upsert to demonstrate the idempotency assertion failing?</summary>
+
+Replace `INSERT ... ON CONFLICT (key) DO UPDATE ...` with a plain `INSERT`, or remove the unique constraint backing the conflict target, then run the suite. The second loader run now inserts a duplicate set, so the row-count and checksum assertions diverge from the first run and the test goes red. That red is the proof the idempotency check actually works.
+
+</details>
+
+<details><summary><b>30.</b> What is a contract test, at the awareness level this lesson sets?</summary>
+
+A contract test verifies that a consumer and provider agree on the shape and semantics of the data/messages they exchange, independently, without a full integration. It catches "you changed the field and didn't tell me" breakages before deployment. The lesson previews this idea via Pact and maps it to the data contracts that arrive in Phase 8.
+
+</details>
+
+<details><summary><b>31.</b> What is "consumer-driven" about Pact's contract testing?</summary>
+
+The consumer writes its expectations of the provider's responses as a pact; that pact is then replayed against the real provider to verify the provider still satisfies it. So the consumer's actual needs drive what the provider must guarantee, rather than the provider publishing a spec nobody checks. It is awareness-level here — full data-contract work is Phase 8.
+
+</details>
+
+<details><summary><b>32.</b> How does Pact's consumer-driven idea map onto data pipelines rather than HTTP APIs?</summary>
+
+Instead of request/response, the "contract" is the schema and semantics of a dataset or event a downstream pipeline consumes — column names, types, nullability, enumerations, units. The producer's tests assert it still emits what consumers depend on, so a renamed `nav_per_share` column fails fast instead of silently breaking a report. This is the bridge to formal data contracts in Phase 8.
+
+</details>
+
+<details><summary><b>33.</b> Why are real containers preferable to an in-memory or SQLite substitute for Postgres integration tests?</summary>
+
+SQLite and in-memory fakes have different SQL dialects, type systems, and constraint behaviour — they accept things real Postgres rejects and vice versa, so "passed on SQLite" tells you nothing about `NUMERIC` overflow, `ON CONFLICT`, or `jsonb`. Testcontainers runs the actual Postgres engine, giving you the real error codes and the real upsert semantics. Fidelity at the seam is the entire reason to spend the container startup cost.
+
+</details>
+
+<details><summary><b>34.</b> What is the prerequisite to run `uv run pytest -m integration`, per the "Done when" criteria?</summary>
+
+Docker must be installed and the daemon running, because Testcontainers talks to the Docker socket to start containers; no shared database server is needed. The criterion is that the suite passes "on a machine with only Docker installed", proving the tests are self-contained. On native Ubuntu that means the Docker Engine, not Docker Desktop.
+
+</details>
+
+<details><summary><b>35.</b> What does the pytest `-m integration` flag do?</summary>
+
+`-m` selects tests by marker expression, so `-m integration` runs only tests decorated `@pytest.mark.integration` (and `-m "not integration"` excludes them). It lets you separate slow container tests from the fast default run. You register the marker in config to avoid the "unknown marker" warning.
+
+</details>
+
+<details><summary><b>36.</b> How and why do you register a custom marker like `integration` in pytest?</summary>
+
+Add it under `[tool.pytest.ini_options]` in `pyproject.toml` (or `pytest.ini`) as `markers = ["integration: spins up real containers"]`. Registering it documents the marker and, with `--strict-markers`, turns a typo'd or unregistered marker into an error instead of a silent no-op. Unregistered markers otherwise only emit a `PytestUnknownMarkWarning`.
+
+</details>
+
+<details><summary><b>37.</b> How do you exclude the integration suite from the default test run?</summary>
+
+Set the default marker expression in config, e.g. `addopts = "-m 'not integration'"` in `[tool.pytest.ini_options]`, so a bare `pytest` skips them; developers opt in with `-m integration`. This keeps the fast feedback loop fast while heavy container tests run on demand or in CI. The criterion explicitly asks for the suite to be excluded from the default run.
+
+</details>
+
+<details><summary><b>38.</b> Why keep integration tests out of the fast default loop but still in CI?</summary>
+
+Container tests cost seconds-to-minutes each, which kills the rapid red-green-refactor loop if run on every save, but they are exactly the tests that catch seam failures before release. So you run the fast pyramid base locally on every change and run the integration layer in CI (and on demand). The CI workflow from 9.3.1 is where you wire the `-m integration` job in.
+
+</details>
+
+<details><summary><b>39.</b> What is a pytest fixture and why is it the right tool for container lifecycle?</summary>
+
+A fixture is a function decorated `@pytest.fixture` that supplies setup (and, via `yield`, teardown) to tests that request it by name as an argument. It is ideal for containers because the `yield` cleanly separates "start container / build engine" from "stop container", and the framework guarantees teardown runs. Tests just declare the fixture parameter and receive a ready connection.
+
+</details>
+
+<details><summary><b>40.</b> Write the shape of a fixture that starts Postgres once and tears it down, and explain the `yield`.</summary>
+
+`@pytest.fixture(scope="session")` then `def pg():` with `with PostgresContainer("postgres:16") as c: yield c.get_connection_url()`. Code before `yield` is setup, the yielded value is what tests receive, and code after `yield` (here the `with`-exit) is teardown that runs even if a test fails. Session scope starts the container once for the whole run.
+
+</details>
+
+<details><summary><b>41.</b> What is fixture "scope" and which scope suits an expensive container?</summary>
+
+Scope controls how often a fixture is created and torn down: `function` (per test), `class`, `module`, `package`, or `session` (once per run). For an expensive container you usually pick `session` or `module` so you pay the startup cost once and share it. The trade-off is isolation, which you restore by resetting data between tests.
+
+</details>
+
+<details><summary><b>42.</b> If you share one Postgres container across tests for speed, how do you keep tests isolated?</summary>
+
+Reset state between tests — truncate the loaded tables, wrap each test in a transaction that rolls back, or recreate the schema in a function-scoped fixture layered on the session-scoped container. Sharing the container amortises startup while per-test cleanup prevents one test's rows from leaking into the next. Without isolation you get order-dependent, flaky passes.
+
+</details>
+
+<details><summary><b>43.</b> What does `@pytest.mark.parametrize` give you for golden-dataset testing?</summary>
+
+It runs the same test body once per supplied input/expected pair, so you can drive many golden cases (different holdings files, different expected NAVs) through one assertion with clear per-case reporting. Each parameter set is reported as its own test, so you see exactly which golden case failed. It keeps coverage broad without copy-pasting test functions.
+
+</details>
+
+<details><summary><b>44.</b> How do you spin up MinIO with Testcontainers and why MinIO rather than mocking S3?</summary>
+
+Use `from testcontainers.minio import MinioContainer`, start it, and point your S3 client (boto3) at its endpoint with the container's access/secret keys. MinIO speaks the real S3 API, so you test actual object PUT/GET, multipart, and error responses instead of a mock that can drift from S3's behaviour. It is the object-store analogue of using real Postgres over SQLite.
+
+</details>
+
+<details><summary><b>45.</b> Your MinIO-backed test fails with a bucket-not-found error on first run — likely cause?</summary>
+
+A fresh MinIO container has no buckets; you must create the bucket in setup before the loader writes to it. Mocks often auto-create buckets, hiding this, so the real container exposes the missing provisioning step. Add a `make_bucket`/`create_bucket` call in the fixture after the container is ready.
+
+</details>
+
+<details><summary><b>46.</b> Why might a Testcontainers suite that passes locally fail in CI with "cannot connect to Docker daemon"?</summary>
+
+The CI runner has no Docker available to the job, or the job lacks access to the Docker socket / a Docker-in-Docker service. Testcontainers needs a reachable Docker daemon to start anything. Fix by enabling a Docker service in the CI job (or DinD) and ensuring `DOCKER_HOST`/the socket is mounted for the test step.
+
+</details>
+
+<details><summary><b>47.</b> What environment variable disables the Ryuk reaper, and when might you set it?</summary>
+
+`TESTCONTAINERS_RYUK_DISABLED=true` turns off the resource-reaper sidecar. You might set it in restricted CI environments that forbid the privileged-ish reaper container or where the platform already guarantees cleanup. The cost is that crashed test runs may leak containers, so you must clean up yourself.
+
+</details>
+
+<details><summary><b>48.</b> How do you confirm a container is actually being cleaned up after the test?</summary>
+
+After the run, `docker ps -a` should show no leftover containers carrying the Testcontainers session label, and `docker volume ls`/`docker network ls` should be clean. If using a context manager or a `yield` fixture, teardown runs on exit; orphans usually mean the process was killed before teardown and Ryuk was disabled. Watching for leaks keeps your laptop and CI runners from filling up.
+
+</details>
+
+<details><summary><b>49.</b> A golden-dataset NAV assertion fails by a rounding-sized amount — what is the first thing to check?</summary>
+
+Suspect a type/precision mismatch at the seam: the loader stored prices as `float` (binary, lossy) instead of `NUMERIC`/`Decimal`, so summing introduces rounding error. Check the column type and whether the code does arithmetic in `Decimal`. Money and NAV must use exact decimal types end to end; a `float8` column is the classic regulated-data bug.
+
+</details>
+
+<details><summary><b>50.</b> Why is a real Postgres `NUMERIC` overflow a good example of something only integration tests catch?</summary>
+
+`NUMERIC(p,s)` enforces precision/scale at insert time and raises a real error if a value exceeds it; a Python mock or in-memory list happily accepts any number. So a unit test passes while the production load throws `numeric field overflow`. Only a test against real Postgres surfaces the overflow before release.
+
+</details>
+
+<details><summary><b>51.</b> What SQLSTATE does Postgres raise for a numeric value out of range, and why care in a fund loader?</summary>
+
+It is SQLSTATE `22003` (`numeric_value_out_of_range`). In a fund loader an oversized position or price hitting a too-tight `NUMERIC(p,s)` raises `22003`, failing the load rather than silently truncating — which is the safe behaviour you want to test for. Asserting the loader handles or surfaces `22003` proves it won't quietly corrupt a NAV.
+
+</details>
+
+<details><summary><b>52.</b> What SQLSTATE indicates a unique-constraint violation, and how does it relate to idempotency testing?</summary>
+
+SQLSTATE `23505` (`unique_violation`) fires when a duplicate hits a unique/primary-key constraint. A correct upsert with `ON CONFLICT` converts that would-be `23505` into an update, which is what makes the second loader run idempotent. If you removed the upsert, the second run would raise `23505` (or duplicate rows if there is no constraint), exactly the failure the double-run test catches.
+
+</details>
+
+<details><summary><b>53.</b> What is the difference between `ON CONFLICT DO NOTHING` and `ON CONFLICT DO UPDATE` for an idempotent loader?</summary>
+
+`DO NOTHING` skips conflicting rows, keeping the first-seen values — fine when re-loads should never change existing data. `DO UPDATE SET ...` overwrites with the new row's values, which you want when a corrected file should refresh prices or quantities. Both make a reload non-duplicating; you choose based on whether reloads are corrections or pure replays.
+
+</details>
+
+<details><summary><b>54.</b> Why must the `ON CONFLICT` target match a real unique or exclusion constraint?</summary>
+
+Postgres requires the conflict target to correspond to an existing unique index/constraint, otherwise it raises an error and the upsert won't compile to working behaviour. More importantly, the constraint is what defines "the same row" — if it doesn't match the true business key, the loader either rejects valid rows or fails to deduplicate. The constraint and the loader's idea of identity must be the same thing.
+
+</details>
+
+<details><summary><b>55.</b> How would you structure a `tests/integration` package per the "Do" steps?</summary>
+
+Create `tests/integration/` with an `__init__.py`, a `conftest.py` holding the Postgres and MinIO fixtures, and test modules marked `@pytest.mark.integration`. Put golden input files under a `fixtures/`/`data/` subfolder so tests load known inputs. Keeping integration tests in their own package makes the `-m integration` split and CI wiring clean.
+
+</details>
+
+<details><summary><b>56.</b> What is `conftest.py` and why put the container fixtures there?</summary>
+
+`conftest.py` is pytest's automatic fixture/plugin file: fixtures defined in it are available to every test in that directory tree without imports. Putting the Postgres/MinIO fixtures there lets all integration tests share them and centralises lifecycle. pytest discovers it by convention, so no explicit import is needed.
+
+</details>
+
+<details><summary><b>57.</b> How do you wire the integration suite into the CI workflow from 9.3.1?</summary>
+
+Add a CI job that has Docker available (a Docker service or DinD), installs deps with uv, and runs `uv run pytest -m integration`. Gate it appropriately — it can run on PRs and main — while the fast default job runs `pytest` (which already excludes integration). The criterion is that the marker-selected suite executes in CI, not just locally.
+
+</details>
+
+<details><summary><b>58.</b> Why run integration tests with `uv run pytest` rather than activating a venv and calling pytest?</summary>
+
+`uv run` executes inside the project's locked environment, guaranteeing the exact dependency versions from the lockfile and resolving the right interpreter without manual activation. Per the project's standing rule you never invoke bare `python`/`pip`/`pytest`. It also makes the CI command identical to the local command, removing "works on my machine" drift.
+
+</details>
+
+<details><summary><b>59.</b> A teammate runs the suite and Testcontainers cannot find the Docker socket on their Ubuntu box — what do you check?</summary>
+
+Confirm the Docker daemon is running (`systemctl status docker`) and that the user is in the `docker` group (or the rootless socket path is exported). Testcontainers reads `DOCKER_HOST`/the default `unix:///var/run/docker.sock`; if rootless Docker is in use, `DOCKER_HOST` must point at the rootless socket. Permission or socket-path mismatches are the usual cause of "cannot connect" on native Linux.
+
+</details>
+
+<details><summary><b>60.</b> Why is "throwaway infra" framed as "the only honest test of the seams"?</summary>
+
+Because a mock encodes your assumptions about the dependency, so it can only confirm what you already believe; a real container can contradict you with a real error code or type rejection. Disposable real infra gives you production-fidelity behaviour without a shared, drifting test server. Honesty here means the test can actually fail for the reasons production would.
+
+</details>
+
+<details><summary><b>61.</b> Give a concrete example where a mocked unit test "passes forever" while the real loader fails.</summary>
+
+A mock DB accepts a 20-digit position into a column you declared `NUMERIC(18,4)`; the unit test is green. Against real Postgres the insert raises `22003 numeric_value_out_of_range` and the load fails. The mock never models the precision constraint, so only the container test exposes the bug.
+
+</details>
+
+<details><summary><b>62.</b> How do you assert "byte-identical" end state between the first and second loader runs?</summary>
+
+Compute a stable digest of the relevant tables after run one — for example `SELECT md5(string_agg(col1||'|'||col2, ',' ORDER BY pk))` — and capture it, then compute the same digest after run two and assert equality. Ordering inside the aggregate is essential so row order doesn't make identical data look different. Equal digests prove the second run changed nothing.
+
+</details>
+
+<details><summary><b>63.</b> Why must you impose an explicit `ORDER BY` when hashing rows for a snapshot comparison?</summary>
+
+Without `ORDER BY`, Postgres returns rows in an unspecified, run-to-run-variable order, so the same data can hash differently and the snapshot assertion flaps. A deterministic ordering on the primary/business key makes the digest a stable function of the data alone. This is a classic source of "flaky but actually-correct" snapshot tests.
+
+</details>
+
+<details><summary><b>64.</b> Where does the integration layer sit in your test pyramid and what stays below it?</summary>
+
+It sits in the middle: above unit tests of pure logic (parsing, NAV math, ISIN validation) and below the thin end-to-end run on a sample. Below it stay all the fast, no-I/O assertions; the integration layer adds the real-Postgres/real-MinIO seam coverage. The "Done when" asks you to articulate exactly this placement.
+
+</details>
+
+<details><summary><b>65.</b> Why not just write more end-to-end tests instead of a dedicated integration layer?</summary>
+
+E2E tests are slow and give poor diagnostics — when one fails you don't know which seam broke, and they tie up the whole stack. A focused integration test targets a single boundary (loader-to-Postgres) so a failure points straight at it and runs in seconds, not minutes. You keep E2E thin and let the integration layer carry seam coverage.
+
+</details>
+
+<details><summary><b>66.</b> What is the risk of testing exclusively against real containers and dropping unit tests?</summary>
+
+You invert the pyramid: the suite becomes slow, every change pays full container startup, and tiny logic bugs are diagnosed through heavyweight tests. Pure-logic bugs are cheapest to catch in milliseconds at the base. Containers are for the seam, not for arithmetic you can test in isolation.
+
+</details>
+
+<details><summary><b>67.</b> For a Luxembourg fund NAV pipeline, what would a golden dataset and its assertion look like?</summary>
+
+A tiny holdings file for one sub-fund with, say, five positions and a hand-computed total NAV per share; the test loads it, runs the valuation, and asserts the stored NAV per share equals the golden figure to the correct decimal scale. It also checks the row count and a per-position checksum. This proves the loader reproduces a known-correct NAV before it ever touches real client data.
+
+</details>
+
+<details><summary><b>68.</b> Why should ISIN validation live in the unit layer rather than an integration test?</summary>
+
+ISIN check-digit validation (Luhn over the 12-char code) is pure string logic with no I/O, so it belongs in fast unit tests parametrized over valid and invalid codes. Pushing it into a container test would be slow and would conflate the validation logic with database behaviour. Reserve the container for what genuinely needs a real database.
+
+</details>
+
+<details><summary><b>69.</b> How might an EMT/EPT file feed a golden-dataset integration test?</summary>
+
+You commit a small, known-good EMT (European MiFID Template) sample with expected parsed fields, load it through the ingestion pipeline into the real Postgres, and assert the resulting rows and key totals match the golden expectation. Because the EMT layout and field semantics are fixed, the golden output is precise. This also doubles as a regression guard if someone changes the parser.
+
+</details>
+
+<details><summary><b>70.</b> How does contract testing relate to receiving an EMT/EPT template from a fund provider?</summary>
+
+The EMT/EPT layout is effectively a contract between the provider (producer) and your pipeline (consumer): agreed columns, types, and codings. A contract-style test asserts your parser still matches the expected template version and fails loudly if a provider quietly changes a field. At awareness level this is the Pact idea applied to a regulatory file format, formalised as data contracts in Phase 8.
+
+</details>
+
+<details><summary><b>71.</b> For a transfer-agency dealing feed, why is the idempotency test especially important?</summary>
+
+TA feeds get reprocessed — files are resent, jobs rerun after a mid-dealing-window failure — so a non-idempotent loader double-books subscriptions/redemptions, corrupting positions and the next NAV. The double-run test proves a resend leaves identical state. In a regulated shop a duplicated dealing record is a reconciliation break, not a cosmetic bug.
+
+</details>
+
+<details><summary><b>72.</b> A SWIFT-message ingestion test passes on mocks but the real loader rejects messages — what seam is likely at fault?</summary>
+
+Probably encoding/format strictness or field-length constraints that the mock ignored — real Postgres `varchar(n)` or a `CHECK` on a BIC/field length rejects what the mock accepted. The container surfaces the actual constraint violation (e.g. a value-too-long `22001`). Test against the real schema so SWIFT field constraints are enforced where they will be in production.
+
+</details>
+
+<details><summary><b>73.</b> What SQLSTATE does Postgres raise when a string is too long for its column, and why does it matter for fixed-width financial codes?</summary>
+
+SQLSTATE `22001` (`string_data_right_truncation`). Fixed-width codes — a 12-char ISIN, a 20-char LEI, an 11-char BIC — map to tightly sized columns, so a malformed over-length value raises `22001` instead of silently truncating. Asserting the loader hits `22001` on bad input proves it won't store a corrupted identifier.
+
+</details>
+
+<details><summary><b>74.</b> Why is a 20-character LEI a good candidate for a length/check constraint that integration tests should exercise?</summary>
+
+An LEI is exactly 20 alphanumeric characters with a defined structure, so a `varchar(20)` plus a `CHECK` is natural; an integration test can confirm that a 19- or 21-char value is rejected by real Postgres. A mock would accept the malformed LEI and hide the bug. This is the kind of constraint that only a real-database test enforces faithfully.
+
+</details>
+
+<details><summary><b>75.</b> In a DORA / regulated-resilience context, what evidence does an integration suite provide?</summary>
+
+It gives demonstrable, reproducible proof that the pipeline was tested against production-like infrastructure — including idempotency and failure handling — which supports resilience and change-control claims. Auditable green runs in CI against real containers are stronger evidence than "we mocked it". DORA's focus on operational resilience makes tested recovery/replay behaviour directly relevant.
+
+</details>
+
+<details><summary><b>76.</b> Why is demonstrating the idempotency assertion failing (by breaking the upsert) a required deliverable, not just a passing test?</summary>
+
+A test that has never failed might be asserting nothing (a false-green). Forcing it red by breaking the upsert proves the assertion actually detects the duplication it claims to. This "see it fail for the right reason" step is basic test hygiene and is exactly what the "Done when" demands.
+
+</details>
+
+<details><summary><b>77.</b> What is a common cause of a Testcontainers test that passes alone but fails when run with the full suite?</summary>
+
+Shared mutable state — a session-scoped container whose data from an earlier test leaks into a later one because cleanup between tests is missing. Order-dependent passes mean isolation is broken. Add per-test truncation/transaction rollback or narrow the fixture scope to restore independence.
+
+</details>
+
+<details><summary><b>78.</b> Why prefer wrapping each test in a transaction that rolls back over truncating tables between tests?</summary>
+
+A rolled-back transaction is fast and automatically discards all writes, leaving the schema pristine without enumerating tables; truncation requires you to list and clear each affected table and can miss one. The transaction approach also can't accidentally leave half-cleaned state. The caveat is it won't isolate code paths that commit internally, where truncation or schema recreation is needed.
+
+</details>
+
+<details><summary><b>79.</b> How do you handle a loader that opens its own connection, when you want each test rolled back?</summary>
+
+Inject the connection/engine (from the container fixture) into the loader rather than letting it create its own, so the test controls the transaction boundary and can roll it back. Dependency-injecting the connection is also what lets you point the loader at the container's mapped port. A loader that hard-codes its connection is hard to test and should be refactored.
+
+</details>
+
+<details><summary><b>80.</b> Why is it bad practice to point integration tests at a long-lived shared test database instead of containers?</summary>
+
+A shared DB accumulates drift, suffers cross-team interference, and makes failures depend on whatever state someone else left behind, so tests become flaky and untrustworthy. Containers give each run a pristine, isolated, disposable database. The "machine with only Docker installed" criterion exists precisely to forbid the shared-server dependency.
+
+</details>
+
+<details><summary><b>81.</b> What does it mean that "this layer is tool-agnostic; the discipline, not the vendor, is the deliverable"?</summary>
+
+The value is in having fast unit tests, real-infra integration tests, golden datasets, and idempotency proofs — not in which library provides the containers. Testcontainers and pytest are the chosen tools, but the same pyramid and assertions transfer to any stack. Corp environments use "the same" approach; the practice is what you carry between jobs.
+
+</details>
+
+<details><summary><b>82.</b> How would you assert NAV reconciliation tolerance correctly when prices have defined decimal scale?</summary>
+
+Compare using exact `Decimal`/`NUMERIC` arithmetic and assert equality at the prescribed scale, rather than a floating-point "close enough" with an arbitrary epsilon. NAV figures have a contractually defined number of decimals, so the right assertion is exact at that scale after correct rounding. Sloppy float comparison either hides real errors or invents spurious ones.
+
+</details>
+
+<details><summary><b>83.</b> Why can `assert a == b` on floats give a false failure in a NAV test, and what is the fix?</summary>
+
+Binary floating point can't represent many decimal fractions exactly, so summing prices accumulates tiny errors and `==` fails even when the value is "right". The fix is to compute and store money as `Decimal`/`NUMERIC` and compare exactly at the defined scale, or use a rounding step that matches the business rule. Never use raw `float` for currency or NAV.
+
+</details>
+
+<details><summary><b>84.</b> What is "component" testing in the data pyramid, between unit and end-to-end?</summary>
+
+Component tests exercise one deployable unit — say the loader together with its real database — in isolation from the rest of the system. They are broader than a unit test but narrower than full E2E, which is exactly the integration layer this lesson builds. The term emphasises testing a single component against real collaborators rather than the whole pipeline.
+
+</details>
+
+<details><summary><b>85.</b> Why is "roll the loader twice" a stronger idempotency check than inspecting the SQL for `ON CONFLICT`?</summary>
+
+Reading the SQL only confirms the intent; running it twice against real Postgres confirms the actual end state, catching mistakes like a wrong conflict target, a missing constraint, or a side effect outside the upsert. Behavioural assertions beat code inspection because they exercise the real engine. The double run tests the property, not the implementation detail.
+
+</details>
+
+<details><summary><b>86.</b> What is the danger of golden snapshots that include volatile fields like load timestamps?</summary>
+
+A snapshot containing `now()` or an auto-incrementing id changes every run, so the comparison always "fails", and people respond by re-blessing it blindly until it protects nothing. Exclude or normalise volatile columns before snapshotting. Snapshot only the deterministic, business-meaningful end state.
+
+</details>
+
+<details><summary><b>87.</b> Why might `uv run pytest -m integration` collect zero tests, and how do you diagnose it?</summary>
+
+The marker isn't applied (tests aren't decorated `@pytest.mark.integration`), it's misspelled, or `--strict-markers` plus an unregistered marker errored out collection. Run `uv run pytest -m integration --collect-only` to see what matches, and check the marker registration in `pyproject.toml`. Zero collected usually means a marker/config mismatch, not a real absence of tests.
+
+</details>
+
+<details><summary><b>88.</b> What does `pytest --collect-only` do and how does it help here?</summary>
+
+It lists the tests that would run without executing them, so you can confirm your marker expression selects the intended integration tests. It's the fastest way to debug "why did my `-m integration` select nothing/everything". You see collection-time errors too, like an unregistered-marker failure under `--strict-markers`.
+
+</details>
+
+<details><summary><b>89.</b> Why does the lesson keep the golden holdings file small enough to verify totals by hand?</summary>
+
+Because a human-verifiable expected value is what makes the test trustworthy — you can prove the golden NAV is correct, not just "what the code produced last time". A large file forces you to trust the code to generate its own oracle, which is circular. Small-and-hand-checked breaks that circularity.
+
+</details>
+
+<details><summary><b>90.</b> What is the relationship between this integration-testing lesson and the data contracts coming in Phase 8?</summary>
+
+This lesson previews contract testing (via Pact's consumer-driven idea) at awareness level; Phase 8 formalises it into enforced data contracts between producers and consumers. The integration tests here protect your own seams, while data contracts will protect the boundaries between teams/systems. The conceptual thread is "verify agreements at the boundary".
+
+</details>
+
+<details><summary><b>91.</b> A container starts but your test cannot reach Postgres because you connected to port 5432 — what's the conceptual error?</summary>
+
+You used the in-container port instead of the mapped host port, so nothing is listening on host `5432`. You must connect to `get_exposed_port(5432)` or use `get_connection_url()`, which already contains the random host port. Confusing the container-internal port with the host-mapped port is the most common Testcontainers beginner bug.
+
+</details>
+
+<details><summary><b>92.</b> Why can running the integration suite in parallel (e.g. `pytest -n auto`) be both desirable and tricky with containers?</summary>
+
+Parallelism cuts wall-clock time, and random host-port mapping makes concurrent containers possible without port clashes; but shared session-scoped fixtures or a shared container break under parallel workers writing the same tables. You either give each worker its own container or use per-test isolation. The random-port design is what makes safe parallelism feasible at all.
+
+</details>
+
+<details><summary><b>93.</b> How do you prove the integration tests actually exercised the real database and weren't silently skipped?</summary>
+
+Check the pytest summary for the count of passed integration tests (not "skipped"), and optionally log the container image/port or assert on a real Postgres-specific behaviour (like a `22003` error) that a mock couldn't produce. A green run with zero collected is a false sense of safety. Asserting a real SQLSTATE is strong evidence the real engine ran.
+
+</details>
+
+<details><summary><b>94.</b> What is "snapshot rot" and how do you defend against it in a regulated codebase?</summary>
+
+Snapshot rot is the gradual erosion of a snapshot's value as people accept diffs without scrutiny, until it asserts nothing meaningful. Defend by reviewing every snapshot change in code review, keeping snapshots small and deterministic, and pairing them with explicit invariant assertions (row counts, NAV totals) that can't be blindly re-blessed. In a regulated shop, an unreviewed re-bless is an audit gap.
+
+</details>
+
+<details><summary><b>95.</b> Why is asserting an "end-state invariant" (like a reconciled NAV) more robust than asserting the exact output bytes?</summary>
+
+An invariant captures the business truth — the NAV reconciles, no duplicates exist, totals balance — so it survives benign output changes while still catching real corruption. Exact-byte snapshots are brittle and flag harmless reorderings or formatting tweaks. The strongest suites combine a few invariants with a deterministic snapshot.
+
+</details>
+
+<details><summary><b>96.</b> When a transfer-agency file is reprocessed after a partial failure, what should an idempotent loader guarantee, and how do you test it?</summary>
+
+It must guarantee the final positions are the same as if the file had loaded cleanly once — no double-counted subscriptions, no missing rows. You test it by simulating the partial-then-full reprocess (or simply running the loader twice on the same file) against the container and asserting byte-identical end state. That double-run is the lesson's idempotency proof applied to TA reprocessing.
+
+</details>
+
+<details><summary><b>97.</b> Why does the lesson tie integration tests to "permissions" as one of the seams?</summary>
+
+Because production loaders run as a specific database role with limited grants, and a permission gap (no `INSERT` on a schema, missing `USAGE`) only fails against a real database configured like production. A mock ignores grants entirely. Testing with realistic roles in the container catches "permission denied" before deployment.
+
+</details>
+
+<details><summary><b>98.</b> How could you make an integration test catch a missing-grant bug?</summary>
+
+Create the role and grants in the container's setup to mirror production, then run the loader as that least-privileged role; a missing grant surfaces as a real `42501 insufficient_privilege` error. Running tests as a superuser hides exactly these bugs. Mirroring production privileges is what makes the permission seam testable.
+
+</details>
+
+<details><summary><b>99.</b> Why is "run via uv against local Docker" the intended workflow, and what does it imply for reproducibility?</summary>
+
+It means tests use the project's locked dependencies (`uv run`) and a local Docker daemon to start real containers, so any machine with uv and Docker reproduces the exact environment. There's no shared server, no manual venv activation, and no dependency drift. That reproducibility is what lets the suite be trusted as audit evidence.
+
+</details>
+
+<details><summary><b>100.</b> What single sentence captures why mocked unit tests are insufficient for a regulated loader?</summary>
+
+They validate your assumptions about the database rather than the database itself, so they pass while the real loader fails on real constraints, type limits, permissions, and error codes. In a regulated context that gap is the difference between "we tested it" and "it actually works". Real, disposable infrastructure closes the gap at the seam where pipelines actually break.
+
+</details>
+
+
+## Phase 3 · 9.7.1 Schema migrations & change management — 100 self-test questions
+
+<details><summary><b>1.</b> What problem do schema-migration tools like Flyway and Alembic solve?</summary>
+
+They turn ad-hoc, manually-run `ALTER` statements into versioned, ordered, repeatable scripts that are applied automatically and tracked in a history table. The mechanism is that each script is recorded after it runs, so the tool knows exactly which changes a given database has and which still need applying. Without this you get drift between environments and no audit trail — fatal in a regulated fund-administration estate where every schema change must be evidenced to a change board.
+
+</details>
+
+<details><summary><b>2.</b> In Flyway, what is a versioned migration and how is it named?</summary>
+
+A versioned migration is a script that runs exactly once, in version order, named `V<version>__<description>.sql` — for example `V2__add_isin_check_digit.sql`. The `V` prefix, the version number, a double underscore, the description, and the `.sql` suffix are all required parts of the convention. The double underscore separating version from description is the most common naming gotcha; a single underscore makes Flyway reject or ignore the file.
+
+</details>
+
+<details><summary><b>3.</b> What is a repeatable migration in Flyway and when does it re-run?</summary>
+
+A repeatable migration uses the `R` prefix with no version number (e.g. `R__refresh_nav_view.sql`) and is re-applied every time its checksum changes, always after all pending versioned migrations. The mechanism is that Flyway compares the file's current checksum against the last-applied checksum stored in the history table; if they differ it re-runs. Repeatables are ideal for objects you redefine in place — views, stored procedures, grants — where the latest definition is what matters, not a sequence of deltas.
+
+</details>
+
+<details><summary><b>4.</b> What is Flyway's schema history table called by default?</summary>
+
+It is `flyway_schema_history`, created automatically in the target schema on first run. It stores one row per applied migration with the version, description, type, script name, checksum, who applied it, when, execution time, and success flag. This table is the single source of truth Flyway consults to decide what to run, and in a regulated shop it doubles as the CAB evidence of exactly what changed and when.
+
+</details>
+
+<details><summary><b>5.</b> What is a migration checksum in Flyway and what is it for?</summary>
+
+A checksum is a hash Flyway computes over a migration script's contents and stores in `flyway_schema_history` when the script is applied. Its purpose is tamper detection: on every `migrate` or `validate`, Flyway re-hashes the on-disk file and compares it to the stored value, so editing an already-applied migration is caught. This enforces the rule that applied migrations are immutable — you fix forward with a new migration, never by editing history.
+
+</details>
+
+<details><summary><b>6.</b> Your CI pipeline fails with `Migration checksum mismatch for migration version 3`. What happened?</summary>
+
+Someone edited the contents of `V3` after it had already been applied to that database, so the on-disk checksum no longer matches the one recorded in `flyway_schema_history`. The first thing to check is the git history of that file — did a teammate "just tweak" an applied migration? The correct fix is almost always to revert the edit and add a new `V4` migration; `flyway repair` only realigns the stored checksum and should be used with care.
+
+</details>
+
+<details><summary><b>7.</b> What does `flyway validate` do, and how does it differ from `flyway migrate`?</summary>
+
+`flyway validate` checks that the migrations on disk match what the schema history table says was applied — same versions, same checksums, no missing or extra scripts — and fails without changing anything. `flyway migrate` actually applies any pending migrations and records them. You run `validate` as a fast, read-only guard early in CI so a breaking change is caught before it touches a database.
+
+</details>
+
+<details><summary><b>8.</b> What does `flyway repair` do?</summary>
+
+`flyway repair` realigns the schema history table with the migration files: it updates stored checksums to match the current files and removes failed-migration entries so they can be retried. The mechanism makes it useful when a migration failed mid-way or when a checksum mismatch is genuinely benign (e.g. a whitespace-only change). It is a sharp tool — repairing to hide a real, applied content change destroys the integrity guarantee, so in a governed pipeline its use should itself be reviewed.
+
+</details>
+
+<details><summary><b>9.</b> What is a Flyway baseline migration and when do you use it?</summary>
+
+A baseline establishes a starting point for Flyway on a database that already has a schema not under Flyway control, marking everything up to a baseline version as already applied. You use it exactly once when onboarding an existing Phase-1 Postgres schema: `flyway baseline` records the current state so future `V` migrations apply on top without Flyway trying to recreate the world. The baseline version is recorded in `flyway_schema_history` as a special baseline row.
+
+</details>
+
+<details><summary><b>10.</b> Why are already-applied Flyway migrations treated as immutable?</summary>
+
+Because their checksums are recorded and validated, and because other environments may have already applied the original version — editing it would make environments silently diverge. The enforced model is that schema change is append-only: every correction is a new migration with a higher version. This is what lets you reason about any database purely from its history table and guarantees the same sequence ran everywhere.
+
+</details>
+
+<details><summary><b>11.</b> What does Flyway do when it finds a migration file with a version lower than the latest applied one?</summary>
+
+By default Flyway treats it as "out of order" and refuses to run it, because applying an older version after a newer one breaks the linear-history assumption. You can opt in with `flyway migrate -outOfOrder=true`, which tells Flyway to apply any pending lower-versioned migrations it finds. This typically arises when two feature branches both add migrations and merge in an unexpected interleaving.
+
+</details>
+
+<details><summary><b>12.</b> What is the `validateMigrationNaming` configuration option in Flyway?</summary>
+
+It controls how Flyway handles files in the migrations directory whose names do not match the expected pattern. When `false` (default), such files are silently ignored; when `true`, Flyway fails fast and lists every misnamed file so you can fix it. Turning it on is good hygiene in CI because a typo like a single underscore would otherwise cause a migration to be silently skipped.
+
+</details>
+
+<details><summary><b>13.</b> In Flyway terminology, what does it mean that a versioned migration is applied "exactly once"?</summary>
+
+It means once a `V` migration's row exists in `flyway_schema_history` with success, Flyway never runs it again on that database, even if the file is still present. The mechanism is the version-number bookkeeping: Flyway only applies versions greater than the latest applied version (plus any out-of-order ones if enabled). This is the core distinction from repeatable migrations, which re-run on checksum change.
+
+</details>
+
+<details><summary><b>14.</b> Why might you choose a repeatable migration over a versioned one for a database view?</summary>
+
+Because a view's correct state is its latest full definition, not a chain of deltas — putting `CREATE OR REPLACE VIEW` in an `R__` file means each change is a single edit re-applied on checksum change, with no growing pile of `V` files. The mechanism is that Flyway re-runs repeatables after versioned ones whenever the checksum differs. The gotcha is that repeatables must be idempotent (use `CREATE OR REPLACE`, not bare `CREATE`) or the re-run fails.
+
+</details>
+
+<details><summary><b>15.</b> What information does each row of `flyway_schema_history` contain?</summary>
+
+Each row records the installed rank, version, description, type (SQL, BASELINE, etc.), script filename, checksum, the OS/DB user who installed it, an installation timestamp, execution time in milliseconds, and a success boolean. This per-migration provenance is precisely what a change board wants as evidence. A failed migration leaves a row with `success = false`, which is why `flyway repair` removes those before a retry.
+
+</details>
+
+<details><summary><b>16.</b> What is the `U` prefix in Flyway, and what is the catch?</summary>
+
+`U` denotes an undo migration — the explicit down-script paired with a `V` migration to reverse it. The catch is that undo migrations are a commercial Flyway feature (Teams/Enterprise), not available in the free community edition. Even where available, the discipline-driven view is that you rarely run them in production; you roll forward instead.
+
+</details>
+
+<details><summary><b>17.</b> How does Flyway decide the order in which to apply migrations?</summary>
+
+It sorts versioned migrations by their version number (numerically, segment by segment), applies all pending ones in ascending order, then applies any repeatable migrations whose checksum changed. The version string can have multiple dot- or underscore-separated parts, compared left to right. This deterministic ordering is what guarantees every environment receives the same sequence of changes.
+
+</details>
+
+<details><summary><b>18.</b> What is Alembic, and which ecosystem is it native to?</summary>
+
+Alembic is the schema-migration tool for SQLAlchemy, the dominant Python ORM, written by the same author. It is the natural choice for a Python-first data shop because migrations are Python files with `upgrade()` and `downgrade()` functions and can be autogenerated from your SQLAlchemy models. It plays the same role Flyway does for the JVM/SQL world: versioned, tracked, ordered schema change.
+
+</details>
+
+<details><summary><b>19.</b> What does `alembic revision --autogenerate -m "add lei column"` do?</summary>
+
+It compares your SQLAlchemy model metadata against the current database schema and emits a new migration script containing the detected differences, with the message as the description. The `--autogenerate` flag is what triggers the model-vs-database diff; without it you get an empty revision skeleton to fill in by hand. The output is a draft you must review, because autogenerate cannot detect everything.
+
+</details>
+
+<details><summary><b>20.</b> Why must Alembic autogenerated migrations always be reviewed before use?</summary>
+
+Because autogenerate's diff is incomplete and sometimes wrong: it can miss table or column renames (seeing a drop-plus-add instead), server defaults, check constraints, and certain type changes, and it may reorder operations unsafely. The mechanism is that it compares declarative metadata to reflected schema, which loses intent — a rename looks identical to a drop-and-create. Treating the output as a first draft, not a final script, is the documented expectation.
+
+</details>
+
+<details><summary><b>21.</b> How does Alembic track which migrations a database has applied?</summary>
+
+It maintains a table called `alembic_version` holding a single row with the revision identifier the database is currently at. Unlike Flyway's full history table, this is a pointer to the current head, and the chain of `down_revision` links inside the scripts encodes the order. To move forward, Alembic walks from the stored revision toward the head, running each `upgrade()` in turn.
+
+</details>
+
+<details><summary><b>22.</b> What is Alembic's offline (`--sql`) mode and why does it matter in a bank?</summary>
+
+Offline mode, invoked by adding `--sql` to an `upgrade` or `downgrade` command, makes Alembic emit the SQL to stdout/a file instead of executing it against the database. It matters because in regulated estates DBAs often hold exclusive DDL rights — the developer generates the SQL script, hands it off for review, and a DBA applies it under change control. This separates authoring the change from executing it, which is exactly the segregation a CAB expects.
+
+</details>
+
+<details><summary><b>23.</b> What command generates an Alembic migration as a SQL script up to a specific revision?</summary>
+
+`alembic upgrade <revision> --sql`, for example `alembic upgrade ae1027a6acf --sql > change_0042.sql`. The `--sql` flag switches Alembic into offline mode so it prints DDL rather than connecting and running it. You can also use a range like `alembic upgrade <from>:<to> --sql` to script just the delta between two revisions.
+
+</details>
+
+<details><summary><b>24.</b> What kind of migration logic breaks in Alembic offline mode, and why?</summary>
+
+Any migration that reads from the database at runtime — e.g. a data backfill that does a `SELECT` into Python and loops — breaks, because offline mode produces static SQL with no live connection. The mechanism is that `--sql` configures the context to write SQL to a stream instead of opening a cursor, so there is nothing to fetch from. Data migrations meant for offline use must therefore be expressed as set-based `UPDATE`/`INSERT ... SELECT` SQL, not row-by-row Python.
+
+</details>
+
+<details><summary><b>25.</b> In Alembic offline mode, why must you specify a starting revision?</summary>
+
+Because without a live connection Alembic cannot read `alembic_version` to learn where the database currently is, so it cannot know which scripts to include. You supply the start explicitly, e.g. `alembic upgrade <start>:<head> --sql`, or have the script read `starting_rev` from configuration. The gotcha is that an offline script generated from `base` will include an `alembic_version` setup that conflicts if the table already exists.
+
+</details>
+
+<details><summary><b>26.</b> What does `alembic current` report?</summary>
+
+It connects to the database and prints the revision identifier currently stored in `alembic_version` — i.e. the migration head that database is at. It is the online way to discover the starting point you would then feed into an offline `--sql` generation. In troubleshooting, mismatches between `alembic current` and `alembic heads` tell you the database is behind the latest code.
+
+</details>
+
+<details><summary><b>27.</b> What does `alembic stamp <revision>` do, and when is it appropriate?</summary>
+
+`alembic stamp` sets the `alembic_version` pointer to a given revision without running any migration logic, marking the database as being at that point. It is appropriate when the schema already matches a revision — for instance after manually applying DDL, or when baselining an existing database — so Alembic's bookkeeping aligns with reality. Misusing it to skip a migration you should actually run leaves the schema and the version pointer inconsistent.
+
+</details>
+
+<details><summary><b>28.</b> What are the two functions in a typical Alembic migration script and what does each do?</summary>
+
+`upgrade()` contains the operations to apply the change (e.g. `op.add_column(...)`), and `downgrade()` contains the operations to reverse it (e.g. `op.drop_column(...)`). Alembic calls `upgrade()` when moving forward to that revision and `downgrade()` when moving back past it. Autogenerate populates both, but you are responsible for verifying the `downgrade()` actually reverses the change correctly.
+
+</details>
+
+<details><summary><b>29.</b> How does Alembic know the order of migrations without version numbers like Flyway's?</summary>
+
+Each revision file declares its own `revision` identifier and a `down_revision` pointing at its predecessor, forming a linked list (a DAG when branches exist). Alembic walks this chain from the database's current revision toward the head to determine what to run and in what order. This is why two parallel branches can create a "multiple heads" situation that must be resolved with a merge revision.
+
+</details>
+
+<details><summary><b>30.</b> You run `alembic upgrade head` and get "Multiple head revisions are present". What caused it and how do you fix it?</summary>
+
+Two migrations were created with the same `down_revision` — typically two feature branches each added a revision off the same parent — so the history has two unmerged tips. You fix it with `alembic merge -m "merge heads" <rev1> <rev2>`, which creates a merge revision whose `down_revision` lists both heads, collapsing them back to one. After merging, `alembic upgrade head` is unambiguous again.
+
+</details>
+
+<details><summary><b>31.</b> Conceptually, what is the expand–contract (parallel change) pattern?</summary>
+
+It is a technique for making a breaking schema change as a sequence of individually-safe, deployable steps so the system is never broken at any point. You expand by adding the new structure alongside the old, migrate writes and reads across, backfill existing data, then contract by removing the old structure — each step deployable independently. It is the standard way to change a schema under load without downtime, and it is named "parallel change" by Martin Fowler.
+
+</details>
+
+<details><summary><b>32.</b> What are the four logical phases of expand–contract for a column rename?</summary>
+
+Expand: add the new column alongside the old; migrate writes: have the application (or a trigger) write both columns; backfill: copy existing data from old to new and switch reads to the new column; contract: drop the old column. Each phase is a separate deployable so that at every moment the running application and the schema are mutually compatible. The contract step is deliberately last and deliberately separate.
+
+</details>
+
+<details><summary><b>33.</b> Why is a naive `ALTER TABLE ... RENAME COLUMN` dangerous in a live system?</summary>
+
+Because it is an instantaneous, atomic break: the moment it commits, any running code still referring to the old name fails, and any code expecting the new name fails until it commits a fraction earlier or later. There is no version of the deploy where both the old and new code work against that single schema. In a fund context this could take the transfer-agency feed down mid-dealing-window, which is exactly what expand–contract prevents.
+
+</details>
+
+<details><summary><b>34.</b> In the expand phase, how do you keep the old and new columns in sync?</summary>
+
+Either dual-write from the application (every write sets both columns) or install a database trigger that copies writes from one column to the other automatically. The trigger approach is attractive when you cannot change all writers at once or there are out-of-band writers. Whichever you choose, the goal is that during the transition both columns always hold the same value so reads from either are correct.
+
+</details>
+
+<details><summary><b>35.</b> What is a backfill in the expand–contract context, and why is it needed?</summary>
+
+A backfill is a bulk operation that copies existing rows' data from the old column to the new one, because dual-writing only keeps new and updated rows in sync — historical rows are still empty in the new column. It is typically a batched `UPDATE ... SET new = old WHERE new IS NULL`, done in chunks to avoid long locks. Reads can only switch to the new column safely once the backfill is complete and verified.
+
+</details>
+
+<details><summary><b>36.</b> Why is the contract step deployed last and as its own separate migration?</summary>
+
+Because dropping the old column is only safe once nothing reads or writes it — that is only true after the new code is fully deployed and the backfill is done. Shipping contract early would break code that still references the old column; shipping it bundled with expand would mean a single migration that both adds and drops, leaving no safe intermediate state. Keeping it separate gives you a stable, fully-functional system to pause at before committing to the irreversible drop.
+
+</details>
+
+<details><summary><b>37.</b> Your "Done when" says explain what would break if V2 (expand) and V4 (contract) were a single migration. What is the answer?</summary>
+
+Combining them would add the new column and drop the old one in one atomic step, so there is no window in which both columns coexist — the running application release, which still references the old column, breaks instantly on apply. The whole point of expand–contract is that intermediate state where old and new live side by side; merging V2 and V4 destroys it. You would be back to the naive rename you set out to avoid, with no zero-downtime path.
+
+</details>
+
+<details><summary><b>38.</b> In expand–contract, when is it safe to switch reads from the old column to the new one?</summary>
+
+Only after the new column is being kept fully in sync (dual-write or trigger in place) and the historical backfill has completed and been verified. Switching reads earlier means queries can hit rows where the new column is still NULL, returning wrong NAV or holdings data. The ordering — sync first, backfill second, switch reads third — is what guarantees correctness throughout.
+
+</details>
+
+<details><summary><b>39.</b> How does expand–contract apply to changing a column's type rather than its name?</summary>
+
+Same pattern: add a new column of the target type, dual-write/convert into it, backfill existing rows with the converted values, switch reads, then drop the old column. You never do an in-place `ALTER COLUMN ... TYPE` on a hot table because it can rewrite the whole table under a lock and breaks code expecting the old type. The new-column approach keeps both representations valid during the transition.
+
+</details>
+
+<details><summary><b>40.</b> Why can adding a `NOT NULL` column with no default be a breaking change, and how does expand–contract help?</summary>
+
+On many databases adding a `NOT NULL` column without a default forces a value for every existing row and can require a full table rewrite or simply fail, and old code that inserts without the new column breaks. The expand–contract way is to add the column as nullable first, backfill it, ensure all writers populate it, then add the `NOT NULL` constraint in a later step. Each step is individually safe and the table is never broken for the running release.
+
+</details>
+
+<details><summary><b>41.</b> What is the deployment-ordering rule "DB before code"?</summary>
+
+It means you apply the database migration before deploying the application code that depends on it, so the new code never encounters a schema it expects but that does not yet exist. The mechanism is that a migration making purely additive, backward-compatible changes is safe for the old code too, so applying it first harms nothing. This ordering is half of what makes zero-downtime deploys possible; the other half is making every migration backward-compatible.
+
+</details>
+
+<details><summary><b>42.</b> Why must every migration be backward-compatible with the currently-running release?</summary>
+
+Because during a deploy there is always a window where the new schema is live but some instances still run the old code, and if the migration broke the old code those instances would error until they are replaced. Keeping each migration additive and non-breaking means old and new code both work against it. This is the invariant that lets you apply DB changes ahead of, and independently from, code rollout.
+
+</details>
+
+<details><summary><b>43.</b> How do "DB before code" ordering and expand–contract relate to each other?</summary>
+
+Expand–contract decomposes a breaking change into a series of individually backward-compatible migrations, and "DB before code" is the rule for sequencing each of those migrations relative to its matching code deploy. Together they guarantee that at every point — before, during, and after each step — the live code and the live schema are compatible. Expand–contract supplies the safe steps; DB-before-code supplies the safe ordering of each step.
+
+</details>
+
+<details><summary><b>44.</b> In a blue-green or rolling deployment, why does backward-compatible schema change matter even more?</summary>
+
+Because both deployments run old and new application versions simultaneously against the same database for a real interval, not just an instant. If a migration were backward-incompatible, the still-running old version would fail for every request during that interval. Backward-compatible (additive) migrations let both versions coexist, which is precisely what rolling and blue-green strategies require.
+
+</details>
+
+<details><summary><b>45.</b> What is "roll forward" as a rollback stance, and why is it preferred over rollback scripts?</summary>
+
+Roll forward means that when a deployed change causes a problem, you fix it by writing and deploying a new migration that corrects the state, rather than running a down-script to revert. It is preferred because down-scripts are rarely tested, can lose data (a dropped column's data is gone), and the database may have moved on since deploy — a blind revert can cause more damage than the original fault. Forward-only keeps history append-only and auditable.
+
+</details>
+
+<details><summary><b>46.</b> Your "Done when" asks you to defend "roll forward" to a change board demanding a rollback script. What is your argument?</summary>
+
+A rollback script is a comforting artifact that is almost never exercised, so it is untested code run in a crisis against a database whose state has drifted since deploy — the riskiest possible moment to run unverified DDL. A contract step that dropped a column cannot be undone by a down-script because the data is gone, so the real recovery is a corrective forward migration plus a restore from backup if data was lost. The board's actual goal — safe recovery — is better served by tested forward fixes, monitoring, and backups than by a script nobody has run.
+
+</details>
+
+<details><summary><b>47.</b> If you favour roll-forward, what is a tested down-path actually for?</summary>
+
+It is primarily for local development and CI, where you spin schemas up and down repeatedly and a working `downgrade()` keeps iteration fast and reproducible. It is also useful in pre-production for resetting test data between runs. The point is that down-scripts earn their keep in disposable environments, not as the production recovery mechanism — production recovery is roll-forward plus backups.
+
+</details>
+
+<details><summary><b>48.</b> Why is dropping a column considered effectively irreversible, and what follows from that?</summary>
+
+Because once the column is dropped the data it held is gone; a "downgrade" that re-adds the column gives you back an empty column, not the original values. It follows that the contract step deserves extra scrutiny, should only run after a verified backfill and a stable period, and that real recovery from a bad drop is a restore from backup, not a down-script. This is the clearest case where roll-forward beats rollback.
+
+</details>
+
+<details><summary><b>49.</b> What is the difference between Flyway's versioned and repeatable migrations in terms of when they execute?</summary>
+
+Versioned migrations run once, in ascending version order, and never again once recorded. Repeatable migrations run after all versioned ones and re-execute whenever their checksum changes. The practical rule: deltas to data or table structure go in `V` files; full redefinitions of replaceable objects like views and functions go in `R` files.
+
+</details>
+
+<details><summary><b>50.</b> How would you put an existing Phase-1 Postgres schema under Flyway control without losing it?</summary>
+
+Point Flyway at the database, create a baseline that records the current schema as the starting version (e.g. `flyway baseline -baselineVersion=1`), and write future changes as `V2`, `V3`, etc. The baseline tells Flyway "everything up to here already exists, do not try to build it," writing a baseline row into `flyway_schema_history`. From then on only new migrations apply on top, and the history table becomes your change record.
+
+</details>
+
+<details><summary><b>51.</b> Walk through the three migrations for renaming a loader-written column using expand–contract.</summary>
+
+`V2` expand: add the new column plus a sync trigger or dual-write so both columns stay equal. `V3` backfill and switch: copy old values into new for existing rows, then change reads to use the new column. `V4` contract: drop the old column once nothing references it. Keeping the loader running on a schedule throughout, you watch for failed loads at each step; zero failures is the success criterion.
+
+</details>
+
+<details><summary><b>52.</b> While doing a live expand–contract rename, the scheduled loader starts failing right after V2. What do you check first?</summary>
+
+First check whether the loader's `INSERT`/`UPDATE` is now incompatible with the new column — e.g. you added the new column as `NOT NULL` with no default, so inserts that omit it fail. The expand step must be purely additive: add the column nullable, with a default or a trigger to populate it, so existing writers keep working. Confirm the sync trigger itself is not raising an error on the loader's writes.
+
+</details>
+
+<details><summary><b>53.</b> Why is keeping the loader running throughout the rename drill the whole point of the exercise?</summary>
+
+Because expand–contract's promise is zero downtime under live traffic; a rename that only works when the system is quiesced proves nothing. Running the loader on a schedule simulates the dealing-window traffic that a real transfer-agency feed produces, so any step that breaks compatibility shows up immediately as a failed load. Zero failed loads across all three migrations is the evidence that the pattern was executed correctly.
+
+</details>
+
+<details><summary><b>54.</b> What would a five-line CAB-style change record for this rename contain?</summary>
+
+The change description (column rename via expand–contract over V2–V4), the risk assessment (low; each step additive and backward-compatible, loader stays up), the rollback stance (roll forward; contract step backed by backup), the evidence (zero failed loads, `flyway_schema_history` rows, before/after schema), and the approver/window. It is deliberately short and decision-oriented, mapping directly onto what a change advisory board signs off. The migration history table supplies the hard evidence behind it.
+
+</details>
+
+<details><summary><b>55.</b> What does Liquibase add over Flyway/Alembic in a governed enterprise pipeline?</summary>
+
+Liquibase Pro adds capabilities aimed at governed delivery: drift detection (comparing actual schema against expected), targeted/structured rollback, approval flows, and policy checks, typically integrated into pipelines like Azure DevOps. These address exactly the controls a regulated change process wants beyond plain versioned migrations. For the lab you pick one of Flyway or Alembic; Liquibase is the enterprise tier you evaluate, not necessarily run.
+
+</details>
+
+<details><summary><b>56.</b> What is schema "drift" and why do enterprise migration tools detect it?</summary>
+
+Drift is the divergence between the schema a database actually has and the schema your migrations say it should have — caused by manual hotfixes, out-of-band changes, or partial deploys. Tools detect it by comparing the live schema against the expected state derived from the migration history. It matters because undetected drift means your next migration runs against a database that is not what you think it is, which is a common cause of production migration failures.
+
+</details>
+
+<details><summary><b>57.</b> Why is a migration history table described as "CAB evidence" in a regulated estate?</summary>
+
+Because it is an immutable, timestamped, per-change record of exactly what schema changes were applied, by whom, when, and with what result — which is precisely what a change advisory board needs to audit. Instead of trusting that a documented change was actually performed, an auditor reads `flyway_schema_history` directly. This is why the tool-managed history, not a wiki page, is the system of record for schema change.
+
+</details>
+
+<details><summary><b>58.</b> How do migrations fit into an evolutionary database design / CI-CD pipeline?</summary>
+
+Each schema change is a small, versioned migration checked into source control alongside the application code that depends on it, and the pipeline applies pending migrations automatically as part of deploy. This treats the database as code: every change is reviewed, tested, ordered, and reproducible across environments. Fowler's evolutionary database design names the migration as the atomic unit of database change in a continuous-delivery flow.
+
+</details>
+
+<details><summary><b>59.</b> Why should migration scripts live in version control alongside application code?</summary>
+
+So a given commit captures both the schema change and the code that needs it, keeping them reviewable and deployable together and giving you a single history. Reviewers see the `ALTER` next to the code that uses the new column, and CI can validate them together. It also means rolling back code and identifying the corresponding schema state is a matter of reading git, not archaeology.
+
+</details>
+
+<details><summary><b>60.</b> What is the risk of two developers creating Flyway migrations with the same version number?</summary>
+
+Flyway will detect a duplicate version and refuse to run, because two migrations sharing a version violate the ordering and one-row-per-version contract of the history table. This is the Flyway analogue of Alembic's multiple-heads problem and usually surfaces at merge time. The fix is to renumber one migration to a unique, higher version before applying.
+
+</details>
+
+<details><summary><b>61.</b> How does Alembic's branching model differ from Flyway's strictly linear versioning?</summary>
+
+Alembic explicitly supports branches in its revision DAG via `down_revision` links and even labelled branches, then resolves divergence with merge revisions; Flyway is fundamentally linear by version number, with out-of-order as an opt-in escape hatch. This makes Alembic more flexible for parallel feature work but also means "multiple heads" is a normal state you must actively merge. Flyway instead pushes you to keep one linear sequence.
+
+</details>
+
+<details><summary><b>62.</b> An autogenerated Alembic migration shows a `drop_column` plus `add_column` for what was meant to be a rename. Why, and what do you do?</summary>
+
+Autogenerate diffs declarative metadata against the reflected schema and has no concept of identity, so a renamed column looks exactly like dropping the old name and adding a new one — and applying that drop-and-add would destroy the column's data. You must hand-edit the migration to use `op.alter_column(..., new_column_name=...)` (or the expand–contract sequence) instead. This is a canonical reason autogenerate output must be reviewed, never applied blind.
+
+</details>
+
+<details><summary><b>63.</b> Why does Alembic require a database connection for autogenerate but not necessarily for applying migrations offline?</summary>
+
+Autogenerate must reflect the current live schema to diff it against your models, so it needs to read the database; applying migrations offline with `--sql` only needs to emit DDL, which is static text. The two phases serve different masters: authoring (online, needs reflection) versus execution (can be offline for DBA handoff). This is why a shop with locked-down production still autogenerates against a dev database, then ships SQL to the DBA.
+
+</details>
+
+<details><summary><b>64.</b> What is the danger of running data migrations and schema migrations in the same step under load?</summary>
+
+A long-running data backfill inside a schema migration can hold locks or a transaction open for a long time, blocking the live loader and inflating apply time, and if it fails the whole migration may roll back. The mechanism is that DDL and bulk DML compete for the same locks and transaction. The safer pattern is to separate them: ship the additive DDL as one quick migration, then run the backfill as a batched, restartable operation.
+
+</details>
+
+<details><summary><b>65.</b> Why should a large backfill be done in batches rather than one big `UPDATE`?</summary>
+
+A single `UPDATE` over millions of rows takes a long lock, generates a huge transaction/WAL, and on failure rolls back everything, blocking the live loader the whole time. Batching (e.g. `UPDATE ... WHERE id BETWEEN ... LIMIT n`, looped) keeps each transaction short, lets the loader interleave, and makes the operation restartable from where it stopped. In a fund estate this is the difference between a quiet backfill and a stalled dealing window.
+
+</details>
+
+<details><summary><b>66.</b> In expand–contract, what is "dual-write" and where in the code does it live?</summary>
+
+Dual-write is application code in the expand phase that writes to both the old and the new column on every insert/update so they stay synchronized. It lives in the data-access layer of the application release that ships with or just after the expand migration. The alternative, a database trigger, moves the same responsibility into the schema, which is useful when you cannot change every writer.
+
+</details>
+
+<details><summary><b>67.</b> When is a database trigger preferable to application dual-write for keeping columns in sync?</summary>
+
+When there are multiple or out-of-band writers (other services, manual SQL, a legacy ETL) that you cannot all update to dual-write, a trigger guarantees synchronization regardless of who writes. The trigger fires on every `INSERT`/`UPDATE` and copies the value across, centralizing the logic in the database. The trade-off is that triggers are easy to forget about and must themselves be removed in the contract phase.
+
+</details>
+
+<details><summary><b>68.</b> What must the contract migration in a rename also clean up besides dropping the old column?</summary>
+
+It should remove any sync trigger or dual-write scaffolding added during expand, plus any temporary constraints, indexes, or defaults that existed only to support the transition. Leaving the trigger behind means it keeps firing against a now-dropped column and errors, or wastes work. The contract step is the cleanup step: it returns the schema to a clean single-column state.
+
+</details>
+
+<details><summary><b>69.</b> Why is "every migration backward-compatible" sometimes summarized as "additive-only during transitions"?</summary>
+
+Because additive changes — adding nullable columns, new tables, new indexes — never break code that does not yet know about them, whereas destructive changes (drop, rename, tighten constraint) do. Restricting in-flight migrations to additive operations is the simplest way to guarantee the running release keeps working. Destructive operations are deferred to contract steps that run only after the old code is gone.
+
+</details>
+
+<details><summary><b>70.</b> How does expand–contract let you avoid ever taking a maintenance window for a column rename?</summary>
+
+Because each of its steps — add column, sync, backfill, switch reads, drop column — is individually non-breaking for the currently running release, you never need a window where the system is offline. The system stays fully available and correct at every intermediate state, so the change is applied incrementally under live traffic. The cost is more steps and more deploys in exchange for zero downtime.
+
+</details>
+
+<details><summary><b>71.</b> What is the relationship between an Alembic `revision` id and a Flyway version number?</summary>
+
+Both identify a migration and encode ordering, but a Flyway version is a human-chosen, monotonically increasing number, while an Alembic revision is an opaque generated hash whose order comes from `down_revision` links, not the id itself. Flyway's ordering is explicit in the filename; Alembic's is explicit in the script's parent pointer. This is why Flyway forbids duplicate versions while Alembic instead manages branches and heads.
+
+</details>
+
+<details><summary><b>72.</b> If `flyway migrate` reports "0 migrations applied" but you added a new file, what is the likely cause?</summary>
+
+The most common causes are a misnamed file (single underscore instead of double, wrong prefix, or wrong extension) so Flyway ignores it, or the file sitting outside the configured `locations` directory. With `validateMigrationNaming` off, a misnamed file is silently skipped, which produces exactly this symptom. Check the filename pattern `V<n>__desc.sql` and the configured migration locations first.
+
+</details>
+
+<details><summary><b>73.</b> What does it mean that Flyway migrations are applied "transactionally", and what is the Postgres caveat?</summary>
+
+Flyway wraps each migration in a transaction where the database supports transactional DDL, so a failing migration rolls back cleanly rather than leaving the schema half-changed. Postgres does support transactional DDL, which is a real advantage. The caveat is statements like `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block, so such migrations need special handling or a non-transactional execution.
+
+</details>
+
+<details><summary><b>74.</b> Why can't `CREATE INDEX CONCURRENTLY` run inside a normal migration transaction in Postgres, and why use it anyway?</summary>
+
+`CREATE INDEX CONCURRENTLY` is specifically designed to build an index without taking a long write lock, and Postgres forbids it inside a transaction block because it manages its own commits across multiple phases. You use it precisely to avoid locking a hot table while indexing under live load. The migration must therefore be configured to run outside a transaction, which both Flyway and Alembic support via options.
+
+</details>
+
+<details><summary><b>75.</b> How would expand–contract handle splitting one column into two (e.g. a combined name into first/last)?</summary>
+
+Expand by adding the two new columns; dual-write or trigger to populate them on new writes; backfill by parsing existing values into the two columns; switch reads to the new columns; then contract by dropping the original. The backfill's parsing logic is the risky part and must be validated against edge cases (no last name, multiple spaces). As always the original column is dropped only after everything reads from the new ones.
+
+</details>
+
+<details><summary><b>76.</b> What is the role of asset checks or post-migration validation in a safe change?</summary>
+
+After a backfill or switch, an automated check (row counts, a NAV reconciliation, "no NULLs in the new column") confirms the change produced correct data before you proceed to the irreversible contract step. The mechanism is to gate progression on green checks, so a bad backfill is caught before the old column is dropped. This is the data-quality analogue of "DB before code" — verify before you contract.
+
+</details>
+
+<details><summary><b>77.</b> Why is it safer to deploy the expand migration well before the code that uses the new column?</summary>
+
+Because the additive migration is harmless to the old code, deploying it early de-risks the change: by the time the new code arrives, the schema is already in place and proven, so the code deploy carries no schema risk. It also gives you a clean checkpoint to halt at if something looks wrong. Bundling them tightly removes that safety margin and couples two independent risks.
+
+</details>
+
+<details><summary><b>78.</b> In Alembic, how do you express adding a column in the `upgrade()` function?</summary>
+
+With the operations object, e.g. `op.add_column('holdings', sa.Column('lei', sa.String(20), nullable=True))`. Alembic's `op` API abstracts the DDL across dialects, and the matching `downgrade()` would call `op.drop_column('holdings', 'lei')`. Keeping the new column nullable here is exactly the additive, backward-compatible expand step the pattern requires.
+
+</details>
+
+<details><summary><b>79.</b> What is the danger of editing a migration after it has been merged and applied in CI but before production?</summary>
+
+Production will compute a different checksum than what CI/staging recorded, so Flyway's validate fails there even though the schema looks fine — and environments now disagree about what `V_n` contains. The rule is that once a migration is applied anywhere shared, it is frozen; corrections go in a new migration. This is why fast-forward edits to "just fix a typo" in an applied migration cause environment-divergence incidents.
+
+</details>
+
+<details><summary><b>80.</b> How does the immutability of applied migrations support reproducibility across environments?</summary>
+
+Because every environment applies the identical, never-edited sequence of migrations in the same order, any database can be rebuilt to a known state purely by replaying its history. Checksums enforce that the scripts have not changed, so "the same migrations" really means the same bytes. This determinism is what lets dev, CI, staging, and prod be trusted to have equivalent schemas.
+
+</details>
+
+<details><summary><b>81.</b> What is the practical difference between `alembic downgrade -1` and writing a forward fix migration?</summary>
+
+`alembic downgrade -1` runs the previous revision's `downgrade()` to move the database back one step, useful in development; a forward fix is a brand-new revision that corrects state while leaving history intact, which is the production-preferred approach. Downgrade depends on a correct, tested `downgrade()` and can lose data; the forward fix is append-only and auditable. The two map exactly onto the down-path-for-dev vs roll-forward-for-prod distinction.
+
+</details>
+
+<details><summary><b>82.</b> Why might a `downgrade()` function be left unimplemented or raise in a production-focused shop?</summary>
+
+Because the team has committed to roll-forward and considers production down-migrations unsafe, so some teams deliberately make `downgrade()` raise `NotImplementedError` to prevent anyone running an untested revert in production. The signal is intentional: there is no supported down-path, only forward fixes plus backups. It is a documented stance, not laziness, and forces correct recovery behaviour.
+
+</details>
+
+<details><summary><b>83.</b> How do you generate the SQL for just the next pending Alembic migration to hand to a DBA?</summary>
+
+Find the current revision (`alembic current`), then run `alembic upgrade <current>:<next> --sql` (or `alembic upgrade +1 --sql`) to emit only that step's DDL as a script. The `--sql` flag puts Alembic in offline mode so it prints rather than executes. The DBA reviews and applies the script under change control, and afterwards the `alembic_version` row reflects the new head.
+
+</details>
+
+<details><summary><b>84.</b> What is the consequence of applying the contract step before all application instances have switched to the new column?</summary>
+
+Any instance still reading or writing the old column will error the instant it is dropped, causing failed transactions or loads until those instances are replaced. This is the exact failure expand–contract exists to prevent, and it happens when contract is rushed ahead of the code rollout. The rule is contract runs only after the entire fleet runs code that uses the new column exclusively.
+
+</details>
+
+<details><summary><b>85.</b> Why does Flyway store who applied each migration and when?</summary>
+
+To provide accountability and an audit trail: the `installed_by` and `installed_on` fields tell a change board exactly which user/account applied a change and at what time. In a regulated environment this provenance is mandatory evidence. It also helps incident response — you can correlate a schema change's timestamp with the onset of a problem.
+
+</details>
+
+<details><summary><b>86.</b> A migration partially failed and left a `success = false` row in `flyway_schema_history`. What now?</summary>
+
+Flyway will refuse to proceed because the failed migration blocks the version sequence; you fix the underlying problem, then run `flyway repair` to remove the failed row, then re-run `flyway migrate`. On databases without transactional DDL you may also need to manually undo partial effects before retrying. With Postgres's transactional DDL, the failed statement usually rolled back, so cleanup is mostly the history-table repair.
+
+</details>
+
+<details><summary><b>87.</b> How does expand–contract interact with NOT NULL and CHECK constraints you eventually want?</summary>
+
+You defer the strict constraint to a late step: add the column nullable, backfill and ensure all writers populate it, verify there are no violating rows, then add the `NOT NULL` or `CHECK` as a separate migration. Adding the constraint early would break inserts from old code or fail outright against existing NULLs. Tightening last keeps every intermediate state valid for the running release.
+
+</details>
+
+<details><summary><b>88.</b> Why is `ADD COLUMN ... DEFAULT` historically risky on large tables, and how is it mitigated?</summary>
+
+On older Postgres versions, adding a column with a non-null default rewrote the entire table to populate the default, taking a long lock — dangerous on a large hot table. Modern Postgres optimizes constant defaults to avoid the rewrite, but volatile defaults still rewrite. The mitigation, and the expand–contract way, is to add the column nullable, backfill in batches, then set the default/constraint separately so you control the locking.
+
+</details>
+
+<details><summary><b>89.</b> What is the "schema as code" idea and how do migration tools embody it?</summary>
+
+It is the principle that the database schema is defined and evolved through versioned, reviewed, tested artifacts in source control, exactly like application code. Migration tools embody it by making every change a checked-in script applied deterministically by the pipeline, with a history table as the audit log. This replaces hand-run `ALTER` statements and tribal knowledge with a reproducible, governed process.
+
+</details>
+
+<details><summary><b>90.</b> How would you reconcile a Flyway-managed schema against drift before a risky migration?</summary>
+
+Compare the live schema against the expected state — using a schema-diff tool (or Liquibase's drift detection in the enterprise tier) — and resolve any out-of-band changes before applying new migrations. The mechanism is to ensure the database actually matches what the history table implies, so the new migration runs against the assumed starting point. Skipping this is a classic cause of "it worked in staging but failed in prod."
+
+</details>
+
+<details><summary><b>91.</b> Why is it important that a migration to add an index does not block the loader, and how do you ensure that?</summary>
+
+A plain `CREATE INDEX` takes a lock that blocks writes to the table for the duration, which would stall the live loader on a large table. Using `CREATE INDEX CONCURRENTLY` builds the index without that write lock, at the cost of running outside a transaction and taking longer. Configuring the migration tool to run the statement non-transactionally is what makes the additive index change truly zero-impact.
+
+</details>
+
+<details><summary><b>92.</b> In the fund context, why is a mid-dealing-window schema break especially serious?</summary>
+
+During the dealing window the transfer-agency feed and NAV pipeline are actively processing subscriptions, redemptions, and prices, so a schema break causes failed loads exactly when timely, correct NAV depends on them. A delayed or wrong NAV has regulatory and investor-facing consequences, not just an engineering inconvenience. This stakes-raising is precisely why expand–contract and backward-compatible ordering are non-negotiable, not optional polish.
+
+</details>
+
+<details><summary><b>93.</b> How does the choice between Flyway and Alembic typically follow from the team's stack?</summary>
+
+A JVM or polyglot SQL-centric team usually picks Flyway because migrations are plain SQL files and it integrates cleanly with non-Python deploys; a Python/SQLAlchemy shop picks Alembic because it autogenerates from models and migrations are Python. Both deliver versioning, ordering, history, and offline SQL handoff. The lesson's lab has you standardize on one, with the concepts transferring directly to the other.
+
+</details>
+
+<details><summary><b>94.</b> What is the difference between Flyway's `clean` command and a migration, and why is `clean` dangerous?</summary>
+
+`flyway clean` drops all objects in the configured schemas, wiping the database back to empty — it is a development convenience, not a migration. It is dangerous because run against the wrong target it destroys everything, which is why Flyway lets you disable it via `cleanDisabled` in non-dev environments. In any shared or production-like environment `clean` should be turned off so an accidental invocation cannot wipe the schema.
+
+</details>
+
+<details><summary><b>95.</b> Why should `flyway clean` be disabled in production configuration?</summary>
+
+Because it irreversibly drops every object in the managed schemas, and a misconfigured connection string or a stray command could obliterate production data. Setting `cleanDisabled=true` makes Flyway refuse the command outright, removing the foot-gun. This is a standard safety control in regulated estates where no tool should be capable of one-command schema destruction.
+
+</details>
+
+<details><summary><b>96.</b> How does offline SQL generation support segregation of duties in a regulated shop?</summary>
+
+The developer authors and tests the migration and generates the SQL with `--sql` (Alembic) or Flyway's dry-run/script output, but a separate DBA reviews and executes it against production. This separates the person who designs the change from the person who applies it, satisfying segregation-of-duties controls. The generated, reviewable SQL artifact is the hand-off boundary between the two roles.
+
+</details>
+
+<details><summary><b>97.</b> What is the risk of an autogenerated migration silently dropping data through a detected "type change"?</summary>
+
+Autogenerate may render a type change as an `ALTER COLUMN ... TYPE` that the database implements as a lossy cast or even a drop-and-recreate, discarding data without warning. Because the diff sees only the desired end state, it cannot reason about safe conversion. You must review such operations and, where loss is possible, rewrite them as an explicit expand–contract with a controlled, verified backfill.
+
+</details>
+
+<details><summary><b>98.</b> How do you verify "zero failed loads" after a live expand–contract change?</summary>
+
+Inspect the loader's run logs/metrics across the entire change window for any errors, and confirm the loaded row counts and NAV reconciliations stayed green through V2, V3, and V4. Cross-check against `flyway_schema_history` timestamps to confirm the loads spanning each migration succeeded. Zero error rows plus matching reconciliations is the evidence the rename was genuinely zero-downtime.
+
+</details>
+
+<details><summary><b>99.</b> How does Flyway find migration scripts, and what is the `locations` setting?</summary>
+
+Flyway scans the directories (and classpath locations) listed in its `locations` configuration for files matching the migration naming pattern. If a migration appears not to run, a misconfigured `locations` pointing at the wrong folder is a common cause, alongside a misnamed file. In the lab you point `locations` at the `sql` directory holding your `V`/`R` scripts so Flyway picks them up deterministically.
+
+</details>
+
+<details><summary><b>100.</b> Summarize why expand–contract plus DB-before-code plus roll-forward together constitute "change management without drama".</summary>
+
+Expand–contract breaks a scary change into individually safe steps; DB-before-code with backward-compatible migrations sequences each step so the live system never sees an incompatible schema; roll-forward gives a tested, append-only recovery model backed by backups instead of untested down-scripts. The result is that even a destructive change like a column rename happens under live traffic with zero failed loads and a complete history-table audit trail. That combination is exactly what lets a regulated estate satisfy a change advisory board while keeping the dealing window open.
+
+</details>
