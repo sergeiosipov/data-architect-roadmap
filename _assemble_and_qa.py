@@ -45,8 +45,13 @@ results.append(("(b) all intra-document anchors resolve", not missing,
                 f"links={len(links)} targets={len(targets)} missing={sorted(missing) or 'none'}"))
 
 # (c) no two entries use the identical primary resource
+# supports both the legacy single-line "**Resource:**" and the expanded "**Resources:**" list
 resources = [re.sub(r"\s*\*Alternate.*$", "", r).rstrip(" .")
              for r in re.findall(r"^- \*\*Resource:\*\* (.+)$", doc, re.M)]
+for m in re.finditer(r"^- \*\*Resources:\*\*\s*\n((?:[ \t]+-.*\n?)+)", doc, re.M):
+    first = re.search(r"-\s*(?:\*\*)?\[([^\]]+)\]\([^)]+\)(?:\*\*)?([^\n]*)", m.group(1))
+    if first:
+        resources.append((first.group(1) + first.group(2)).split("—")[0].rstrip(" .*"))
 norm = {}
 for r in resources:
     norm.setdefault(r.strip().lower(), 0)
