@@ -12,7 +12,7 @@
       "mcp__Claude_Preview__preview_snapshot",
       "mcp__Claude_in_Chrome__tabs_context_mcp",
       "Bash(cat *)",
-      "Bash(uv run python *)",
+      "Bash(uv run *)",
       "Write",
       "Edit",
       "MultiEdit",
