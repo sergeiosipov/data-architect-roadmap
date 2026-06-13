@@ -84,3 +84,12 @@ textarea { min-height: 84px; resize: vertical; }
 .back { display: inline-block; color: var(--accent); text-decoration: none; margin-bottom: 10px; font-size: 14px; }
 .sessions { font-size: 12.5px; color: var(--dim); margin-top: 8px; }
 .phase-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+details.quiz { margin-top: 14px; border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px 12px; background: var(--panel2); }
+details.quiz > summary { font-weight: 700; color: var(--accent); cursor: pointer; }
+details.quiz[open] > summary { margin-bottom: 8px; }
+details.q { border-top: 1px solid #2d3640; padding: 9px 2px; }
+details.q:first-of-type { border-top: 0; }
+details.q > summary { cursor: pointer; font-weight: 600; font-size: 14.5px; }
+details.q[open] > summary { color: var(--accent); }
+details.q .a { margin: 7px 0 2px; padding-left: 14px; border-left: 2px solid var(--green); color: var(--text); font-size: 14px; }
+details.q code, details.quiz code { background: var(--bg); }

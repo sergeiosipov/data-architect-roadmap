@@ -3,7 +3,8 @@
 A four-year, from-zero study plan to top-tier **Data Architect (financial services / fund industry, Luxembourg)** — plus a mobile **Study Tracker** app with per-topic timers and free cross-device sync.
 
 - **[STUDY_PLAN.md](STUDY_PLAN.md)** — the complete plan: Phase 0 (computing foundations, every module with a skip test) → Phase 8 (data products & architect practice). 252 taxonomy topics + 31 gap additions, 1,100 h planned against a 1,152 h budget.
-- **[docs/](docs/)** — the tracker app (static PWA, no backend): 169 study items, each a page with its content, a start/stop timer, status, journal, skip-test bank, and hours-vs-budget dashboards.
+- **[docs/](docs/)** — the tracker app (static PWA, no backend): 169 study items, each a page with its content, a start/stop timer, status, journal, skip-test bank, and hours-vs-budget dashboards. Each Phase-0 lesson also carries a **100-question self-test** (collapsible spoilers — tap a question to reveal its answer).
+- **[QUIZZES.md](QUIZZES.md)** — the same 1,200 Phase-0 self-test questions (100 per lesson) as a GitHub-readable file with collapsible answers. Generated from `_quizzes/` by `uv run _build_tracker.py`.
 
 ---
 

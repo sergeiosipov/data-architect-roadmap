@@ -218,6 +218,36 @@ def finalize(html: str, link_names: bool = True) -> str:
     return html
 
 
+# ---------------------------------------------------------------- Phase-0 quizzes
+QUIZ_DIR = root / "_quizzes"
+QUIZ_IDS = [f"0.{i}" for i in range(1, 13)]
+
+
+def _inline_code(s: str) -> str:
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+
+
+def parse_quiz(path: Path):
+    pairs, q = [], None
+    for line in path.read_text(encoding="utf-8").split("\n"):
+        if line.startswith("Q:"):
+            q = line[2:].strip()
+        elif line.startswith("A:") and q is not None:
+            pairs.append((q, line[2:].strip()))
+            q = None
+    return pairs
+
+
+def quiz_html(pairs) -> str:
+    inner = "".join(
+        f'<details class="q"><summary><b>{i}.</b> {_inline_code(q)}</summary>'
+        f'<div class="a">{_inline_code(a)}</div></details>'
+        for i, (q, a) in enumerate(pairs, 1))
+    return ('<details class="quiz"><summary>\U0001F4DD Self-test — '
+            f'{len(pairs)} questions (tap one to reveal its answer)</summary>{inner}</details>')
+
+
 # ---------------------------------------------------------------- Appendix A rows
 a_items = {}
 for line in (parts / "10-appendix-a.md").read_text(encoding="utf-8").splitlines():
@@ -258,8 +288,17 @@ for fname in PHASE_FILES:
             raise SystemExit(f"{fname}: no hours in entry '{heading}'")
         key = "e-" + (ids[0] if ids else re.sub(r"\W+", "-", heading.lower())[:24])
         clean_title = re.sub(r"—\s*T[123](?:/T[123])?\s*$", "", heading).strip(" —")
+        body_html = finalize(md2html(body.strip()))
+        nq = 0
+        if n == 0 and ids:
+            qp = QUIZ_DIR / f"{ids[0]}.md"
+            if qp.exists():
+                qpairs = parse_quiz(qp)
+                if qpairs:
+                    body_html += quiz_html(qpairs)
+                    nq = len(qpairs)
         items.append({"key": key, "title": clean_title, "ids": ids, "tier": tier or "T2",
-                      "est": est, "kind": "entry", "html": finalize(md2html(body.strip()))})
+                      "est": est, "kind": "entry", "quiz": nq, "html": body_html})
 
     t3 = re.search(r"^### T3 awareness topics\n((?:(?!^### ).*\n?)*)", text, re.M)
     if t3:
@@ -324,3 +363,23 @@ data = {"version": 2, "budgetH": 1152, "fullH": round(total_est, 1),
 js = "window.PLAN = " + json.dumps(data, ensure_ascii=False) + ";"
 (out_dir / "data.js").write_text(js, encoding="utf-8")
 print(f"wrote docs/data.js ({len(js) // 1024} KB)")
+
+# ---------------------------------------------------------------- QUIZZES.md (GitHub-readable)
+qz = ["# Phase 0 — Self-test Question Banks\n",
+      "100 questions per foundation lesson. Click a question to reveal its answer. "
+      "These also appear inside each lesson in the [tracker app](https://sergeiosipov.github.io/data-architect-roadmap/).\n"]
+qtotal = 0
+for qid in QUIZ_IDS:
+    p = QUIZ_DIR / f"{qid}.md"
+    if not p.exists():
+        continue
+    lines = p.read_text(encoding="utf-8").split("\n")
+    title = next((ln.lstrip("# ").strip() for ln in lines if ln.startswith("#")), f"Phase 0 · {qid}")
+    pairs = parse_quiz(p)
+    qtotal += len(pairs)
+    qz.append(f"\n## {title}\n")
+    for i, (q, a) in enumerate(pairs, 1):
+        qz.append(f"<details><summary><b>{i}.</b> {q}</summary>\n\n{a}\n\n</details>\n")
+(root / "QUIZZES.md").write_text("\n".join(qz), encoding="utf-8")
+print(f"wrote QUIZZES.md ({qtotal} questions across "
+      f"{sum(1 for q in QUIZ_IDS if (QUIZ_DIR / f'{q}.md').exists())} lessons)")
