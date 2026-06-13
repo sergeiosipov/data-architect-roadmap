@@ -17,21 +17,21 @@ WSL2 (Windows Subsystem for Linux 2) runs a real Linux kernel in a lightweight V
 
 </details>
 
-<details><summary><b>3.</b> How do you check which WSL version a distribution is using?</summary>
+<details><summary><b>3.</b> How do you check your Ubuntu version and release codename?</summary>
 
-Run `wsl -l -v` (list verbose) in PowerShell; the `VERSION` column shows `1` or `2` for each installed distribution.
-
-</details>
-
-<details><summary><b>4.</b> Inside WSL2, where do you find your Windows `C:` drive?</summary>
-
-It is mounted under `/mnt/c`, so `C:\Users\senio` is `/mnt/c/Users/senio` from the Linux side.
+`lsb_release -a` shows the distributor, release number and codename; `cat /etc/os-release` is the file-based equivalent that scripts read.
 
 </details>
 
-<details><summary><b>5.</b> Why is it faster to keep project files in the Linux filesystem (`/home`) rather than `/mnt/c` under WSL2?</summary>
+<details><summary><b>4.</b> How do you list mounted filesystems and how much free space each has?</summary>
 
-Cross-filesystem access between the Linux VM and Windows (`/mnt/c`) has high I/O overhead, so reading/writing many files (e.g. a folder of EMT files) is much slower than working under the native Linux ext4 filesystem.
+`df -h` lists every mounted filesystem with human-readable sizes; your home directory normally lives on the root (`/`) ext4 filesystem.
+
+</details>
+
+<details><summary><b>5.</b> On Windows/WSL2 (awareness), why keep project files under `~` (ext4) rather than `/mnt/c`?</summary>
+
+Cross-filesystem access between the WSL Linux VM and the Windows drive (`/mnt/c`) has high I/O overhead, so reading/writing many files (e.g. a folder of EMT files) is much slower than working on the native ext4 filesystem — on a native Ubuntu laptop this penalty does not exist.
 
 </details>
 
@@ -5432,603 +5432,603 @@ pandas inferred it as a numeric dtype and dropped leading zeros; force it to tex
 
 ## Phase 0 · 0.10 Editor & IDE setup (VS Code) — 100 self-test questions
 
-<details><summary><b>1.</b> What is a "workspace" in VS Code?</summary>
+<details><summary><b>1.</b> What is VS Code?</summary>
+
+A free, cross-platform code editor from Microsoft that runs natively on Ubuntu and gains language support, debugging, and tooling through installable extensions.
+
+</details>
+
+<details><summary><b>2.</b> How do you install VS Code on Ubuntu using the `.deb` package?</summary>
+
+Download the `.deb` from the official site and install it with `sudo apt install ./code_*.deb`, which also registers Microsoft's apt repository so future updates arrive through `apt upgrade`.
+
+</details>
+
+<details><summary><b>3.</b> How do you install VS Code on Ubuntu via Snap?</summary>
+
+Run `sudo snap install code --classic`; the `--classic` flag is required because the editor needs broad filesystem and tool access that strict snap confinement would block.
+
+</details>
+
+<details><summary><b>4.</b> What is the difference between the `.deb` and Snap installs of VS Code on Ubuntu?</summary>
+
+The `.deb` integrates with apt and tends to start faster, while the Snap is sandboxed and self-updating; both give the same editor, so pick whichever fits how you manage software on your machine.
+
+</details>
+
+<details><summary><b>5.</b> What does the `code` command do from an Ubuntu terminal?</summary>
+
+It launches VS Code; `code .` opens the current directory as a workspace, and `code myfile.py` opens a single file in the running window.
+
+</details>
+
+<details><summary><b>6.</b> What is a "workspace" in VS Code?</summary>
 
 The project context VS Code opens — usually a single root folder (or a multi-root `.code-workspace` file) — that scopes the file explorer, search, settings, and recommended extensions to that project.
 
 </details>
 
-<details><summary><b>2.</b> What is the difference between User settings and Workspace settings in VS Code?</summary>
+<details><summary><b>7.</b> How do you open a project folder as a workspace from the terminal?</summary>
 
-User settings apply globally to every project for your account, while Workspace settings live in `.vscode/settings.json` in the project folder and override User settings only for that project.
+From inside the project directory run `code .`, or run `code /path/to/project` from anywhere to open that folder.
 
 </details>
 
-<details><summary><b>3.</b> Where are project-scoped VS Code settings stored on disk?</summary>
+<details><summary><b>8.</b> What is a multi-root workspace?</summary>
+
+A workspace defined by a `.code-workspace` file that holds several top-level folders at once, useful when one task spans separate repositories like a loader repo and a shared library.
+
+</details>
+
+<details><summary><b>9.</b> Where does VS Code store per-project settings on disk?</summary>
 
 In a `.vscode/settings.json` file at the root of the workspace folder.
 
 </details>
 
-<details><summary><b>4.</b> Why commit a `.vscode/settings.json` to a team repo like `fundcli`?</summary>
+<details><summary><b>10.</b> What is the difference between User settings and Workspace settings?</summary>
+
+User settings apply globally to every project for your account, while Workspace settings live in `.vscode/settings.json` in the project folder and override User settings only for that project.
+
+</details>
+
+<details><summary><b>11.</b> Why commit a `.vscode/settings.json` to a team repo like `fundcli`?</summary>
 
 So everyone gets the same interpreter, formatter, and lint behaviour — a NAV loader formatted and linted identically on every machine avoids "works on my editor" diffs.
 
 </details>
 
-<details><summary><b>5.</b> How do you open the integrated terminal in VS Code?</summary>
+<details><summary><b>12.</b> What shell does the integrated terminal run on Ubuntu by default?</summary>
 
-Use the Terminal menu, the keybinding Ctrl+backtick, or the command palette command `Terminal: Create New Terminal`.
+It launches your default login shell, which on a standard Ubuntu install is `bash`, opened in the workspace folder.
 
 </details>
 
-<details><summary><b>6.</b> What working directory does a new integrated terminal open in by default?</summary>
+<details><summary><b>13.</b> How do you open the integrated terminal in VS Code on Ubuntu?</summary>
 
-The root folder of the current workspace, so relative paths in your commands resolve against the project you have open.
+Use the Terminal menu, the `Ctrl+backtick` keybinding, or the command palette command `Terminal: Create New Terminal`; on Ubuntu it opens a `bash` session in the workspace folder.
 
 </details>
 
-<details><summary><b>7.</b> Why is the integrated terminal preferable to a separate terminal window for this course?</summary>
+<details><summary><b>14.</b> How do you run a second terminal alongside the first inside VS Code?</summary>
 
-It shares the workspace's folder, environment, and (over WSL) the same filesystem as the editor, so edit-run-debug stays in one window with no context switching.
+Click the `+` in the terminal panel or run `Terminal: Create New Terminal`; you can split the active terminal side by side with `Ctrl+Shift+5`.
 
 </details>
 
-<details><summary><b>8.</b> How do you run several shells side by side in the integrated terminal?</summary>
+<details><summary><b>15.</b> Why does running `uv run pytest` in the integrated terminal behave the same as in a standalone terminal?</summary>
 
-Split the terminal (the split icon or "Terminal: Split Terminal"), or open additional terminals from the dropdown — useful for running a loader in one pane and `tail`-ing its log in another.
+The integrated terminal is a real `bash` session inheriting your environment, so any command that works in a normal Ubuntu terminal works identically here.
 
 </details>
 
-<details><summary><b>9.</b> What is the VS Code command palette and how do you open it?</summary>
+<details><summary><b>16.</b> What is the VS Code command palette and how do you open it?</summary>
 
-A fuzzy-searchable launcher for every command, opened with `Ctrl+Shift+P` (or `F1`); type part of a command name to find and run it without menus.
+A keyboard-driven menu for running any command by name, opened with `Ctrl+Shift+P`; almost every action in the editor is reachable through it.
 
 </details>
 
-<details><summary><b>10.</b> How does the command palette differ from "Quick Open" (`Ctrl+P`)?</summary>
+<details><summary><b>17.</b> What does Quick Open (`Ctrl+P`) do?</summary>
 
-`Ctrl+P` jumps to files by name, while `Ctrl+Shift+P` runs commands; typing `>` in Quick Open switches it into command mode.
+It lets you jump to any file in the workspace by typing part of its name, making file navigation fast without using the explorer.
 
 </details>
 
-<details><summary><b>11.</b> What does "Remote - WSL" (now part of the WSL extension) let you do?</summary>
+<details><summary><b>18.</b> What does Go to Definition (`F12`) do?</summary>
 
-Run VS Code's UI on Windows while the language server, terminal, extensions, and file access all execute inside your WSL2 Linux distro.
+It jumps from a symbol under the cursor to where that function, class, or variable is defined, even across files in the project.
 
 </details>
 
-<details><summary><b>12.</b> In a WSL-attached window, where does the integrated terminal's shell actually run?</summary>
+<details><summary><b>19.</b> What does Rename Symbol (`F2`) do?</summary>
 
-Inside the Linux distro (e.g. Ubuntu) — it is a `bash`/`zsh` session in WSL, not Windows PowerShell or CMD.
+It renames the symbol under the cursor and updates every reference to it across the project in one operation, instead of you doing a risky find-and-replace.
 
 </details>
 
-<details><summary><b>13.</b> How can you tell a VS Code window is connected to WSL?</summary>
+<details><summary><b>20.</b> How is `F2` rename safer than a plain text find-and-replace?</summary>
 
-The green remote indicator in the bottom-left status bar shows something like `WSL: Ubuntu`.
+It uses the language server's understanding of scope, so it renames only the actual symbol references and skips unrelated text that happens to share the name.
 
 </details>
 
-<details><summary><b>14.</b> Why open your `fundcli` repo via the WSL remote rather than from the Windows path?</summary>
+<details><summary><b>21.</b> What is multi-cursor editing?</summary>
 
-So the editor, terminal, and Python interpreter all sit on the Linux filesystem your lab uses — avoiding line-ending, permission, and `\\wsl$` performance problems.
+Placing several insertion points at once so the same edit happens in multiple places simultaneously, for example adding a prefix to many lines.
 
 </details>
 
-<details><summary><b>15.</b> What command opens the current WSL directory in VS Code from a WSL terminal?</summary>
+<details><summary><b>22.</b> How do you add a cursor on the next occurrence of the current selection?</summary>
 
-`code .` — the WSL extension wires up the `code` command inside the distro.
+Press `Ctrl+D` to select and add a cursor at the next matching occurrence; repeat to keep adding.
 
 </details>
 
-<details><summary><b>16.</b> Why is keeping project files under `~/` in WSL faster than under `/mnt/c/...`?</summary>
+<details><summary><b>23.</b> How do you add cursors above or below the current line?</summary>
 
-Files on the native Linux ext4 filesystem (`~`) avoid the cross-OS filesystem translation layer that makes `/mnt/c` Windows-drive access slow.
+Press `Ctrl+Alt+Up` or `Ctrl+Alt+Down` to stack a cursor on the adjacent line.
 
 </details>
 
-<details><summary><b>17.</b> When VS Code is attached to WSL, where do extensions install?</summary>
+<details><summary><b>24.</b> What is the Extensions view and how do you open it?</summary>
 
-Extensions split into "UI" extensions that stay on the Windows side and "Workspace" extensions (like Python) that install into the WSL distro and must be enabled there per-distro.
+The panel for searching, installing, and managing extensions, opened with `Ctrl+Shift+X` or from the activity bar.
 
 </details>
 
-<details><summary><b>18.</b> You open a folder under `/mnt/c/Users/...` in a WSL window and Python is slow to index — what is the likely cause?</summary>
+<details><summary><b>25.</b> What does the Python extension add to VS Code?</summary>
 
-The files live on the Windows drive accessed through `/mnt/c`, so every read crosses the WSL filesystem boundary; move the repo into the Linux home directory.
+It provides Python language support — interpreter selection, IntelliSense via Pylance, debugging, test discovery, and the environment picker in the status bar.
 
 </details>
 
-<details><summary><b>19.</b> What does the Python extension (Microsoft) add to VS Code?</summary>
+<details><summary><b>26.</b> What is Pylance?</summary>
 
-IntelliSense/completions, interpreter and environment selection, the run/debug experience, test discovery, and integration with linters and formatters via Pylance.
+The fast language server bundled with the Python extension that supplies code completion, type checking, hover information, and go-to-definition for Python.
 
 </details>
 
-<details><summary><b>20.</b> What is Pylance?</summary>
+<details><summary><b>27.</b> What does the Ruff extension add?</summary>
 
-The Python language server that powers VS Code's completions, type-checking hints, hovers, and go-to-definition; it ships with the Python extension.
+It integrates the Ruff linter and formatter into the editor, showing lint diagnostics inline and formatting files on save when configured.
 
 </details>
 
-<details><summary><b>21.</b> How do you choose which Python interpreter VS Code uses for a project?</summary>
+<details><summary><b>28.</b> What does the Jupyter extension add?</summary>
 
-Run "Python: Select Interpreter" from the command palette and pick the environment (e.g. the project's `.venv`).
+It lets you create and run `.ipynb` notebooks inside VS Code, connecting to Jupyter kernels and rendering cell output in the editor.
 
 </details>
 
-<details><summary><b>22.</b> Why must VS Code point at the project's `.venv` for a `uv`-managed repo?</summary>
+<details><summary><b>29.</b> What does the Docker extension add?</summary>
 
-So completions, debugging, and the integrated terminal use the same locked dependencies as `uv run`, instead of a system Python missing your packages.
+It gives a sidebar view of images, containers, and registries plus commands to build, run, and inspect containers, with syntax help for `Dockerfile` and `compose.yaml`.
 
 </details>
 
-<details><summary><b>23.</b> How does VS Code usually find a `uv`-created virtual environment automatically?</summary>
+<details><summary><b>30.</b> How do you install an extension from the command line?</summary>
 
-It detects the `.venv` folder in the workspace root and offers it as the recommended interpreter.
+Run `code --install-extension <publisher.name>`, for example `code --install-extension charliermarsh.ruff`.
 
 </details>
 
-<details><summary><b>24.</b> What does the Ruff extension do in VS Code?</summary>
+<details><summary><b>31.</b> What is the difference between installing and enabling an extension?</summary>
 
-It runs the Ruff linter (and formatter) to surface lint diagnostics inline and can auto-fix and format Python on save.
+Installing downloads the extension to your machine, while enabling activates it; you can keep an extension installed but disabled globally or just for one workspace.
 
 </details>
 
-<details><summary><b>25.</b> How do you make Ruff format and fix a file every time you save?</summary>
+<details><summary><b>32.</b> Why might you disable an extension for a single workspace?</summary>
 
-Set `editor.formatOnSave` true with Ruff as the default formatter, and enable `source.fixAll`/`source.organizeImports` code actions on save in settings.
+To keep a heavy or noisy extension out of projects that do not need it while leaving it active elsewhere, using the per-workspace Disable option in the Extensions view.
 
 </details>
 
-<details><summary><b>26.</b> Why wire Ruff into the editor in Phase 0 rather than only running it in CI later?</summary>
+<details><summary><b>33.</b> What is an interpreter in the context of the Python extension?</summary>
 
-So style and obvious errors are caught and fixed as you type a transfer-agency parser, not flagged hours later in a CI run.
+The specific `python` executable VS Code uses for IntelliSense, running, and debugging — typically the one inside your project's virtual environment.
 
 </details>
 
-<details><summary><b>27.</b> What does the Jupyter extension add to VS Code?</summary>
+<details><summary><b>34.</b> How do you select the Python interpreter for a workspace?</summary>
 
-The ability to open, edit, and run `.ipynb` notebooks and interactive windows directly inside the editor, with a built-in kernel picker and variable explorer.
+Run `Python: Select Interpreter` from the command palette and pick the desired environment, or click the interpreter shown in the status bar.
 
 </details>
 
-<details><summary><b>28.</b> What does the Docker extension (Container Tools) add?</summary>
+<details><summary><b>35.</b> Where does this course's virtual environment live, and what creates it?</summary>
 
-A side panel to view images, containers, volumes, and registries, plus commands to build, run, and attach to containers and edit Dockerfiles with completions.
+In a `.venv` folder at the project root, created by `uv`; commands are run through `uv run` so the right environment is always used.
 
 </details>
 
-<details><summary><b>29.</b> Which four extensions does this lesson have you install for the `fundcli` setup?</summary>
+<details><summary><b>36.</b> How do you point VS Code at the `.venv` that `uv` created?</summary>
 
-WSL, Python, Ruff, Jupyter, and Docker (the WSL extension plus the four toolchain extensions).
+Run `Python: Select Interpreter` and choose `./.venv/bin/python`; VS Code usually lists it automatically once the folder exists.
 
 </details>
 
-<details><summary><b>30.</b> What is the `.vscode/extensions.json` file for?</summary>
+<details><summary><b>37.</b> Why does this course run Python via `uv run` rather than activating the venv?</summary>
 
-It lists recommended extensions for the workspace so collaborators get prompted to install the same toolset when they open the repo.
+`uv run` resolves and uses the project environment automatically for each command, so you avoid forgetting to activate and you always run against the locked dependencies.
 
 </details>
 
-<details><summary><b>31.</b> What is a breakpoint in a debugger?</summary>
+<details><summary><b>38.</b> What is the Run and Debug panel?</summary>
 
-A marker on a line that pauses program execution when reached, so you can inspect state at that exact point instead of guessing.
+The sidebar view, opened with `Ctrl+Shift+D`, where you start debug sessions, see call stacks, variables, watches, and breakpoints, and pick a debug configuration.
 
 </details>
 
-<details><summary><b>32.</b> How do you set a breakpoint in VS Code?</summary>
+<details><summary><b>39.</b> What is a breakpoint?</summary>
 
-Click in the gutter to the left of a line number (a red dot appears) or press `F9` with the cursor on the line.
+A marker on a line that pauses execution there when the debugger reaches it, so you can inspect the program's state at that moment.
 
 </details>
 
-<details><summary><b>33.</b> Why is breakpoint debugging preferred over print-debugging a reconciliation script?</summary>
+<details><summary><b>40.</b> How do you set or toggle a breakpoint on a line?</summary>
 
-A breakpoint lets you inspect every variable live and step through logic in minutes, whereas adding/removing prints is slow, noisy, and easy to leave behind.
+Click in the gutter to the left of the line number, or put the cursor on the line and press `F9`.
 
 </details>
 
-<details><summary><b>34.</b> What does the "Step Over" action do, and what is its default key?</summary>
+<details><summary><b>41.</b> What does Step Over (`F10`) do during debugging?</summary>
 
-It executes the current line and stops on the next line in the same function without descending into called functions; default `F10`.
+It executes the current line fully — including any function it calls — and stops on the next line in the same function.
 
 </details>
 
-<details><summary><b>35.</b> What does "Step Into" do, and its default key?</summary>
+<details><summary><b>42.</b> What does Step Into (`F11`) do?</summary>
 
-It descends into the function called on the current line so you can debug inside it; default `F11`.
+It descends into the function called on the current line so you can debug that function's body line by line.
 
 </details>
 
-<details><summary><b>36.</b> What does "Step Out" do, and its default key?</summary>
+<details><summary><b>43.</b> What does Step Out (`Shift+F11`) do?</summary>
 
-It finishes the current function and returns to the caller, stopping at the line after the call; default `Shift+F11`.
+It runs the rest of the current function and pauses again at the line that called it.
 
 </details>
 
-<details><summary><b>37.</b> What does "Continue" do, and its default key?</summary>
+<details><summary><b>44.</b> What does Continue (`F5`) do while paused?</summary>
 
-It resumes execution until the next breakpoint (or the program ends); default `F5`.
+It resumes running until the next breakpoint is hit or the program ends.
 
 </details>
 
-<details><summary><b>38.</b> How do you inspect a variable's current value while paused at a breakpoint?</summary>
+<details><summary><b>45.</b> How do you inspect a variable's value while paused at a breakpoint?</summary>
 
-Read it in the VARIABLES panel, hover over the identifier in the editor, or evaluate it in the DEBUG CONSOLE.
+Read it in the Variables pane of the Run and Debug panel, or hover the variable in the editor to see its current value.
 
 </details>
 
-<details><summary><b>39.</b> What is the DEBUG CONSOLE used for during a paused session?</summary>
+<details><summary><b>46.</b> What is a watch expression?</summary>
 
-To evaluate arbitrary expressions in the current frame — e.g. type `len(funds)` or `nav.quantize('0.0001')` to test a fix before editing code.
+An expression you add to the Watch pane that the debugger re-evaluates each time execution pauses, so you can track a computed value like `nav / shares` across steps.
 
 </details>
 
-<details><summary><b>40.</b> What is a "watch" expression in the debugger?</summary>
+<details><summary><b>47.</b> What is a conditional breakpoint?</summary>
 
-An expression you pin in the WATCH panel that VS Code re-evaluates and displays each time execution pauses, so you can monitor a value as you step.
+A breakpoint that only pauses when a condition you supply evaluates to true, for example `isin == "LU0123456789"`, so you skip irrelevant iterations.
 
 </details>
 
-<details><summary><b>41.</b> When debugging a currency filter that drops the wrong rows, what would you put in a watch?</summary>
+<details><summary><b>48.</b> How do you create a conditional breakpoint?</summary>
 
-Something like `row['currency']` or `len(filtered)` so you can see exactly which value the comparison is testing on each iteration.
+Right-click the gutter and choose Add Conditional Breakpoint, or right-click an existing breakpoint and choose Edit Breakpoint, then type the condition.
 
 </details>
 
-<details><summary><b>42.</b> What is the CALL STACK panel?</summary>
+<details><summary><b>49.</b> What is a logpoint?</summary>
 
-It shows the chain of active function calls that led to the paused line, so you can click up the stack to inspect each caller's local variables.
+A breakpoint variant that logs a message to the Debug Console instead of pausing, letting you trace values without stopping or editing the code with print statements.
 
 </details>
 
-<details><summary><b>43.</b> What is a conditional breakpoint and when is it useful?</summary>
+<details><summary><b>50.</b> How do you add a logpoint?</summary>
 
-A breakpoint that only triggers when an expression is true (e.g. `isin == 'LU0000000000'`), so you pause only on the problem fund instead of every row.
+Right-click the gutter, choose Add Logpoint, and enter a message; wrap expressions in curly braces, for example `row={row} nav={nav}`.
 
 </details>
 
-<details><summary><b>44.</b> How do you set a conditional breakpoint?</summary>
+<details><summary><b>51.</b> Why is a logpoint often better than adding a temporary `print`?</summary>
 
-Right-click the breakpoint (or the gutter) and choose "Edit Breakpoint", then enter the condition expression.
+It produces no code change, so there is nothing to forget and remove later and no risk of committing stray debug output.
 
 </details>
 
-<details><summary><b>45.</b> What is a logpoint?</summary>
+<details><summary><b>52.</b> What is `launch.json` and where does it live?</summary>
 
-A breakpoint variant that logs a message (with embedded expressions) to the debug console instead of pausing — a structured replacement for `print` that you don't have to delete.
+A file in `.vscode/launch.json` that defines named debug configurations — what to run, with which arguments, environment, and interpreter — for the Run and Debug panel.
 
 </details>
 
-<details><summary><b>46.</b> What file configures how VS Code launches the debugger?</summary>
+<details><summary><b>53.</b> How do you create an initial `launch.json`?</summary>
 
-`.vscode/launch.json`, which defines debug configurations (program, arguments, environment, interpreter).
+In the Run and Debug panel click "create a launch.json file" and pick a Python configuration; VS Code scaffolds the file for you to edit.
 
 </details>
 
-<details><summary><b>47.</b> How can you start debugging the current Python file without writing a `launch.json`?</summary>
+<details><summary><b>54.</b> How do you pass command-line arguments to a program in `launch.json`?</summary>
 
-Use the Run and Debug panel's "Python File" configuration, or the "Python Debugger: Debug Python File" command.
+Set the `"args"` array in the configuration, for example `"args": ["--date", "2026-06-12"]` to feed a NAV loader its run date.
 
 </details>
 
-<details><summary><b>48.</b> How do you pass command-line arguments to your script when debugging?</summary>
+<details><summary><b>55.</b> How can a `launch.json` configuration set environment variables for the debugged process?</summary>
 
-Add an `"args"` array to the configuration in `launch.json`, e.g. `"args": ["--currency", "EUR", "navs.csv"]`.
+Use the `"env"` object to define variables, or point `"envFile"` at a `.env` file whose contents are loaded before the program starts.
 
 </details>
 
-<details><summary><b>49.</b> Your breakpoint shows as a hollow grey circle and never hits — what does that mean?</summary>
+<details><summary><b>56.</b> You set a breakpoint in a NAV filter that should drop rows with a null ISIN, but it never pauses — what is the first thing to check?</summary>
 
-VS Code couldn't bind it: the code path didn't run, the file isn't the one actually executing, or the debugger is attached to a different interpreter/environment.
+Confirm that branch actually runs with your input; if no row has a null ISIN, the line is never reached, so add a logpoint earlier or feed test data that triggers the condition.
 
 </details>
 
-<details><summary><b>50.</b> The debugger runs but uses the wrong packages — first thing to check?</summary>
+<details><summary><b>57.</b> A conditional breakpoint `nav < 0` in your pricing loop never fires — what should you verify first?</summary>
 
-Confirm "Python: Select Interpreter" points at the project `.venv`; a mismatched interpreter is the usual cause of import or version surprises.
+Check the expression evaluates as you expect against the real data types, since a string `"-1.5"` is not less than the integer `0`; cast or compare correctly.
 
 </details>
 
-<details><summary><b>51.</b> How do you stop a debugging session?</summary>
+<details><summary><b>58.</b> In a transfer-agency loader you want to stop only on the row for one investor account — how do you avoid stepping through thousands of rows?</summary>
 
-Press the stop button in the debug toolbar or `Shift+F5` ("Stop").
+Set a conditional breakpoint such as `account_id == "TA000457"` so execution pauses only on the iteration you care about.
 
 </details>
 
-<details><summary><b>52.</b> What does "Restart" do in the debug toolbar?</summary>
+<details><summary><b>59.</b> What is the Source Control panel?</summary>
 
-It stops and relaunches the program with the same configuration; default `Ctrl+Shift+F5`.
+The sidebar view, opened with `Ctrl+Shift+G`, that shows changed files, lets you stage and unstage changes, write commit messages, and run common Git actions.
 
 </details>
 
-<details><summary><b>53.</b> What is the value of "keyboard-first" habits in an editor?</summary>
+<details><summary><b>60.</b> How do you stage a changed file in the Source Control panel?</summary>
 
-Keeping hands on the keyboard removes the constant mouse round-trips that tax every edit; a dozen well-drilled bindings save far more time than memorising a hundred.
+Hover the file under Changes and click the `+` (Stage Changes) icon to move it into Staged Changes.
 
 </details>
 
-<details><summary><b>54.</b> What does "Go to Definition" do and what is its default key?</summary>
+<details><summary><b>61.</b> How do you commit staged changes in VS Code?</summary>
 
-It jumps to where a symbol is defined; press `F12` with the cursor on the identifier (or `Ctrl+Click` it).
+Type a message in the Source Control input box and press `Ctrl+Enter`, or click the commit checkmark.
 
 </details>
 
-<details><summary><b>55.</b> What does "Peek Definition" do?</summary>
+<details><summary><b>62.</b> What is a "task" in VS Code?</summary>
 
-It shows the definition inline in a small embedded window without leaving your current file; default `Alt+F12`.
+A defined command — like a build, test, or lint run — configured in `.vscode/tasks.json` and launchable from the command palette so you do not retype it.
 
 </details>
 
-<details><summary><b>56.</b> What is "Go to References" and its key?</summary>
+<details><summary><b>63.</b> How do you run a configured task?</summary>
 
-It lists every place a symbol is used across the project; default `Shift+F12`.
+Run `Tasks: Run Task` from the command palette and pick the task, or bind the default build task to `Ctrl+Shift+B`.
 
 </details>
 
-<details><summary><b>57.</b> How do you jump back to where you were after a Go to Definition jump?</summary>
+<details><summary><b>64.</b> Write a tasks.json command that runs this course's tests through `uv`.</summary>
 
-Use "Go Back", `Alt+Left` (and `Alt+Right` to go forward again).
+Define a task with `"command": "uv"` and `"args": ["run", "pytest"]`, which executes `uv run pytest` in the integrated terminal when launched.
 
 </details>
 
-<details><summary><b>58.</b> What is multi-cursor editing?</summary>
+<details><summary><b>65.</b> Why put repeated commands in `tasks.json` instead of retyping them?</summary>
 
-Placing several cursors at once so the same edit applies in multiple locations simultaneously.
+It standardises the exact command for everyone on the project, reduces typos, and makes the action one keystroke away.
 
 </details>
 
-<details><summary><b>59.</b> How do you add a cursor on the next occurrence of the current selection?</summary>
+<details><summary><b>66.</b> How does running a notebook in VS Code differ from running it in JupyterLab?</summary>
 
-`Ctrl+D` selects the next matching occurrence and adds a cursor there; repeat to grow the selection set.
+Both use the same Jupyter kernels and run the same `.ipynb` files, but VS Code embeds notebooks in the editor with its debugging and Git tooling, while JupyterLab is a browser environment with its own multi-document layout.
 
 </details>
 
-<details><summary><b>60.</b> How do you select every occurrence of the current word at once?</summary>
+<details><summary><b>67.</b> Can a notebook authored in JupyterLab be opened and run in VS Code?</summary>
 
-`Ctrl+Shift+L` ("Select All Occurrences").
+Yes; `.ipynb` is a shared format and both tools connect to the same kernels, so the notebook runs in either with no conversion.
 
 </details>
 
-<details><summary><b>61.</b> How do you add a cursor above or below the current line by column?</summary>
+<details><summary><b>68.</b> What hidden-state caveat applies to notebooks regardless of which tool you use?</summary>
 
-`Ctrl+Alt+Up` / `Ctrl+Alt+Down` (Alt+Click also drops a cursor anywhere).
+Cells run out of order leave variables in the kernel that no longer match the visible code, so always Restart Kernel and Run All to confirm the notebook is reproducible.
 
 </details>
 
-<details><summary><b>62.</b> Why is multi-cursor handy when fixing a hard-coded currency literal repeated across a parser?</summary>
+<details><summary><b>69.</b> How do you select which kernel a VS Code notebook uses?</summary>
 
-You can select all `'USD'` occurrences with `Ctrl+Shift+L` and retype them as `'EUR'` in one keystroke, instead of editing each line.
+Click the kernel picker at the top right of the notebook and choose the Python environment, such as the project `.venv`.
 
 </details>
 
-<details><summary><b>63.</b> How do you rename a symbol everywhere it is referenced, safely?</summary>
+<details><summary><b>70.</b> Why might you prefer VS Code notebooks over JupyterLab for a repo you commit to Git?</summary>
 
-Use "Rename Symbol" (`F2`) on the identifier — it updates all references via the language server, unlike a blind find-and-replace.
+VS Code shows notebook diffs and lets you commit from the same window, keeping editing, debugging, and source control in one place.
 
 </details>
 
-<details><summary><b>64.</b> What does `Ctrl+Shift+O` do?</summary>
+<details><summary><b>71.</b> Why might you prefer JupyterLab over VS Code notebooks?</summary>
 
-"Go to Symbol in File" — a quick fuzzy jump to any function, class, or variable defined in the current file.
+JupyterLab's browser layout, multiple synchronized views, and rich extension ecosystem suit exploratory, multi-notebook data work some people find more ergonomic.
 
 </details>
 
-<details><summary><b>65.</b> What does `Ctrl+T` do?</summary>
+<details><summary><b>72.</b> How do you format the current file on demand in VS Code?</summary>
 
-"Go to Symbol in Workspace" — search and jump to symbols across the whole project, e.g. find `parse_emt` no matter which module it lives in.
+Run `Format Document` from the command palette, which applies the configured formatter — Ruff in this course — to the whole file.
 
 </details>
 
-<details><summary><b>66.</b> How do you comment or uncomment the selected lines quickly?</summary>
+<details><summary><b>73.</b> How do you enable format-on-save with Ruff for a workspace?</summary>
 
-`Ctrl+/` toggles line comments on the selection.
+In `.vscode/settings.json` set `"editor.formatOnSave": true` and set Ruff as the default formatter for Python files via `"editor.defaultFormatter": "charliermarsh.ruff"`.
 
 </details>
 
-<details><summary><b>67.</b> How do you open the project-wide search panel?</summary>
+<details><summary><b>74.</b> How do you make Ruff fix lint issues and organise imports automatically on save?</summary>
 
-`Ctrl+Shift+F` opens Search, letting you grep across all files with regex, includes, and excludes.
+Add `"editor.codeActionsOnSave"` entries such as `"source.fixAll.ruff": "explicit"` and `"source.organizeImports.ruff": "explicit"` to settings.
 
 </details>
 
-<details><summary><b>68.</b> What is a `.ipynb` file?</summary>
+<details><summary><b>75.</b> How do you set the default formatter specifically for Python without affecting other languages?</summary>
 
-A Jupyter notebook — a JSON document of ordered cells (code, Markdown, and outputs) that a kernel executes interactively.
+Use a language-scoped block in settings, `"[python]": { "editor.defaultFormatter": "charliermarsh.ruff" }`, so the choice applies only to Python files.
 
 </details>
 
-<details><summary><b>69.</b> What is a kernel in the notebook context?</summary>
+<details><summary><b>76.</b> VS Code does not list your project's `.venv` in `Python: Select Interpreter` — what is the first thing to check?</summary>
 
-The language process (e.g. an IPython process bound to your `.venv`) that runs notebook code cells and holds the in-memory state between them.
+Make sure the `.venv` folder actually exists at the workspace root by running `uv sync` first; then use "Enter interpreter path" to point at `./.venv/bin/python` if it still does not appear.
 
 </details>
 
-<details><summary><b>70.</b> How do you run the current cell and move to the next in a VS Code notebook?</summary>
+<details><summary><b>77.</b> Ruff is installed but the file is not reformatting on save — what is the first thing to check?</summary>
 
-`Shift+Enter`; `Ctrl+Enter` runs the cell and keeps focus on it.
+Verify `"editor.formatOnSave"` is true and that Ruff is set as the Python default formatter, since without a default formatter VS Code does not know what to run on save.
 
 </details>
 
-<details><summary><b>71.</b> How do VS Code notebooks and JupyterLab relate to each other?</summary>
+<details><summary><b>78.</b> Ruff shows lint warnings but never reformats — what distinction explains this?</summary>
 
-They are two front-ends over the same Jupyter kernels and the same `.ipynb` format — the difference is ergonomics, not the underlying engine.
+Linting and formatting are separate actions; you need format-on-save or `Format Document` configured to apply Ruff's formatter, as diagnostics alone do not rewrite the file.
 
 </details>
 
-<details><summary><b>72.</b> Name one ergonomic advantage of VS Code notebooks over JupyterLab.</summary>
+<details><summary><b>79.</b> Breakpoints show as hollow grey circles and say "not bound" — what does that usually mean?</summary>
 
-You get the full editor's IntelliSense, Git integration, debugging, and your extensions in the same window as the notebook.
+The debugger has not associated the breakpoint with running code, often because the file being executed is not the file with the breakpoint or the wrong interpreter is selected.
 
 </details>
 
-<details><summary><b>73.</b> Name one thing JupyterLab does that VS Code notebooks are weaker at.</summary>
+<details><summary><b>80.</b> A hollow "unverified" breakpoint persists when debugging — what should you check first?</summary>
 
-JupyterLab's browser UI excels at a dashboard-style multi-panel layout, rich interactive widgets, and a long-running server you can reconnect to remotely.
+Confirm you launched the debugger (not just ran the file), that the source path matches the executed module, and that the interpreter is the project `.venv`.
 
 </details>
 
-<details><summary><b>74.</b> When would you reach for a notebook over a `.py` script in fund-data work?</summary>
+<details><summary><b>81.</b> `code .` returns "command not found" in the terminal — for a Snap install, how do you fix the `PATH`?</summary>
 
-For exploratory analysis — eyeballing a NAV time series or profiling an EMT file's columns — where you want inline tables and plots; production loaders stay as scripts.
+Ensure `/snap/bin` is on your `PATH`; the Snap places the launcher there, and re-logging in or adding it to your shell profile makes `code` resolve.
 
 </details>
 
-<details><summary><b>75.</b> How do you pick which kernel a VS Code notebook runs against?</summary>
+<details><summary><b>82.</b> On a `.deb` install, `code` is missing from `PATH` after a manual extract — how do you add it from inside VS Code?</summary>
 
-Click the kernel picker at the top-right of the notebook and select the interpreter/environment (typically the project `.venv`).
+Run the command palette command `Shell Command: Install 'code' command in PATH`, which creates the launcher so `code .` works from `bash`.
 
 </details>
 
-<details><summary><b>76.</b> Why prefer the project `.venv` kernel over a global one for an exploration notebook?</summary>
+<details><summary><b>83.</b> What does `Ctrl+Shift+P` give you that menus do not?</summary>
 
-So the notebook sees the same locked dependencies as the rest of the repo and your analysis is reproducible by anyone who runs `uv sync`.
+Searchable access to every command, including ones with no menu entry, so you can find an action by typing part of its name instead of hunting through menus.
 
 </details>
 
-<details><summary><b>77.</b> How do you launch JupyterLab from a `uv` project?</summary>
+<details><summary><b>84.</b> How do you split the editor to view two files side by side?</summary>
 
-Add it as a dev dependency and run `uv run jupyter lab`, which starts the server using the project environment.
+Press `Ctrl+backslash` to split the active editor, or drag a tab to the side of the editor area.
 
 </details>
 
-<details><summary><b>78.</b> What is the variable explorer / Data Viewer in VS Code notebooks?</summary>
+<details><summary><b>85.</b> How do you search across all files in the workspace?</summary>
 
-A panel that lists current variables and lets you open tabular data (like a DataFrame of fund rows) in a scrollable, sortable grid.
+Open the Search view with `Ctrl+Shift+F` and type your query; results group by file and you can replace across the project.
 
 </details>
 
-<details><summary><b>79.</b> Can you set breakpoints inside notebook cells in VS Code?</summary>
+<details><summary><b>86.</b> How do you jump to a specific line number?</summary>
 
-Yes — the Jupyter extension supports cell debugging, so you can step through a parsing cell just like a script.
+Press `Ctrl+G` and type the line number, or type a colon and number in Quick Open.
 
 </details>
 
-<details><summary><b>80.</b> Why are notebooks awkward under version control compared to scripts?</summary>
+<details><summary><b>87.</b> What does the Problems panel show?</summary>
 
-The `.ipynb` JSON embeds execution counts and output blobs, producing noisy diffs and merge conflicts; scripts diff cleanly line by line.
+A consolidated list of diagnostics — lint errors, type warnings, syntax issues — across open files, opened with `Ctrl+Shift+M`.
 
 </details>
 
-<details><summary><b>81.</b> What is one discipline that keeps notebooks reproducible despite out-of-order execution?</summary>
+<details><summary><b>88.</b> What is the status bar interpreter indicator for?</summary>
 
-Periodically "Restart Kernel and Run All" so the notebook actually works top-to-bottom, since cells can otherwise depend on hidden out-of-order state.
+It shows the currently selected Python interpreter and is a one-click shortcut to `Python: Select Interpreter`.
 
 </details>
 
-<details><summary><b>82.</b> After opening `fundcli` in WSL, `code .` works but `python` isn't found in the terminal — first check?</summary>
+<details><summary><b>89.</b> How do you reload the VS Code window without fully restarting it?</summary>
 
-Whether you've activated/selected the project `.venv`; the bare `python` may not be on PATH in the fresh WSL shell, and this course runs Python via `uv run`.
+Run `Developer: Reload Window` from the command palette, which restarts the editor process and reloads extensions, often clearing transient glitches.
 
 </details>
 
-<details><summary><b>83.</b> Why does this course standardise on `uv run` rather than bare `python` inside the editor terminal?</summary>
+<details><summary><b>90.</b> How do you see which extensions are recommended for a project?</summary>
 
-`uv run` guarantees the locked project environment is used every time, avoiding the "wrong interpreter" class of bugs across machines.
+Add an `.vscode/extensions.json` with a `"recommendations"` list; teammates opening the workspace are prompted to install them.
 
 </details>
 
-<details><summary><b>84.</b> The Ruff extension shows no diagnostics on a file you know is messy — first thing to check?</summary>
+<details><summary><b>91.</b> Why list the Python, Ruff, Jupyter, and Docker extensions in `extensions.json` for a fund-data repo?</summary>
 
-That the Ruff extension is enabled in the WSL workspace (not only on the UI side) and that the file is recognised as Python with a Ruff config present.
+So a new contributor is prompted to install exactly the tools the project relies on, getting consistent linting, notebooks, and container support from day one.
 
 </details>
 
-<details><summary><b>85.</b> Format-on-save isn't running Ruff — what setting is most likely wrong?</summary>
+<details><summary><b>92.</b> For cross-platform awareness, how does running VS Code natively on Ubuntu differ from a colleague using WSL2 on Windows or macOS?</summary>
 
-`editor.defaultFormatter` isn't set to Ruff for Python (or `editor.formatOnSave` is off) in the active settings scope.
+On native Ubuntu the editor and terminal run directly on Linux with no bridge, whereas a Windows colleague's Remote-WSL setup runs the editor UI on Windows and the workspace inside a Linux subsystem; the editing experience is similar but the filesystem and paths differ.
 
 </details>
 
-<details><summary><b>86.</b> What is the quickest way to see all keyboard shortcuts and rebind them?</summary>
+<details><summary><b>93.</b> What does `"files.exclude"` in settings do?</summary>
 
-Open "Preferences: Open Keyboard Shortcuts" (`Ctrl+K Ctrl+S`) to search, view, and reassign every binding.
+It hides matching files and folders — like `__pycache__` or `.venv` — from the file explorer to reduce clutter without deleting them.
 
 </details>
 
-<details><summary><b>87.</b> How do you open settings as raw JSON to edit precisely?</summary>
+<details><summary><b>94.</b> How do you comment or uncomment the current line or selection?</summary>
 
-Run "Preferences: Open User Settings (JSON)" or "Open Workspace Settings (JSON)" from the command palette.
+Press `Ctrl+slash`, which toggles line comments using the current language's comment syntax.
 
 </details>
 
-<details><summary><b>88.</b> What does the Problems panel show?</summary>
+<details><summary><b>95.</b> How do you move the current line up or down without cutting and pasting?</summary>
 
-An aggregated list of diagnostics — lint errors, type warnings, and syntax errors — across open files, opened with `Ctrl+Shift+M`.
+Press `Alt+Up` or `Alt+Down` to shift the line, taking the whole selection with it if several lines are selected.
 
 </details>
 
-<details><summary><b>89.</b> How do you jump between problems/errors in a file from the keyboard?</summary>
+<details><summary><b>96.</b> How do you trigger code completion (IntelliSense) manually?</summary>
 
-`F8` goes to the next problem and `Shift+F8` to the previous one.
+Press `Ctrl+Space` to invoke the suggestion list at the cursor when it does not appear automatically.
 
 </details>
 
-<details><summary><b>90.</b> What does the Source Control panel (`Ctrl+Shift+G`) give you?</summary>
+<details><summary><b>97.</b> How do you find all references to a symbol?</summary>
 
-A Git view of staged/unstaged changes, inline diffs, staging, commits, and branch operations without leaving the editor.
+Right-click it and choose Find All References, or press `Shift+F12`, to list every place it is used across the project.
 
 </details>
 
-<details><summary><b>91.</b> What is the gutter "blame"/inline diff useful for when reviewing a loader change?</summary>
+<details><summary><b>98.</b> How do you run a single test from a Python test file in VS Code?</summary>
 
-Seeing exactly which lines changed and their prior content, so a one-character currency-code edit is obvious before you commit.
+With the Python extension's test discovery enabled, use the green run icon beside the test in the editor gutter or the Test Explorer to run just that test.
 
 </details>
 
-<details><summary><b>92.</b> What is a Quick Fix and how do you invoke it?</summary>
+<details><summary><b>99.</b> How do you debug a single failing test rather than the whole suite?</summary>
 
-A context action (auto-import, fix-all, etc.) offered by the language server/Ruff at the cursor, invoked with `Ctrl+.`.
+Use the debug icon next to that test in the gutter or Test Explorer, which launches it under the debugger so your breakpoints in the code under test bind.
 
 </details>
 
-<details><summary><b>93.</b> What does the "Testing" panel do for a pytest project?</summary>
+<details><summary><b>100.</b> Why prefer keyboard-first workflows like the command palette and Quick Open?</summary>
 
-After configuring the test framework, it discovers tests into a tree you can run or debug individually, with pass/fail markers in the gutter.
-
-</details>
-
-<details><summary><b>94.</b> How do you debug a single failing pytest test from the editor?</summary>
-
-Use the "Debug Test" gutter/CodeLens action above the test, which launches it under the debugger so you can break inside the code under test.
-
-</details>
-
-<details><summary><b>95.</b> Why attach VS Code to WSL instead of editing WSL files over the `\\wsl$` share from a Windows-side window?</summary>
-
-The remote attach runs the toolchain natively in Linux with correct permissions and speed, while the network-share approach suffers slow IO and missing Linux tooling.
-
-</details>
-
-<details><summary><b>96.</b> You set a breakpoint in a worker thread/async coroutine and it doesn't pause — what is a common cause?</summary>
-
-The breakpoint is on a code path that runs in a context the debugger didn't attach to, or the line never executes; verify the call actually reaches it and the right config is launched.
-
-</details>
-
-<details><summary><b>97.</b> What is "justMyCode" in a Python debug configuration?</summary>
-
-A setting that, when true, steps only through your code and skips library internals; set it false to step into third-party packages like a CSV/parquet reader.
-
-</details>
-
-<details><summary><b>98.</b> An EMT file parser throws on row 5000 only in production data — how do you pinpoint it fast in the debugger?</summary>
-
-Set a conditional breakpoint on the parse line with a condition matching that row (e.g. the offending ISIN or `row_num == 5000`) so you pause exactly where it fails.
-
-</details>
-
-<details><summary><b>99.</b> Why is the integrated terminal's environment important when running a `uv` command interactively?</summary>
-
-It inherits the workspace/WSL environment and selected interpreter, so `uv run pytest` there uses the same Python and dependencies the editor analyses.
-
-</details>
-
-<details><summary><b>100.</b> What is the single biggest payoff of completing this lesson before later phases?</summary>
-
-A frictionless edit-run-debug loop — lint, terminal, debugger, and notebooks in one keyboard-driven window — so tooling never taxes the four years of work that follow.
+They keep your hands on the keyboard and let you reach files and commands by name in a couple of keystrokes, which is faster and more accurate than mouse-hunting through menus once the shortcuts are habitual.
 
 </details>
 

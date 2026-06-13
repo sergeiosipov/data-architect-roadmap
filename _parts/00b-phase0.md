@@ -14,7 +14,8 @@
 #### 0.1 — A.27 Linux, the command line & shell
 - **Why:** The terminal is the substrate of everything later — Docker, Kubernetes, CI, cloud shells, log forensics — and the architect who can't grep a transfer-agency log under pressure delegates the one task that needed their own eyes. Data work without shell fluency is permanent friction: every later phase of this plan assumes you live here.
 - **Learn:**
-    - WSL2 + Ubuntu install — your lab for four years, kept apart from the Windows filesystem *(Microsoft WSL docs)*
+    - your native Ubuntu lab — confirm the release, update packages, and keep all projects under `~` (the home directory) *(Ubuntu CLI tutorial)*
+    - cross-platform awareness — colleagues on Windows use WSL2, on macOS use Terminal + Homebrew; the shell skills here transfer unchanged to all three *(Missing Semester lec. 1)*
     - filesystem layout & permissions — /etc vs /home vs /var, rwx bits, sudo, and why a loader script can't write where it wants *(TLCL part 1)*
     - navigation, files, pipes & redirection — composing small tools with `|`, `>`, `>>` instead of opening editors *(Missing Semester lec. 1)*
     - grep/sed/awk at reading level — enough to filter a NAV-feed log and extract a column *(Missing Semester lec. 4)*
@@ -25,12 +26,12 @@
 - **Resources:**
     - **[The Missing Semester of Your CS Education](https://missing.csail.mit.edu/)** — lectures 1–5 + exercises: shell, shell tools, data wrangling, command-line environment (primary)
     - [The Linux Command Line](https://linuxcommand.org/tlcl.php) (TLCL, Shotts — free book) — permissions, environment, package management and scripting in proper depth (reference)
-    - [Microsoft WSL documentation](https://learn.microsoft.com/windows/wsl/) — installing and operating the Ubuntu lab on Windows (setup)
+    - [Ubuntu command-line tutorial](https://ubuntu.com/tutorials/command-line-for-beginners) — your native OS: shell, files and packages on Ubuntu itself (setup)
     - [crontab.guru](https://crontab.guru/) — decode and compose cron schedules for the exercise (reference)
 - **Tools:**
-    - FOSS (hands-on): [WSL2](https://learn.microsoft.com/windows/wsl/) + [Ubuntu](https://ubuntu.com/wsl), [Windows Terminal](https://learn.microsoft.com/windows/terminal/) — the permanent lab (↔ macOS/cloud shells — same skills)
+    - FOSS (hands-on): [Ubuntu](https://ubuntu.com/) + GNOME Terminal — your native lab for four years (↔ [WSL2](https://learn.microsoft.com/windows/wsl/) on Windows, Terminal + Homebrew on macOS — identical shell skills)
 - **Do:**
-    1. Install WSL2 + Ubuntu, run `sudo apt update && sudo apt upgrade`, and create a `~/lab/phase0` directory tree from the terminal only.
+    1. On your Ubuntu laptop, confirm the release with `lsb_release -a`, run `sudo apt update && sudo apt upgrade`, and create a `~/lab/phase0` directory tree from the terminal only.
     2. Write `fetch_count.sh`: `curl` downloads a public CSV (any ECB series works), `grep -c` counts rows matching a pattern passed as `$1`, and a `date`-stamped line is appended to `run.log` with `>>`.
     3. Harden it: `set -euo pipefail`, a usage message when `$1` is missing, non-zero exit on download failure; prove each path with a deliberate failure.
     4. Schedule it with cron (compose the expression with crontab.guru), let it run a few cycles, and confirm `run.log` grows; note where cron's own output goes.
@@ -133,13 +134,13 @@
     - writing a Dockerfile — FROM/COPY/RUN/CMD for `fundcli`; small images, build context *(Dockerfile reference)*
     - Compose — two services (app + Postgres), depends_on with healthchecks, named volumes for persistence *(Compose docs)*
     - debugging — `docker logs`, `docker exec -it`, and diagnosing a container that exits immediately *(Docker: Get Started)*
-    - cleanup hygiene — pruning images and volumes before WSL2 eats your disk *(Docker: Get Started)*
+    - cleanup hygiene — pruning images and volumes before they eat your disk *(Docker: Get Started)*
 - **Resources:**
     - **[Docker: Get Started guide](https://docs.docker.com/get-started/)** — concepts, running, building and first Compose in one official path (primary)
     - [Dockerfile reference](https://docs.docker.com/reference/dockerfile/) — exact instruction semantics when the guide's examples run out (reference)
     - [Docker Compose documentation](https://docs.docker.com/compose/) — service definitions, healthchecks, volumes; the lab's daily file format (reference)
 - **Tools:**
-    - FOSS (hands-on): [Docker Desktop](https://docs.docker.com/desktop/) or [Docker Engine](https://docs.docker.com/engine/) in WSL2 — every later phase's lab runs on this
+    - FOSS (hands-on): [Docker Engine](https://docs.docker.com/engine/install/ubuntu/) installed natively on Ubuntu — every later phase's lab runs on this (↔ Docker Desktop on Windows/macOS)
 - **Do:**
     1. Write a Dockerfile for `fundcli` and run it as a one-shot container against a mounted CSV.
     2. Write `compose.yaml`: a Postgres service with a named volume and healthcheck, plus a one-shot loader container that waits for healthy Postgres and ingests your funds CSV.
@@ -265,20 +266,20 @@
 #### 0.10 — 9.1.1 + 9.1.2 Editor & IDE setup — T3
 - **Why:** Tooling friction taxes every hour of the next four years; set it up once, properly. Print-debugging through a reconciliation script costs hours where a breakpoint costs minutes — and the habit gap compounds across every later phase.
 - **Learn:**
-    - workspace & integrated terminal — VS Code attached to WSL so editor and lab share one filesystem *(VS Code docs: WSL)*
+    - workspace & integrated terminal — VS Code running natively on Ubuntu, so editor and lab share one filesystem *(VS Code docs: Linux)*
     - extensions — Python, ruff, Jupyter, Docker; what each actually adds *(VS Code docs: Python tutorial)*
     - debugging with breakpoints — set, step, inspect variables, watch expressions; stop print-debugging early *(VS Code docs: Python debugging)*
     - keyboard-first habits — command palette, go-to-definition, multi-cursor; a dozen bindings beat a hundred *(VS Code docs: Python tutorial)*
     - JupyterLab vs VS Code notebooks — same kernels, different ergonomics; pick per task *(VS Code docs: Jupyter Notebooks)*
 - **Resources:**
     - **[VS Code docs: Python tutorial](https://code.visualstudio.com/docs/python/python-tutorial)** — environment, extensions and the run/debug loop end to end (primary)
-    - [VS Code docs: Developing in WSL](https://code.visualstudio.com/docs/remote/wsl) — the editor-to-Ubuntu bridge this whole plan assumes (reference)
+    - [VS Code on Linux](https://code.visualstudio.com/docs/setup/linux) — installing and running the editor natively on Ubuntu (reference)
     - [VS Code docs: Python debugging](https://code.visualstudio.com/docs/python/debugging) — breakpoints, stepping, launch configurations (reference)
     - [VS Code docs: Jupyter Notebooks](https://code.visualstudio.com/docs/datascience/jupyter-notebooks) — notebooks inside the editor, variable explorer included (reference)
 - **Tools:**
     - FOSS (hands-on): [VS Code](https://code.visualstudio.com/docs) (↔ JetBrains; choice is taste, fluency is mandatory)
 - **Do:**
-    1. Install VS Code with the WSL, Python, ruff, Jupyter and Docker extensions; open your `fundcli` repo via the WSL remote.
+    1. Install VS Code on Ubuntu with the Python, ruff, Jupyter and Docker extensions; open your `fundcli` repo from your home directory.
     2. Plant a bug in a `fundcli` function (e.g., a filter that drops the wrong currency) on a branch.
     3. Debug it with a breakpoint inside the function: inspect variables, step through the filter, fix it — without a single print.
     4. Drill the bindings for run, breakpoint toggle, command palette and go-to-definition until the mouse is optional.
@@ -338,7 +339,7 @@
 ### Capstone 0 — Personal data toolbox
 
 - **Goal:** prove the foundations compose: one small, real, reproducible data project touching every module.
-- **Stack (100% free):** [WSL2](https://learn.microsoft.com/windows/wsl/) + [Ubuntu](https://ubuntu.com/wsl), [uv](https://docs.astral.sh/uv/)-managed Python, [PostgreSQL](https://www.postgresql.org/docs/) + loader in [Docker Compose](https://docs.docker.com/compose/), [JupyterLab](https://jupyterlab.readthedocs.io/) + [pandas](https://pandas.pydata.org/docs/), [pytest](https://docs.pytest.org/), [Git](https://git-scm.com/doc) + [GitHub](https://docs.github.com/).
+- **Stack (100% free):** [Ubuntu](https://ubuntu.com/) (your laptop), [uv](https://docs.astral.sh/uv/)-managed Python, [PostgreSQL](https://www.postgresql.org/docs/) + loader in [Docker Compose](https://docs.docker.com/compose/), [JupyterLab](https://jupyterlab.readthedocs.io/) + [pandas](https://pandas.pydata.org/docs/), [pytest](https://docs.pytest.org/), [Git](https://git-scm.com/doc) + [GitHub](https://docs.github.com/).
 - **Build:** (1) pick a public fund/ETF dataset (e.g., an [ECB Data Portal](https://data.ecb.europa.eu/) or [data.europa.eu](https://data.europa.eu/) CSV); (2) `docker compose up` brings Postgres + a Python loader that ingests it idempotently-naively (rerun-safe by truncate-reload — the grown-up version comes in Phase 1); (3) answer 10 SQL questions of rising difficulty in a committed `.sql` file (joins, GROUP BY, at least one window function); (4) a notebook produces one cleaned monthly summary and one chart answering a stated question; (5) pytest covers the loader's parsing — happy path plus malformed input; (6) README explains setup in ≤10 commands; (7) developed on branches with self-reviewed PRs (the 0.12 checklist applied).
 - **Architecture deliverables:** none yet — your first C4 diagram and ADR arrive in Phase 1; here the README *is* the architecture document.
 - **Acceptance criteria:** a stranger with Docker and uv reproduces everything from the README on a fresh machine; `uv run pytest` green; the chart answers a stated question; the Git history shows ≥3 PRs with self-review comments; rerunning the loader leaves row counts unchanged (truncate-reload verified).
