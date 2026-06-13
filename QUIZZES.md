@@ -14473,3 +14473,10857 @@ This lesson (9.1.3) builds directly on the container fundamentals from Phase 0's
 Every image is pinned to a specific tag (ideally a digest); every stateful service writes to a named volume; every dependent gates on `service_healthy` via a real healthcheck, not just `service_started`; and the whole stack comes up clean and healthy from a fresh clone on pruned Docker, with the Python layer pinned via `uv`. Validate it by running from cold and confirming the loader yields identical row counts and checksums on a second run. If a stranger gets the same numbers from the README, the sandbox is trustworthy.
 
 </details>
+
+
+## Phase 2 · 1.4.3 Medallion architecture — 100 self-test questions
+
+<details><summary><b>1.</b> What is the medallion architecture in one sentence?</summary>
+
+It is a data-design pattern that organizes data into progressively refined layers — conventionally named bronze, silver, and gold — where each layer increases data quality and consumption-readiness over the one below it. The term was popularized by Databricks, and the colours are a naming convention, not a fixed product feature; the substance is the per-layer contract, not the medal name.
+
+</details>
+
+<details><summary><b>2.</b> What does the bronze layer guarantee?</summary>
+
+Bronze holds raw, ingested data in a form that is immutable and replayable — typically a near-verbatim copy of what arrived from the source, with ingestion metadata attached. Its core promise is that you can always re-derive everything downstream by reprocessing bronze, so it acts as the landing zone and the replay buffer of the whole lakehouse.
+
+</details>
+
+<details><summary><b>3.</b> What does the silver layer guarantee?</summary>
+
+Silver holds data that is conformed (consistent types, naming, and grain), deduplicated, and has passed data-quality checks. It is the cleaned, integrated, query-trustworthy version of the data — joined across sources and standardized — but it is not yet shaped for any specific consumer or report.
+
+</details>
+
+<details><summary><b>4.</b> What does the gold layer guarantee?</summary>
+
+Gold holds consumption-modeled data: aggregates, business-level metrics, dimensional marts, or feature tables shaped for a specific downstream use such as a dashboard, a regulatory file, or a machine-learning model. Its promise is fitness-for-purpose for named consumers, so a gold table is allowed to be denormalized and opinionated in ways silver is not.
+
+</details>
+
+<details><summary><b>5.</b> Why are bronze, silver, and gold called a "default layering" rather than a law?</summary>
+
+They are a sensible starting template that fits most lakehouses, because almost every estate needs a raw landing zone, a cleaned/conformed zone, and a consumption zone. But the number of layers should follow the estate's real needs — some justify two layers, some four — so treating three as mandatory is cargo-cult architecture rather than design.
+
+</details>
+
+<details><summary><b>6.</b> Why should you not query the bronze layer directly for reporting?</summary>
+
+Bronze is raw and untrusted: it contains duplicates, malformed records, schema drift, and source quirks that no data-quality gate has cleaned. Querying it directly means every consumer re-implements deduplication and validation inconsistently, so two reports off the same bronze table can legitimately disagree — the classic symptom of skipping silver.
+
+</details>
+
+<details><summary><b>7.</b> Give a concrete fund example of a bronze object.</summary>
+
+A raw NAV feed file exactly as the fund accounting system or pricing vendor delivered it — for example a daily CSV or fixed-width file of per-share-class NAVs, landed unchanged with metadata like source name, file name, and ingestion timestamp. You keep it verbatim so an auditor can compare the platform's figures back to the exact bytes the source sent.
+
+</details>
+
+<details><summary><b>8.</b> Give a concrete fund example of a silver object.</summary>
+
+A conformed NAV table at one row per fund share class per valuation date, with standardized identifiers (ISIN, currency, share-class code), deduplicated re-sends, and DQ checks applied (NAV positive, date valid, ISIN well-formed). It integrates the raw feed into a clean, queryable shape that any internal consumer can trust without re-cleaning.
+
+</details>
+
+<details><summary><b>9.</b> Give a concrete fund example of a gold object.</summary>
+
+An EMT-shaped output table — the European MiFID Template fields populated per share class from conformed silver data, ready to export to distributors. It is consumption-modeled: the columns, naming, and granularity match exactly what the EMT file requires, even though that shape is awkward for general querying.
+
+</details>
+
+<details><summary><b>10.</b> What is "schema-on-read"?</summary>
+
+Schema-on-read means data is stored in raw form and a schema is applied only when the data is queried, so the store tolerates whatever structure arrives. It favors flexibility and cheap ingestion — you do not reject or reshape data at write time — at the cost of every reader having to interpret and validate the data itself.
+
+</details>
+
+<details><summary><b>11.</b> What is "schema-on-write"?</summary>
+
+Schema-on-write means a schema is enforced at the moment data is written, so non-conforming records are rejected or quarantined before they land. It favors trust and consistency — every reader sees a guaranteed structure — at the cost of stricter ingestion and the need to handle source changes explicitly.
+
+</details>
+
+<details><summary><b>12.</b> Where in the medallion does the schema-on-read to schema-on-write transition happen?</summary>
+
+At the bronze-to-silver boundary. Bronze is schema-on-read — it tolerates drift and stores what arrives — and silver is schema-on-write — it enforces a contract and stops tolerating drift. That boundary is the single most important contract in the architecture because it is where you decide to stop absorbing chaos and start guaranteeing structure.
+
+</details>
+
+<details><summary><b>13.</b> Why does bronze deliberately tolerate schema drift?</summary>
+
+Because the source can change its layout, add columns, or send malformed batches at any time, and a raw landing zone that rejected those changes would drop data you may legally need to retain or replay. Bronze absorbs the chaos so that nothing is ever lost at the door; the cleanup and enforcement are silver's job, not bronze's.
+
+</details>
+
+<details><summary><b>14.</b> What does "reprocessable" or "replayable" mean for bronze?</summary>
+
+It means you can re-run all downstream transformations from bronze and reproduce silver and gold deterministically, because bronze is an immutable, complete record of the inputs. This is what lets you fix a bug in silver logic and simply rebuild, rather than going back to the source systems to re-extract.
+
+</details>
+
+<details><summary><b>15.</b> Why is immutability so important for the bronze layer specifically?</summary>
+
+Immutability makes bronze a reliable replay buffer and an audit anchor: if records were edited in place, you could never reproduce a past pipeline run or prove what the source actually sent. In a regulated fund platform, that immutable raw copy is often the evidence that answers "what did the vendor deliver on 2026-03-31?".
+
+</details>
+
+<details><summary><b>16.</b> Which layer is typically the "system of record" for raw inputs?</summary>
+
+Bronze is the system of record for what was ingested — it is the authoritative, immutable copy of source deliveries inside the platform. Note this is distinct from the upstream source system, which is the system of record for the business fact; bronze is the platform's faithful record of having received it.
+
+</details>
+
+<details><summary><b>17.</b> Is silver rebuildable from bronze, or is it a source of truth?</summary>
+
+Silver is normally rebuildable from bronze: given immutable bronze plus the silver transformation code, you can regenerate silver deterministically. The exception is any data created in silver that has no upstream source — manual overrides or master-data enrichments — which must be stored as their own system of record so a rebuild does not erase them.
+
+</details>
+
+<details><summary><b>18.</b> Is gold rebuildable from silver?</summary>
+
+Yes, in the normal case gold is fully derived from silver by aggregation and modeling, so it can be dropped and rebuilt at will. Anything in gold that is not derivable — a human-curated label, an analyst's adjustment — is a system of record and must be persisted separately so a rebuild from silver does not lose it.
+
+</details>
+
+<details><summary><b>19.</b> What is the practical test for "rebuildable vs system of record" at any layer?</summary>
+
+Ask: if I delete this table and re-run the pipeline from the layer below, do I get it back identically? If yes, it is rebuildable and can be treated as a cache; if no — because it holds inputs that exist nowhere else — it is a system of record and needs its own retention, backup, and lineage discipline.
+
+</details>
+
+<details><summary><b>20.</b> Why is mislabeling a system-of-record table as "rebuildable" dangerous?</summary>
+
+Because someone will eventually truncate or reprocess it assuming it can be regenerated, and the unique data it held — manual corrections, externally-keyed enrichment — is gone permanently. The damage is silent until a consumer or auditor asks for a figure that no longer exists, which in a fund context can be a regulatory breach.
+
+</details>
+
+<details><summary><b>21.</b> What is a "layer contract"?</summary>
+
+A layer contract is the explicit, written agreement about what a layer guarantees: its schema policy, data-quality gate, retention, owner, and the promise it makes to downstream consumers. Making these contracts explicit standards — instead of tribal folklore — is the architect's core job, because an undocumented boundary is exactly where lineage and trust break.
+
+</details>
+
+<details><summary><b>22.</b> Name five columns you would put on a one-page layer-contract sheet.</summary>
+
+Owner (who is accountable), schema policy (drift tolerated vs enforced), DQ gate (which checks must pass to enter), retention (how long data is kept), and consumer promise (the SLA offered downstream). One row per layer makes the boundaries legible and turns folklore into a reviewable standard.
+
+</details>
+
+<details><summary><b>23.</b> Why is an undocumented layer boundary a lineage risk in a regulated platform?</summary>
+
+Because when an auditor asks "where did this NAV figure come from?", you must trace it through each transformation, and an undocumented boundary is a gap in that chain where nobody can say what was changed or guaranteed. Lineage breaks at exactly the points where the contract was tribal knowledge rather than a written, enforced standard.
+
+</details>
+
+<details><summary><b>24.</b> What happens to silver if its contract is left implicit?</summary>
+
+It degrades into a dumping ground — people write whatever shape is convenient, skip DQ gates, and overload the grain — yet everyone keeps querying it because it is "the cleaned layer." The result is a layer nobody trusts but everybody depends on, which is the worst possible state for a layer that is supposed to be the trusted middle.
+
+</details>
+
+<details><summary><b>25.</b> Who typically "owns" each medallion layer?</summary>
+
+Ownership is usually assigned to a team accountable for that layer's contract: ingestion/platform engineers own bronze, the data/analytics-engineering team owns silver's conforming and DQ logic, and the consuming domain or analytics team owns gold's business models. The point is that each layer has a single accountable owner who can be held to its promise.
+
+</details>
+
+<details><summary><b>26.</b> What is a "consumer promise" or SLA for a layer?</summary>
+
+It is the commitment a layer makes to whatever reads from it — for example freshness (silver is updated within N hours of ingestion), stability (gold's schema will not change without notice), and quality (every silver row passed its DQ gate). Downstream teams build on these promises, so changing one without warning breaks consumers.
+
+</details>
+
+<details><summary><b>27.</b> "Who can break what" — what does this phrase capture about layer ownership?</summary>
+
+It captures that each layer's owner is allowed to change that layer's internals freely but must not violate the contract the layer exposes upward. Bronze owners can change ingestion mechanics but must keep bronze replayable; silver owners can rewrite cleaning logic but must keep the conformed schema and DQ guarantees stable for consumers.
+
+</details>
+
+<details><summary><b>28.</b> Why is "schema-on-read everywhere" a poor design for a regulated lakehouse?</summary>
+
+Because if no layer ever enforces structure, every consumer independently interprets and validates raw data, so reports diverge and there is no single trusted shape to audit against. Regulated fund reporting needs a defensible, repeatable figure, which requires a schema-on-write boundary where the platform commits to a contract.
+
+</details>
+
+<details><summary><b>29.</b> Why is "schema-on-write at the very front door" also usually wrong?</summary>
+
+Because rejecting non-conforming data at ingestion means a source layout change can drop records you were legally required to retain, and you lose the ability to replay history with corrected logic. Bronze should accept everything; enforcement belongs at bronze-to-silver, where you can quarantine bad rows without having lost them.
+
+</details>
+
+<details><summary><b>30.</b> When might a two-layer (bronze + gold) design be justified?</summary>
+
+When the conforming and consumption steps are trivial or collapse into one — for example a small estate with a single clean source where there is little to integrate or dedupe, so a separate silver adds ceremony without value. You still keep an immutable raw layer and a consumption layer; you just skip a middle that would have been a pass-through.
+
+</details>
+
+<details><summary><b>31.</b> When might a four-layer design be justified?</summary>
+
+When one of the standard layers does too much and benefits from a split — for example a "raw bronze" plus a "cleansed/typed staging" before conformed silver, or a separate semantic/metrics layer above gold. Estates with many heterogeneous sources or a strict typed-staging step often need the extra layer to keep each contract single-purpose.
+
+</details>
+
+<details><summary><b>32.</b> What is the danger of blindly applying three layers to every project?</summary>
+
+You create empty pass-through layers that add latency, storage, and cost without adding guarantees, and you train the team to treat the layer count as the goal instead of the contracts. The number of layers should follow the data quality work that genuinely needs doing, not a slide deck's default of three.
+
+</details>
+
+<details><summary><b>33.</b> How do you decide the right number of layers for an estate?</summary>
+
+Identify the distinct contracts the data must satisfy — immutable replay, conformed/validated, consumption-shaped, and any additional one like typed staging or a metrics layer — and create a layer per genuine contract, no more. If two proposed layers would carry the same contract, merge them; if one layer is straining under two contracts, split it.
+
+</details>
+
+<details><summary><b>34.</b> A late-arriving NAV correction arrives three days after the original. Which layer does it enter first?</summary>
+
+Bronze first — it is new raw input, so it lands immutably in bronze like any other delivery, tagged with its own ingestion timestamp and (ideally) a business effective date. You never edit the original bronze record; the correction is an additional immutable fact, preserving the full history of what the source sent and when.
+
+</details>
+
+<details><summary><b>35.</b> How does a late NAV correction propagate from bronze upward?</summary>
+
+Silver's transformation must recognize the correction (typically by effective date and a supersession rule) and update the conformed NAV for that share class and valuation date, then gold rebuilds the affected outputs such as the EMT file. The key is that the correction flows through the same DQ and conforming logic, not as a manual patch in gold.
+
+</details>
+
+<details><summary><b>36.</b> Why should you not "fix" a NAV correction by editing gold directly?</summary>
+
+Because a direct gold edit breaks the rebuildable property — the next reprocessing from silver would overwrite your fix — and it bypasses the DQ gate and lineage, so the corrected figure has no traceable origin. Corrections enter at bronze and propagate through the contracts, keeping gold a pure derivation of the layers below.
+
+</details>
+
+<details><summary><b>37.</b> What is "conforming" in the context of the silver layer?</summary>
+
+Conforming means making data from different sources consistent in structure and semantics: aligning column names, data types, units, code lists, and grain so that records from multiple feeds can be joined and compared. For funds, it means one canonical share-class identifier, one currency representation, and one valuation-date convention across all sources.
+
+</details>
+
+<details><summary><b>38.</b> Why is deduplication a silver responsibility rather than a bronze one?</summary>
+
+Because bronze must preserve every delivery verbatim — including duplicate re-sends — to remain replayable and auditable, so it cannot drop rows. Silver is where you apply the business rule for what counts as a duplicate and collapse them, producing the single conformed record that consumers should see.
+
+</details>
+
+<details><summary><b>39.</b> What kinds of data-quality checks belong at the silver gate?</summary>
+
+Structural and business validity: types and non-null constraints, referential integrity (every ISIN exists in the instrument master), range and plausibility checks (NAV positive, date within the period), and uniqueness on the conformed grain. Records that fail are quarantined or routed to an error table rather than silently passing into trusted silver.
+
+</details>
+
+<details><summary><b>40.</b> What does it mean to "quarantine" a record at the silver gate?</summary>
+
+It means routing a record that failed a DQ check into a separate error/dead-letter table instead of admitting it to silver or dropping it. Quarantine preserves the failed record for investigation and reprocessing while keeping silver clean, so the trust guarantee of silver holds without losing the problematic data.
+
+</details>
+
+<details><summary><b>41.</b> Why does putting DQ gates in silver make lineage answerable?</summary>
+
+Because the gate is the documented, single place where "this record was validated against these rules" is recorded, so when asked why a figure is trusted you can point to the exact checks it passed. Scattered, ad-hoc validation in many consumers gives you no single answer; a silver gate gives you one auditable checkpoint.
+
+</details>
+
+<details><summary><b>42.</b> For your contract sheet, which layer owns the rule "NAV must be positive" and why?</summary>
+
+Silver owns it, because the rule is a conformity/validity check that gates data into the trusted layer, and the contract says only validated records may enter silver. Bronze must still store a negative NAV verbatim if the source sent one, but it is silver's gate that decides such a record does not become part of the trusted set.
+
+</details>
+
+<details><summary><b>43.</b> Which layer owns the rule "every NAV row must reference a known ISIN"?</summary>
+
+Silver, as a referential-integrity DQ check against the instrument master. Bronze cannot enforce it without rejecting raw data, and gold consumes already-conformed data, so the natural home for cross-reference validation is the silver gate where conforming and integration happen.
+
+</details>
+
+<details><summary><b>44.</b> What is the cost of letting each consumer apply its own DQ rules instead of a shared silver gate?</summary>
+
+You get inconsistent results — two dashboards filtering NAVs differently disagree — duplicated effort, and no single auditable definition of "valid." Centralizing DQ at the silver contract gives every consumer the same trusted base, which is both cheaper and the only defensible posture under regulatory scrutiny.
+
+</details>
+
+<details><summary><b>45.</b> Why is gold allowed to be denormalized when silver is kept conformed and normalized?</summary>
+
+Because gold is optimized for consumption — fast dashboards, fixed report shapes, ML features — and denormalization or pre-aggregation serves those query patterns. Silver stays normalized and at fine grain so it can serve many different gold models; pushing the denormalization down into silver would lock it to one consumer's shape.
+
+</details>
+
+<details><summary><b>46.</b> Can there be multiple gold tables built from the same silver?</summary>
+
+Yes, and that is the intended design: one conformed silver dataset fans out into many gold products — an EMT file, a board NAV dashboard, a regulatory return, a risk feature table — each shaped for its consumer. This fan-out is why silver must stay consumer-neutral and well-conformed.
+
+</details>
+
+<details><summary><b>47.</b> What is the relationship between the medallion layers and an ACID table format like Iceberg or Delta?</summary>
+
+The table format provides the per-table guarantees — atomic commits, snapshots, schema evolution — that make each medallion layer reliable, while medallion is the logical organization across tables. You implement bronze/silver/gold as sets of Iceberg or Delta tables; the format gives transactionality, the medallion gives the layering contracts.
+
+</details>
+
+<details><summary><b>48.</b> Is the medallion architecture specific to Databricks?</summary>
+
+No. Databricks coined and popularized the bronze/silver/gold naming, but the underlying idea — raw, cleaned, and consumption layers — predates it and applies on any lakehouse or warehouse stack such as Iceberg + Trino + dbt. The contracts are portable; only the colour names are Databricks branding.
+
+</details>
+
+<details><summary><b>49.</b> How does dbt typically map onto medallion layers?</summary>
+
+dbt staging models often correspond to the bronze-to-silver cleaning step, intermediate models to further silver conforming, and mart models to gold consumption shapes. dbt's tests enforce the DQ gates and its documentation and lineage graph make the layer contracts and dependencies explicit, which is exactly what the architecture demands.
+
+</details>
+
+<details><summary><b>50.</b> What is the risk of skipping the silver layer and building gold straight from bronze?</summary>
+
+You embed cleaning, dedup, and conforming logic inside each gold model, so that logic is duplicated and diverges across consumers, and there is no shared trusted dataset. The first time two gold outputs disagree on a NAV, you discover the missing single source of conformed truth — which is what silver exists to be.
+
+</details>
+
+<details><summary><b>51.</b> "Why not query bronze directly?" — answer with consequences, not dogma.</summary>
+
+Because bronze contains duplicates, malformed rows, schema drift, and source-specific quirks that no gate has cleaned, so a query against it can double-count a re-sent NAV, choke on a changed column, or include a record the source later corrected. The consequence is wrong, non-reproducible numbers that no auditor would accept — not a rule violation, a correctness failure.
+
+</details>
+
+<details><summary><b>52.</b> How does the medallion architecture support answering an auditor's "where did this NAV come from?"</summary>
+
+Each layer's explicit contract plus lineage lets you trace the figure from the gold report, back through the silver conforming and DQ checks, to the immutable bronze file the source delivered. Because boundaries are documented standards and bronze is immutable, every hop in that chain is reproducible and evidenced rather than tribal recollection.
+
+</details>
+
+<details><summary><b>53.</b> What metadata do you typically attach to bronze records on ingestion?</summary>
+
+Source system identifier, original file name, ingestion timestamp, a batch or load id, and often a hash of the payload for integrity. This metadata is what makes bronze auditable and replayable — you can prove which delivery a record came from and reconstruct exactly which batch fed a downstream rebuild.
+
+</details>
+
+<details><summary><b>54.</b> What is the difference between "source system of record" and "bronze as system of record"?</summary>
+
+The source system (e.g. the fund accounting platform) is the system of record for the business fact — it is where the NAV is authoritatively produced. Bronze is the platform's system of record for the ingested copy — the authoritative evidence of what the source delivered to the lakehouse and when. Both can be systems of record for different things.
+
+</details>
+
+<details><summary><b>55.</b> Why should retention policy differ per layer?</summary>
+
+Because each layer carries a different obligation: bronze often needs long, possibly regulatory, retention as the immutable evidence trail; silver may be kept long enough to rebuild gold and serve trusted queries; gold may be rebuildable and so kept only as long as consumers need it. Putting retention on the contract sheet forces these decisions to be explicit.
+
+</details>
+
+<details><summary><b>56.</b> A new pricing vendor adds three columns to its NAV feed. Which layer absorbs the change first and how?</summary>
+
+Bronze absorbs it first by tolerating the drift — it stores the wider file as-is without breaking, because bronze is schema-on-read. Silver then decides whether to map, ignore, or reject the new columns under its schema-on-write contract, so the change is handled deliberately at the enforcement boundary rather than crashing ingestion.
+
+</details>
+
+<details><summary><b>57.</b> Why is the bronze-to-silver boundary the place to handle a source schema change?</summary>
+
+Because bronze deliberately accepted the change without loss, and silver is where the contract is enforced, so the change must be reconciled exactly at that gate — mapping new fields, defaulting missing ones, or quarantining. Handling it anywhere else either drops data (if at ingestion) or scatters the fix across consumers (if in gold).
+
+</details>
+
+<details><summary><b>58.</b> What does "DQ gate" mean as a property of a layer boundary?</summary>
+
+It means a set of data-quality assertions that records must satisfy to cross from one layer to the next, typically the bronze-to-silver boundary. The gate is a contract: passing it is what earns a record the trust guarantee of the higher layer, and failing it routes the record to quarantine rather than into trusted data.
+
+</details>
+
+<details><summary><b>59.</b> How does medallion layering reduce the "everyone reinvents cleaning" problem?</summary>
+
+By making silver the single place where cleaning, dedup, and conforming happen once, so all consumers build on the same trusted base instead of each re-cleaning bronze differently. The layer contract turns cleaning from scattered, inconsistent code into one owned, tested, documented step.
+
+</details>
+
+<details><summary><b>60.</b> Why might silver be modeled close to third-normal-form while gold is dimensional?</summary>
+
+Silver aims to be a flexible, consumer-neutral integration layer, and a normalized model avoids baking in any one consumer's shape, so 3NF or a normalized vault keeps it reusable. Gold serves specific analytics, so a dimensional (star) model optimizes the actual query patterns of dashboards and reports.
+
+</details>
+
+<details><summary><b>61.</b> What is the relationship between medallion and the staging area concept from classic warehousing?</summary>
+
+Bronze plays the role of the raw landing/staging area, silver corresponds to the cleansed and integrated core, and gold to the presentation/mart layer. Medallion is essentially the lakehouse-era renaming and re-grounding of the long-standing land-cleanse-present pattern, with explicit ACID-table contracts.
+
+</details>
+
+<details><summary><b>62.</b> How would you reprocess silver after fixing a deduplication bug?</summary>
+
+Re-run the silver transformation over the immutable bronze data with the corrected logic, regenerating the conformed tables, then rebuild dependent gold outputs. Because bronze is replayable and silver is rebuildable, no re-extraction from the source is needed — that replay property is precisely why bronze must be immutable.
+
+</details>
+
+<details><summary><b>63.</b> What can you NOT rebuild by reprocessing, and why does it matter?</summary>
+
+You cannot rebuild any data that exists only inside the platform — manual corrections, human-assigned classifications, externally-keyed enrichments with no stored source — because there is nothing below to derive it from. Those are systems of record and must be persisted and backed up independently, or a reprocess will silently erase them.
+
+</details>
+
+<details><summary><b>64.</b> Why is "silver is a dumping ground that nobody trusts but everybody queries" the failure mode to avoid?</summary>
+
+Because it means the trusted middle layer lost its contract: quality is inconsistent, grain is muddled, and yet consumers still depend on it, so bad data flows everywhere while the team has nowhere clean to point. The fix is an explicit, enforced silver contract — schema policy, DQ gate, owner — restored as a standard.
+
+</details>
+
+<details><summary><b>65.</b> In a Luxembourg fund-administration context, why is the immutable bronze layer particularly valuable?</summary>
+
+Because regulated fund administration must be able to evidence the exact data received from sources for NAV production and reporting, often for years, and an immutable bronze copy is that evidence. It underpins audit, supports DORA-style operational-resilience requirements, and lets you reconstruct any past figure from the original deliveries.
+
+</details>
+
+<details><summary><b>66.</b> How does layering help when DORA or an auditor demands reconstruction of a past NAV calculation?</summary>
+
+You replay from immutable bronze (the exact source files), through the versioned silver conforming and DQ logic, to the gold output, reproducing the figure deterministically. The explicit per-layer contracts and lineage make each step traceable, turning "we think it came from here" into a reproducible, evidenced chain.
+
+</details>
+
+<details><summary><b>67.</b> What is wrong with treating gold tables as the system of record for business facts?</summary>
+
+Gold is a derived, consumption-shaped layer that should be rebuildable from silver, so making it the system of record means a rebuild could erase or alter "authoritative" data and bypass the DQ and lineage of the layers below. Systems of record belong at bronze (ingested copy) or in dedicated SoR tables, not in derived gold.
+
+</details>
+
+<details><summary><b>68.</b> How do you keep silver "consumer-neutral"?</summary>
+
+By conforming and normalizing it to a canonical model driven by the data's intrinsic structure, not by any single report's needs, and by pushing report-specific shaping into gold. If a request would denormalize silver to suit one consumer, that work belongs in a gold model so silver remains reusable by all.
+
+</details>
+
+<details><summary><b>69.</b> What is "schema enforcement" in a lakehouse table format and how does it serve silver?</summary>
+
+It is the table format's ability to reject writes that violate the table's declared schema, so silver tables can refuse non-conforming rows at write time. This implements silver's schema-on-write contract at the storage level, complementing application-level DQ checks with a hard structural guarantee.
+
+</details>
+
+<details><summary><b>70.</b> Why might you add a typed "staging" layer between bronze and silver, making four layers?</summary>
+
+To separate the contract "raw, untyped, drift-tolerant" (bronze) from "parsed and strongly typed but not yet conformed/deduped" (staging), so each layer has a single clear responsibility. This is common when parsing complex source formats is heavy enough to deserve its own owned, testable step before conforming.
+
+</details>
+
+<details><summary><b>71.</b> Why might you add a separate "metrics" or "semantic" layer above gold?</summary>
+
+To centralize business metric definitions (a single canonical "total net assets" formula) so every dashboard computes them identically, rather than each gold mart redefining them. When metric consistency across many consumers is a hard requirement, a dedicated semantic layer is the fourth layer that carries that contract.
+
+</details>
+
+<details><summary><b>72.</b> How would you defend a two-layer design to a skeptic who insists on three?</summary>
+
+By showing that in this specific estate the conforming step is trivial — one clean source, no integration, minimal dedup — so a separate silver would be a pass-through that adds latency and cost without a distinct contract. The argument is from the actual data-quality work needed, not from rejecting the pattern.
+
+</details>
+
+<details><summary><b>73.</b> How would you defend a four-layer design against a skeptic who insists three is enough?</summary>
+
+By identifying a contract that one standard layer is overloaded with — for example heavy typed parsing crammed into bronze-to-silver, or metric definitions scattered across gold marts — and showing that splitting it gives each layer a single, testable responsibility. The fourth layer earns its place by carrying a distinct contract.
+
+</details>
+
+<details><summary><b>74.</b> What is the role of lineage tooling in a medallion lakehouse?</summary>
+
+Lineage records how each table and column derives from those below, so you can trace a gold figure back to its bronze source and assess the impact of a change. It operationalizes the layer contracts: lineage is the machine-readable form of "this came from that," which is exactly what audits and impact analysis require.
+
+</details>
+
+<details><summary><b>75.</b> How do you handle personally identifiable or restricted data across the layers?</summary>
+
+Typically you minimize or mask sensitive fields as they move up — bronze may hold the raw sensitive copy under tight access controls and retention, while silver and gold expose masked, tokenized, or aggregated forms per the consumer's need-to-know. The layer contract should state the data-protection policy alongside schema and DQ.
+
+</details>
+
+<details><summary><b>76.</b> Why is "every consumer queries silver directly" sometimes acceptable and sometimes not?</summary>
+
+It is acceptable when consumers genuinely need fine-grained conformed data and a gold model would just be a thin view — silver is trusted, so reading it is fine. It is not acceptable when consumers need stable, consumption-specific shapes or aggregates, because then they each rebuild gold logic ad hoc, reintroducing inconsistency.
+
+</details>
+
+<details><summary><b>77.</b> What does it mean that "bronze is the source of truth for ingested data but not for the business fact"?</summary>
+
+It means bronze authoritatively records what the platform received — the exact bytes and timing — but the authoritative business value (the official NAV) is owned by the upstream source system that produced it. If bronze and source disagree, the source defines the fact and bronze defines what was delivered; both roles are real and distinct.
+
+</details>
+
+<details><summary><b>78.</b> How should a contract sheet treat a manual NAV override entered by an operator?</summary>
+
+It must be marked as a system of record, stored in its own override table with its own retention and lineage, and applied at a defined layer (often silver) with provenance recorded. Because it is not derivable from any lower layer, treating it as rebuildable would lose it on the next reprocess — a serious risk in regulated data.
+
+</details>
+
+<details><summary><b>79.</b> Why does the architect's job include making layer contracts "explicit standards instead of tribal folklore"?</summary>
+
+Because contracts that live only in people's heads are inconsistent, unenforceable, and invisible to audit, so boundaries drift and lineage breaks at exactly those points. Writing them as standards — owner, schema policy, DQ gate, retention, consumer promise — makes them reviewable, enforceable, and survivable beyond the current team.
+
+</details>
+
+<details><summary><b>80.</b> A gold EMT file shows a NAV that disagrees with the fund accounting system. What is the first thing to check?</summary>
+
+Trace the figure down the layers: confirm gold derives correctly from silver, that silver conformed and deduplicated the right bronze record, and that bronze matches the source file. The disagreement is almost always a contract violation at one boundary — a missed dedup, a wrong effective-date rule, or a stale bronze ingest — and the layering tells you where to look.
+
+</details>
+
+<details><summary><b>81.</b> Why is per-layer ownership essential to enforcing SLAs?</summary>
+
+Because an SLA — freshness, schema stability, quality — is only meaningful if someone is accountable for meeting it; without a named owner the promise is nobody's job and silently lapses. Assigning each layer a single owner turns its consumer promise from an aspiration into an enforceable commitment.
+
+</details>
+
+<details><summary><b>82.</b> How does medallion layering interact with idempotent pipelines?</summary>
+
+Idempotent transformations let you re-run any layer's build over the same input and get the same output without duplication, which is what makes "rebuildable from below" practical and safe. Combined with immutable bronze, idempotency is how you reprocess confidently after a bug fix — re-running is harmless and deterministic.
+
+</details>
+
+<details><summary><b>83.</b> What is the consequence of putting DQ checks in gold instead of silver?</summary>
+
+Bad data has already passed through silver and been consumed by other gold products before the gold-level check catches it, so each gold model re-implements and re-runs validation and they can disagree. Gating at silver stops bad data once, at the boundary into the trusted layer, for all consumers simultaneously.
+
+</details>
+
+<details><summary><b>84.</b> How do you reason about cost when adding layers?</summary>
+
+Each layer adds storage and compute (rebuilding and persisting another copy) and pipeline latency, so a layer must buy a contract worth that cost. A pass-through layer with no distinct guarantee is pure overhead, which is the cost argument against cargo-culting three layers when two suffice.
+
+</details>
+
+<details><summary><b>85.</b> Why keep both the original NAV and its later correction in bronze rather than overwriting?</summary>
+
+Because overwriting would destroy bronze's immutability and the audit trail of what was delivered when, breaking replayability and the evidence an auditor needs. Keeping both — original and correction as distinct immutable facts — lets silver apply the supersession rule while preserving the full history of source behaviour.
+
+</details>
+
+<details><summary><b>86.</b> What is a "supersession rule" for late-arriving corrections in silver?</summary>
+
+It is the logic that decides which version of a record is current when multiple deliveries exist for the same key and date — typically the latest by ingestion or by business effective date wins, with the prior version retained or flagged. It lives in silver because it is a conforming decision, and it must be documented as part of silver's contract.
+
+</details>
+
+<details><summary><b>87.</b> Why is it a problem if two gold reports compute "total net assets" differently from the same silver?</summary>
+
+Because it means the business-metric definition is not centralized, so each gold model embeds its own formula and they drift. The fix is to define the metric once — in gold's shared logic or a dedicated semantic layer — so the layer contract guarantees one canonical definition for all consumers.
+
+</details>
+
+<details><summary><b>88.</b> What belongs in the "schema policy" cell of a layer contract?</summary>
+
+Whether the layer tolerates drift or enforces a fixed schema, and the rule for handling source changes — for bronze, "accept any schema, store as-is"; for silver, "enforce the conformed schema, quarantine non-conforming, evolve only via change control." It makes the schema-on-read versus schema-on-write decision an explicit, reviewable standard.
+
+</details>
+
+<details><summary><b>89.</b> How would you describe the consumer promise of the gold layer to a downstream BI team?</summary>
+
+That gold offers stable, documented, consumption-ready tables with a committed freshness and a schema that will not change without notice through change control, and whose figures are derived from validated silver. The BI team can build dashboards on that promise without re-cleaning or re-validating data themselves.
+
+</details>
+
+<details><summary><b>90.</b> Why does "schema-on-write start at silver" reduce downstream surprises?</summary>
+
+Because once silver enforces a fixed, validated schema, every consumer reads a guaranteed structure, so a source change cannot ripple unannounced into a dashboard or a regulatory file. Surprises are absorbed and reconciled at the silver gate, which is the whole point of moving enforcement to that boundary.
+
+</details>
+
+<details><summary><b>91.</b> When is it acceptable for bronze to be the layer a consumer reads, and what is the caveat?</summary>
+
+Only for narrow, expert use cases like debugging ingestion, reconciling against the source, or one-off forensic queries where the reader explicitly wants the raw, unvalidated truth. The caveat is that such reads must not feed reporting or downstream products, because bronze carries no quality or schema guarantee.
+
+</details>
+
+<details><summary><b>92.</b> How do you document "what is rebuildable" so reprocessing is safe?</summary>
+
+On the contract sheet, mark each layer's tables as rebuildable (derivable from the layer below) or system-of-record (unique inputs held nowhere else), and back up only the latter independently. This makes a reprocess a low-risk operation, because the team knows exactly what would be regenerated versus what must never be truncated.
+
+</details>
+
+<details><summary><b>93.</b> A reprocess of silver silently dropped a set of manual NAV adjustments. What was the design error?</summary>
+
+The manual adjustments were stored only inside silver and treated as rebuildable, when they were actually a system of record with no upstream source to regenerate them. The error is failing to separate system-of-record data from derived data; those overrides needed their own persisted table that the reprocess reads from, not rebuilds.
+
+</details>
+
+<details><summary><b>94.</b> Why is layering "the default of every lakehouse you will design" but still requires deliberate contracts?</summary>
+
+Because the pattern is near-universal — almost every estate needs raw, conformed, and consumption zones — but its value comes entirely from the contracts at each boundary, which are estate-specific and must be designed, not copied. Adopting the layers without designing their contracts gives you the shape of medallion with none of its guarantees.
+
+</details>
+
+<details><summary><b>95.</b> How does medallion layering help bound the blast radius of a bad source feed?</summary>
+
+The bad data lands in bronze (contained, immutable) and is stopped or quarantined at the silver DQ gate, so it never reaches trusted silver or any gold consumer. The layering localizes the damage to bronze and the error table, and the gate is the documented place where the bad feed was caught and can be diagnosed.
+
+</details>
+
+<details><summary><b>96.</b> What is the architect's answer to "let's just dump everything in one big cleaned table"?</summary>
+
+That collapsing raw, conformed, and consumption into one table erases the contracts — you lose the immutable replay buffer, the single validation gate, and the consumer-neutral integration layer — so cleaning, audit, and reuse all degrade. The layers exist to separate distinct guarantees; merging them trades all of those for apparent simplicity.
+
+</details>
+
+<details><summary><b>97.</b> How do you decide which DQ rules are "blocking" (quarantine) versus "warning" at the silver gate?</summary>
+
+Blocking rules guard invariants that would make data untrustworthy or unjoinable — null keys, unknown ISINs, impossible NAVs — and failing them quarantines the record. Warning rules flag suspicious-but-usable conditions (an unusually large day-over-day NAV move) for review without blocking, and the contract should state which class each rule is in.
+
+</details>
+
+<details><summary><b>98.</b> Why must the layer-contract sheet name a single owner per layer rather than "the data team"?</summary>
+
+Because diffuse ownership means no individual is accountable when the contract is breached, so SLAs slip and decisions stall. A single named owner per layer is who downstream consumers escalate to and who authorizes contract changes, making the promise enforceable rather than aspirational.
+
+</details>
+
+<details><summary><b>99.</b> How does the schema-on-read to schema-on-write transition affect how you onboard a new source?</summary>
+
+You land the new source raw in bronze immediately (schema-on-read accepts it), then do the deliberate work of mapping it into silver's enforced schema and DQ gate before consumers see it. This lets you start capturing data on day one without risk, while controlling exactly when and how it becomes trusted.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the one-line contract for each of the three classic layers.</summary>
+
+Bronze: immutable, replayable raw copy of what was ingested, drift tolerated, the platform's record of receipt. Silver: conformed, deduplicated, DQ-validated single trusted dataset, schema enforced, consumer-neutral. Gold: consumption-modeled, denormalized, consumer-specific outputs with stable schemas and committed SLAs, fully derived from silver.
+
+</details>
+
+
+## Phase 2 · 3.1.4 Data lakehouse — 100 self-test questions
+
+<details><summary><b>1.</b> What is a data lakehouse in one sentence?</summary>
+
+A lakehouse is an analytical architecture that puts warehouse-style management features — ACID transactions, schema enforcement, indexing, versioning — directly on top of low-cost object storage holding open file formats, so one platform serves both BI/SQL and data science without copying data into a separate warehouse. The point is to get warehouse guarantees on lake economics. It is defined in the CIDR 2021 paper "Lakehouse: A New Generation of Open Platforms" by Zaharia, Ghodsi, Xin and Armbrust.
+
+</details>
+
+<details><summary><b>2.</b> Name the four decoupled layers of a lakehouse.</summary>
+
+Object store (the physical storage substrate, e.g. S3/MinIO/ADLS), open table format (e.g. Apache Iceberg, Delta Lake or Hudi, which adds ACID and metadata over files), a catalog (which tracks which table points at which metadata and is the namespace), and one or more query engines (e.g. Trino, Spark, DuckDB). Each layer talks to the next through an open contract, so any one can be swapped without rewriting the others — that decoupling is the architectural thesis.
+
+</details>
+
+<details><summary><b>3.</b> Why is "decoupled layers" the central selling point of the lakehouse, architecturally?</summary>
+
+Because each of the four layers can be replaced independently, you avoid a single vendor owning storage, format, catalog and engine all at once, which is exactly the lock-in a monolithic warehouse imposes. You can keep data in S3 while swapping Trino for Spark, or change catalogs without rewriting your Parquet files. The architect's job is to know precisely what each layer guarantees so they can reason about a swap's blast radius.
+
+</details>
+
+<details><summary><b>4.</b> In the lakehouse stack, what does the object store layer actually provide?</summary>
+
+Durable, cheap, near-infinite byte storage addressed by keys, with no native notion of tables, transactions, or schema — just immutable objects (typically Parquet files) plus PUT/GET/LIST/DELETE. Everything table-like (atomicity, snapshots, schema) is added by the table-format layer above it. That is why you can point MinIO, S3 or ADLS Gen2 at the same Iceberg tables: the store is deliberately dumb.
+
+</details>
+
+<details><summary><b>5.</b> What does the table-format layer add that raw Parquet on object storage cannot give you?</summary>
+
+It adds a metadata layer over the files that provides ACID transactions, snapshot isolation, schema enforcement and evolution, partition tracking, and time travel — turning a directory of files into a real table. Without it, two writers can corrupt a table because object stores have no multi-file atomic commit. Iceberg, Delta Lake and Hudi are the three mainstream implementations of this layer.
+
+</details>
+
+<details><summary><b>6.</b> What is the job of the catalog layer in a lakehouse?</summary>
+
+The catalog is the namespace and pointer: it maps a logical table name like `funds.nav_daily` to the location of that table's current metadata file, and it is the component that performs the atomic commit when a table changes. Engines ask the catalog "where is table X right now?" rather than scanning storage. Examples include the Iceberg REST catalog, Apache Polaris, AWS Glue, Databricks Unity Catalog and Snowflake Open Catalog.
+
+</details>
+
+<details><summary><b>7.</b> What does the query-engine layer contribute, and why can several engines share one table?</summary>
+
+The engine plans and executes SQL or dataframe queries — pruning, joining, aggregating — by reading the table format's metadata to know which data files to touch. Several engines (Trino for interactive SQL, Spark for heavy ETL, DuckDB for local analysis) can read the same Iceberg table concurrently because they all speak the open table-format spec and ask the same catalog. No engine owns the data; the data lives in open files in the store.
+
+</details>
+
+<details><summary><b>8.</b> According to the CIDR 2021 lakehouse paper, what was the core problem with the "two-tier" lake-plus-warehouse architecture it sought to replace?</summary>
+
+Teams kept a cheap lake for raw/ML data and a separate warehouse for BI, which meant continuous ETL copying between the two, extra storage cost, staleness, and two sources of truth that drift. The paper argues a single lakehouse tier eliminates that duplication and the reliability problems of moving data twice. The fix is to add management features to the lake rather than copy data out of it.
+
+</details>
+
+<details><summary><b>9.</b> Who are the authors of the CIDR 2021 lakehouse paper, and what company are they associated with?</summary>
+
+Matei Zaharia, Ali Ghodsi, Reynold Xin and Michael Armbrust, all associated with Databricks (and UC Berkeley for several). The syllabus cites it as "Armbrust et al.", but the full author list is Zaharia et al. They are the same people behind Apache Spark and Delta Lake, which colours the paper's framing.
+
+</details>
+
+<details><summary><b>10.</b> The paper says a metadata layer like Delta Lake stores its transaction log where? Why is that significant?</summary>
+
+It stores the transaction log in the same object store that holds the data files (for example, a `_delta_log` directory in the same S3 bucket), rather than in a separate database. This means the table's history and the data travel together and you need no extra always-on metadata server, but it also means the object store's consistency behaviour matters for correctness. It is what lets the table format work on plain S3.
+
+</details>
+
+<details><summary><b>11.</b> According to the lakehouse paper, transactions in Delta/Iceberg/Hudi span how many tables at once?</summary>
+
+One table at a time — these formats support single-table ACID transactions only, not cross-table atomic commits. The paper notes it should be extensible to multi-table transactions but that, as designed, you cannot atomically commit a change touching two tables. For a fund pipeline this means you cannot atomically update a `holdings` table and a `nav` table in one transaction; you orchestrate that at the job level.
+
+</details>
+
+<details><summary><b>12.</b> Name three warehouse capabilities you lose when you run queries directly against open-format files in a raw lake.</summary>
+
+ACID transactions, data versioning (time travel / rollback), and indexing — and, more broadly, fine-grained security and management ergonomics. The lakehouse paper frames these as exactly the "rich management features" the table-format metadata layer is designed to add back. Without them, concurrent writers corrupt tables and you cannot audit what a table looked like last month.
+
+</details>
+
+<details><summary><b>13.</b> The lesson says the architect must articulate "which component carries which guarantee." Give an example of doing that.</summary>
+
+For example: durability and cheap retention is carried by the object store; atomicity and snapshot isolation is carried by the table format, not the store; namespace, table-level access control and the atomic commit pointer is carried by the catalog; query performance and concurrency limits come from the engine. So if NAV files are corrupting under concurrent writes, you look at the table format and catalog, not the bucket. Naming the carrier tells you where to debug and what a swap risks.
+
+</details>
+
+<details><summary><b>14.</b> What does the lakehouse paper say the warehouse still does better — name the three areas the lesson highlights.</summary>
+
+High concurrency (many simultaneous BI users), fine-grained security (row-/column-level access control), and ergonomics (mature tooling, governance, predictable SQL behaviour). The paper is honest that lakehouses had not fully closed these gaps, which is why even lakehouse-first shops often keep a warehouse for month-end BI. The architect should not oversell the lakehouse on these axes.
+
+</details>
+
+<details><summary><b>15.</b> Why is high concurrency historically a warehouse strength rather than a lake strength?</summary>
+
+Warehouses were built around a managed, elastic compute service with a query optimizer, result caching, admission control and workload management tuned for hundreds of concurrent short BI queries. A raw lake with an open engine had to read metadata and prune files on every query with fewer of those built-in concurrency controls. At a fund administrator's month-end, when many analysts hit NAV dashboards at once, that concurrency engineering is exactly what you are paying the warehouse for.
+
+</details>
+
+<details><summary><b>16.</b> Why is fine-grained security cited as a warehouse advantage, and how do lakehouses try to close the gap?</summary>
+
+Warehouses offer mature row-level, column-level and dynamic-masking controls enforced at the engine. Lakehouses historically only had file/object-level permissions, so masking a single column (say an investor's tax ID) was awkward. Modern catalogs — Unity Catalog, Polaris, Snowflake Horizon — close the gap by enforcing table/column/row policies at the catalog so every engine inherits them, but the architect must verify the chosen engine actually honours catalog-enforced policies.
+
+</details>
+
+<details><summary><b>17.</b> What does "ergonomics" mean as a warehouse advantage, in practical terms?</summary>
+
+It means the day-to-day experience is smoother: a single SQL dialect that just works, automatic statistics and tuning, built-in workload management, mature BI-tool connectors, and fewer moving parts to operate. An open lakehouse asks you to assemble store, format, catalog and engine yourself and keep them compatible. The lesson's "just buy Snowflake" objection is largely an ergonomics-and-headcount argument.
+
+</details>
+
+<details><summary><b>18.</b> Per the lesson's "Why," what is the cost trap if you pick the wrong architecture for cold regulatory archives?</summary>
+
+If you keep seven-year regulatory archives (which must be retained but are rarely queried) inside a priced warehouse, you pay warehouse storage and compute rates for cold data that should sit in cheap object-store tiers. The lakehouse lets those archives live as Iceberg/Parquet on cheap S3/Glacier-class tiers, queried only on demand. Picking warehouse-everything turns a compliance retention requirement into an ongoing budget line.
+
+</details>
+
+<details><summary><b>19.</b> Conversely, what do you lose by going "just use files on a share" for fund data?</summary>
+
+You lose the concurrency, atomic multi-writer safety, schema enforcement and fine-grained security a fund administrator needs at month-end — flat files give you no atomic commit, so a half-written NAV file can be read as final, and no access controls beyond filesystem permissions. There is no time travel to prove what a figure was on a given date for an auditor. The table-format and catalog layers exist precisely to fix the "files on a share" failure modes.
+
+</details>
+
+<details><summary><b>20.</b> Why do open formats "de-risk vendor lock-in" according to the paper and lesson?</summary>
+
+Because the data sits in open, documented formats (Parquet files, an open table spec) that many independent engines can read, no single vendor controls your ability to access your own data. Storage, format, catalog and engine can each be swapped independently, so leaving a vendor does not require a data migration. Lock-in shrinks to whichever single layer you let a vendor own.
+
+</details>
+
+<details><summary><b>21.</b> If storage, format, catalog and engine are each swappable, which one tends to be the real lock-in point in modern vendor bundles?</summary>
+
+Increasingly the catalog — because the catalog enforces governance, security policies and the atomic commit, and proprietary catalogs (e.g. a vendor's managed Unity Catalog or Horizon) may gate write access or policy features behind the vendor even when the underlying files are open Parquet/Iceberg. Open files do not help if only one vendor's catalog can safely write to them. The architect should ask "who can write to and govern these tables if I leave?"
+
+</details>
+
+<details><summary><b>22.</b> A vendor says "your data is in open Parquet, so there is no lock-in." How do you pressure-test that claim?</summary>
+
+Ask which catalog governs the tables, whether external engines can both read and write through an open catalog API, and whether row/column security travels with the data or lives only in the vendor's engine. Open file format is necessary but not sufficient; if only the vendor's catalog can commit writes or enforce policy, the lock-in has just moved up a layer. Verify by trying to register and write the same tables from a second engine.
+
+</details>
+
+<details><summary><b>23.</b> What is a "data swamp," and which author warns about it?</summary>
+
+A data swamp is a data lake that has degraded into an unusable mess: tables with unclear ownership, cryptic column names, no quality enforcement, no lineage, and analysts building distrusted shadow copies. Bill Inmon, in "Building the Data Lakehouse," warns that without lakehouse discipline a lake turns into a swamp. The lesson uses this as the warehouse-veteran objection you must be able to answer.
+
+</details>
+
+<details><summary><b>24.</b> What is the core of the Inmon / warehouse-veteran distrust of data lakes?</summary>
+
+That lakes historically lacked the disciplines warehouses enforce — governance, data quality, modelling, lineage and conformed definitions — so they accumulate ungoverned data nobody trusts. Inmon is also skeptical of pure ELT dumping raw data in and sorting it out later. His point is that the lakehouse only works if it borrows the warehouse's governance discipline, not just its SQL.
+
+</details>
+
+<details><summary><b>25.</b> How does the lakehouse answer the Inmon objection rather than just dismissing it?</summary>
+
+By adding back the missing disciplines at the table-format and catalog layers: schema enforcement stops bad data landing, time travel and the transaction log give lineage and auditability, and the catalog gives ownership and governance. So the lakehouse is not "lake without rules" but "lake with the warehouse's guarantees re-implemented on open storage." Conceding that ungoverned lakes do become swamps is more persuasive than denying it.
+
+</details>
+
+<details><summary><b>26.</b> At an architecture level, how does Databricks position its lakehouse?</summary>
+
+Databricks centres on Delta Lake (and now Iceberg interop) as the table format with Unity Catalog as the governance/catalog layer and Spark/Photon plus its SQL engine as compute, all over your cloud object store. The pitch is one governed platform for data engineering, BI and ML. The architect should note that the governance and operational glue (Unity Catalog) is where Databricks' stickiness lives.
+
+</details>
+
+<details><summary><b>27.</b> At an architecture level, how does "Snowflake-with-Iceberg" position itself differently from classic Snowflake?</summary>
+
+Classic Snowflake stored data in its own proprietary internal format; "Snowflake-with-Iceberg" lets tables live as open Apache Iceberg in your object store, with Snowflake Open Catalog (a managed Polaris) or external catalogs governing them, so other engines can read the same tables. The pitch is "warehouse ergonomics and concurrency, but your data stays open." The lock-in shifts from the storage format toward the catalog and the compute pricing.
+
+</details>
+
+<details><summary><b>28.</b> At an architecture level, where does Microsoft Fabric / OneLake sit?</summary>
+
+OneLake is a single tenant-wide logical data lake (built on ADLS Gen2) storing data in open Delta/Parquet, with Fabric providing the engines (Spark, Warehouse, Power BI) over it. The pitch is "one lake for the whole organization, deeply integrated with Power BI and the Microsoft stack." Its stickiness is the tight Microsoft 365 / Power BI integration and the Fabric capacity pricing model rather than the file format.
+
+</details>
+
+<details><summary><b>29.</b> A 50-person Luxembourg fund administrator asks "why not just buy Snowflake and be done?" Give the two-sentence architect rebuttal.</summary>
+
+Snowflake is excellent for concurrent BI and fine-grained security, but pricing is workload-shaped — month-end NAV reporting spikes and seven-year regulatory archives can become an expensive line if cold data and idle warehouses are not managed, and historically its proprietary format risked lock-in. With Iceberg-on-object-store you keep cold regulatory data cheap and your tables open while still being able to attach Snowflake as one engine if you want its concurrency. The answer is "you can use Snowflake as an engine without surrendering your storage and format."
+
+</details>
+
+<details><summary><b>30.</b> Same client asks "why not just keep NAV files on a network share?" Give the architect rebuttal.</summary>
+
+A share gives you no atomic multi-writer commit, so a partially written NAV file can be read as final; no schema enforcement, so a malformed EMT/EPT file silently corrupts downstream; no time travel, so you cannot prove to an auditor what a figure was on a given date; and only filesystem-level security. A lakehouse adds exactly those — ACID, schema, versioning, fine-grained access — on top of storage that is just as cheap. Files-on-a-share fails precisely at month-end concurrency and regulatory audit.
+
+</details>
+
+<details><summary><b>31.</b> For the build-vs-buy memo, what are the four scoring axes the lesson asks you to use?</summary>
+
+Cost, in-house skills required, lock-in, and EU compliance / data-residency posture. Each candidate (open lakehouse, Databricks, Fabric) is scored on all four so the recommendation is defensible rather than a gut call. For a Luxembourg fund administrator, data-residency and EU compliance often carry disproportionate weight.
+
+</details>
+
+<details><summary><b>32.</b> Why does "in-house skills required" weigh against the fully open lakehouse for a 50-person shop?</summary>
+
+Assembling and operating MinIO/S3 plus Iceberg plus a catalog plus Trino yourself demands engineers who can keep four layers compatible, tune compaction, run the catalog, and handle upgrades — scarce skills for a 50-person fund administrator. A managed platform trades cost and lock-in for far lower operational headcount. The architect must weigh whether the team can actually run what they build.
+
+</details>
+
+<details><summary><b>33.</b> Why is EU compliance / data-residency posture a first-class axis for a Luxembourg fund administrator?</summary>
+
+Fund data is subject to EU data-protection and sector rules (and DORA-era operational-resilience expectations), so where data physically sits and who can access it matters legally, not just technically. You must confirm the platform offers EU regions, keeps data resident, and supports the access controls and audit trails regulators expect. A cheaper platform that cannot guarantee EU residency may be disqualified regardless of its technical merits.
+
+</details>
+
+<details><summary><b>34.</b> The "Do" asks, for each lakehouse component, "what breaks if you swap that vendor." What breaks if you swap the object store?</summary>
+
+Generally the least breaks if the table format is open: pointing Iceberg at a new S3-compatible store mostly means re-homing files and updating locations, since the format does not depend on a specific store. The gotchas are store-specific semantics — atomic rename on ADLS Gen2 vs none on S3, different consistency and per-request pricing — and any lifecycle/retention rules that must be re-created. Engines and catalog can usually stay put.
+
+</details>
+
+<details><summary><b>35.</b> What breaks if you swap the table format (e.g. Iceberg to Delta)?</summary>
+
+A lot: the metadata layout, transaction log, snapshot mechanics and engine connectors all change, so you must rewrite or migrate every table and re-point every engine and catalog at the new format. Time-travel history may not carry over cleanly. This is the most invasive swap because the format defines the table's on-disk contract that everything above depends on.
+
+</details>
+
+<details><summary><b>36.</b> What breaks if you swap the catalog?</summary>
+
+You change the namespace and the component that performs atomic commits and (often) enforces governance, so every engine must be re-pointed at the new catalog, table registrations re-created, and security policies re-implemented if they lived in the old catalog. If history of who-owns-what or column-level policies were catalog-resident, those must be migrated. Because the catalog is increasingly the lock-in point, this swap is where vendor portability is really tested.
+
+</details>
+
+<details><summary><b>37.</b> What breaks if you swap the query engine?</summary>
+
+Usually the least disruptive swap with open formats: the new engine reads the same Iceberg tables via the same catalog, so data does not move. What breaks is SQL-dialect differences, engine-specific functions and tuning, performance characteristics, and any engine-only features (materialized views, caching) you relied on. You re-test queries and dashboards rather than migrate data.
+
+</details>
+
+<details><summary><b>38.</b> The "Done when" asks you to "name, for each component, what breaks if you swap vendors." Summarize the swap blast radius from smallest to largest.</summary>
+
+Engine swap is smallest (re-test SQL, data stays put), object-store swap is small-to-medium (re-home files, mind store semantics and lifecycle), catalog swap is medium-to-large (re-point engines, migrate policies and registrations), and table-format swap is largest (rewrite/migrate every table, re-connect everything). Knowing this ordering is exactly what lets an architect reason about portability. The open formats are what keep the engine and store swaps cheap.
+
+</details>
+
+<details><summary><b>39.</b> What is Apache Iceberg, in one line?</summary>
+
+Apache Iceberg is an open table format that sits over Parquet/ORC/Avro data files in object storage and adds a metadata tree giving ACID transactions, snapshot isolation, schema and partition evolution, and time travel. It is the table-format layer in the FOSS stack the lesson assembles (MinIO + Iceberg + Trino + DuckDB). As of 2026 it has become the de-facto open table-format standard.
+
+</details>
+
+<details><summary><b>40.</b> What is the `metadata.json` file in an Iceberg table?</summary>
+
+It is the table's current metadata file holding the schema, partition specs, sort orders, the list of snapshots, and table properties; it is the root of the metadata tree that points down to manifest lists, manifests, and finally the data files. Every change writes a new metadata file (for example `v2.metadata.json`) and the catalog atomically swaps its pointer to it. Reading a table starts from whichever `metadata.json` the catalog currently points at.
+
+</details>
+
+<details><summary><b>41.</b> How does Iceberg achieve an atomic commit on an object store that has no multi-file atomic operation?</summary>
+
+It writes new immutable data and metadata files first, then performs a single atomic pointer swap in the catalog from the old `metadata.json` to the new one; readers see either the old or the new state, never a half-written mix. Because the only atomic step is the single pointer swap, no atomic rename of many files is needed. If two writers race, only one pointer swap wins and the loser retries — that is optimistic concurrency.
+
+</details>
+
+<details><summary><b>42.</b> What is an Iceberg snapshot, and what feature does it enable?</summary>
+
+A snapshot is a complete, immutable view of the table's data at one commit — the set of data files valid at that moment. Keeping past snapshots enables time travel (query the table "as of" a timestamp or snapshot id) and rollback. For a fund administrator this is how you reproduce exactly what a NAV table showed on a given valuation date for an auditor.
+
+</details>
+
+<details><summary><b>43.</b> What is the Iceberg REST catalog, and why does it matter for the catalog layer?</summary>
+
+It is a standardized HTTP/JSON catalog API (an open spec) so any compliant client can create, read and commit tables against any compliant catalog server, regardless of the storage behind it. It matters because it makes the catalog layer itself open and swappable, reducing catalog lock-in. Implementations include Apache Polaris, Snowflake Open Catalog, and others that speak the REST spec.
+
+</details>
+
+<details><summary><b>44.</b> As of 2026, what notable capability did Iceberg v3 add, and what does it speed up?</summary>
+
+Iceberg v3 (GA across major platforms in the first half of 2026) added deletion vectors, which mark rows as deleted instead of rewriting whole data files. This speeds up updates, merges and deletes because you avoid the cost of rewriting large Parquet files for small row-level changes. For high-churn fund tables (corrections to holdings or NAV) this materially reduces write amplification.
+
+</details>
+
+<details><summary><b>45.</b> What is Trino's role in the FOSS lakehouse stack?</summary>
+
+Trino is a distributed, in-memory SQL query engine that connects to Iceberg tables (and many other sources) and is tuned for interactive, federated analytics across data it does not store itself. In the stack it is the high-concurrency SQL engine over the open tables, complementing heavy batch engines. It reads the Iceberg metadata to prune files and pushes down filters.
+
+</details>
+
+<details><summary><b>46.</b> What is DuckDB's role in the FOSS lakehouse stack, and how does it differ from Trino?</summary>
+
+DuckDB is an embedded, single-node analytical SQL engine — it runs in-process (for example via `uv run` in Python) and is ideal for local development, testing and moderate-sized analysis directly over Parquet and Iceberg. Unlike Trino, it is not a distributed cluster; it trades horizontal scale for zero-ops simplicity on one machine. In the stack it is the local/laptop engine, Trino the distributed one.
+
+</details>
+
+<details><summary><b>47.</b> What is MinIO's role in the FOSS lakehouse stack?</summary>
+
+MinIO is an S3-compatible object store you can run locally (e.g. in Docker) that serves as the physical storage substrate for the whole lakehouse, standing in for ADLS Gen2 or S3 in the cloud. Because it speaks the S3 API, code written against MinIO ports to real S3 with little change. It is the bottom layer the table format and engines sit on.
+
+</details>
+
+<details><summary><b>48.</b> Why is the lakehouse called "the target architecture for most fund platforms" in this lesson?</summary>
+
+Because fund platforms need both cheap, auditable, long-retention storage for regulatory data and warehouse-grade concurrency and security for month-end NAV reporting — the lakehouse's lake-economics-plus-warehouse-guarantees is exactly that combination. The architect is expected to design one and defend it against both "just buy a warehouse" and "just use files." It balances cost, compliance and concurrency in one tier.
+
+</details>
+
+<details><summary><b>49.</b> Why does the lesson stress that you must "defend" your lakehouse design, not just build it?</summary>
+
+Because in a vendor-selection or steering-committee setting you will face credible counter-pressures ("Snowflake is simpler," "files on a share are cheaper") and a CFO who sees cost, and your design only survives if you can name specific consequences of each alternative. An undefended design loses to whoever argues most confidently. The whole T1 lesson is about being able to articulate trade-offs, not just draw boxes.
+
+</details>
+
+<details><summary><b>50.</b> A fund's bronze NAV files land continuously and an ML job reads them while a BI job queries them — what does the table format buy you here?</summary>
+
+Snapshot isolation: the BI and ML readers see a consistent snapshot of the table even while a writer commits new NAV files, and the writer's commit is atomic so no reader ever sees a half-written batch. On a raw share, a reader could pick up a partially written file and report a wrong NAV. This is the concurrency guarantee that makes a multi-consumer fund pipeline safe.
+
+</details>
+
+<details><summary><b>51.</b> Schema enforcement: how does it protect a fund pipeline ingesting EMT/EPT files?</summary>
+
+The table format rejects or quarantines writes whose columns or types do not match the table's declared schema, so a malformed or changed EMT/EPT field cannot silently land as garbage and propagate into NAV or regulatory reports. This is one of the warehouse disciplines Inmon says lakes lack and lakehouses restore. The architect pairs enforcement with explicit schema evolution for the cases where the format legitimately changes.
+
+</details>
+
+<details><summary><b>52.</b> Why is time travel specifically valuable in a regulated fund-administration context?</summary>
+
+Because regulators and auditors ask "what did this figure show on this date, and can you prove it wasn't altered" — time travel lets you query a table as of a past snapshot and demonstrate the exact state used for a given NAV or filing. The transaction log gives an immutable audit trail of every change. On flat files you would have to keep manual dated copies and hope nobody overwrote them.
+
+</details>
+
+<details><summary><b>53.</b> An ISIN-keyed holdings table needs corrections without losing history. How does the lakehouse support that?</summary>
+
+You commit updates as new snapshots (using deletion vectors / merge-on-read in Iceberg v3 to avoid rewriting whole files), and every prior snapshot remains queryable for audit, so a correction does not erase what was previously reported. The catalog's atomic commit ensures concurrent readers never see a partial correction. You get mutability with a full, auditable history — exactly what flat files cannot offer.
+
+</details>
+
+<details><summary><b>54.</b> "Storage/format/catalog/engine can each be swapped independently" — why does the lesson treat this as a risk-management statement, not just a technical one?</summary>
+
+Because independent swappability is what bounds your exposure to any one vendor failing, raising prices, or being acquired — it converts a potential full-platform migration into a single-layer change. For a regulated administrator, being able to credibly answer "what is our exit plan from vendor X" is a governance and resilience requirement (think DORA). So the decoupling is a continuity-of-operations argument as much as an engineering one.
+
+</details>
+
+<details><summary><b>55.</b> Two Spark jobs write to the same Iceberg table at once and one fails with a commit conflict. What happened and is the data safe?</summary>
+
+Iceberg uses optimistic concurrency: both jobs prepared commits against the same base snapshot, only one atomic pointer swap could win, and the loser's commit was rejected — so the data is safe and consistent, not corrupted. The losing job should retry against the new current snapshot. This is the expected, correct behaviour, not a bug; the architect plans retries rather than trying to prevent the conflict.
+
+</details>
+
+<details><summary><b>56.</b> A NAV query over Iceberg is slow and scanning far more files than expected. What is the first thing to check?</summary>
+
+Check partitioning and file layout / clustering and whether the query's predicates align with the partition spec and column statistics so Iceberg can prune files — and check for many tiny files needing compaction. The lakehouse paper lists data layout/clustering and auxiliary structures (statistics, indexes) as the performance levers. If predicates do not match partitioning, the engine cannot prune and reads everything.
+
+</details>
+
+<details><summary><b>57.</b> According to the lakehouse paper, what performance techniques let a lakehouse approach warehouse speed despite using open formats?</summary>
+
+Caching hot data, optimizing data layout (clustering/ordering files so queries skip irrelevant ones), and maintaining auxiliary data structures such as statistics, zone maps and indexes to enable file/row-group skipping. These are added by the format and engine layers over plain Parquet. The argument is that openness need not mean slow, because the optimizations live above the file format.
+
+</details>
+
+<details><summary><b>58.</b> Why does keeping data in Parquet (a columnar format) matter for the lakehouse performance story?</summary>
+
+Columnar storage lets engines read only the columns a query needs and skip the rest, and it compresses well and carries per-row-group statistics (min/max) that enable predicate-based skipping. That gives the lakehouse much of a warehouse's scan efficiency on open files. The table format layers metadata on top of these Parquet files rather than replacing them.
+
+</details>
+
+<details><summary><b>59.</b> What is "small files" / compaction, and why does it bite fund pipelines specifically?</summary>
+
+Streaming or frequent micro-batch writes (e.g. NAV updates landing through the day) create many tiny data files, and queries that must open thousands of small files are slow and rack up object-store request costs. Compaction rewrites them into fewer, larger files. Fund pipelines with frequent corrections and intraday landings are prone to this, so the architect schedules compaction as routine maintenance.
+
+</details>
+
+<details><summary><b>60.</b> Why can't you just rely on the object store's permissions for fine-grained security in a lakehouse?</summary>
+
+Object stores grant access at the bucket/prefix/object level, which cannot express "this user may see all columns except investor tax IDs" or "only rows for fund X." Fine-grained row/column security has to be enforced higher up — at the catalog and/or engine. This is a known gap versus warehouses, which is why catalog-enforced policies (Unity Catalog, Polaris, Horizon) are central to a regulated design.
+
+</details>
+
+<details><summary><b>61.</b> "Even lakehouse-first shops keep a warehouse." Why might a fund administrator still run one alongside the lakehouse?</summary>
+
+For the warehouse's strengths the paper concedes — very high concurrency for many simultaneous BI users at month-end, mature fine-grained security, and predictable ergonomics for finance/reporting teams. The lakehouse holds the cheap, open, long-retention data and ML workloads; the warehouse serves the high-concurrency governed BI layer. The two-tier setup can be deliberate, not just legacy.
+
+</details>
+
+<details><summary><b>62.</b> How would you explain to a CFO that warehouse cost is "workload-shaped, not data-shaped"?</summary>
+
+Cost is driven by how much compute you run — concurrent queries, full scans, idle-but-running warehouses — far more than by how many terabytes you store, so a month-end reporting spike or an unpartitioned full-table scan can cost more than a year of cold storage. The lever is controlling compute and query shape, not deleting data. This is why a runaway query, not a big dataset, is usually the budget incident.
+
+</details>
+
+<details><summary><b>63.</b> In a managed lakehouse vendor's bundle, how do you identify "the genuine lock-in point"?</summary>
+
+Find the single layer the vendor controls that you cannot replace without a migration — typically the layer that holds governance and the atomic commit (the catalog) or the proprietary compute pricing, even when files are open. Ask: if I cancel tomorrow, can another engine still read and write these tables under the same policies? Whatever answer is "no" is your lock-in point.
+
+</details>
+
+<details><summary><b>64.</b> Databricks' bundle: where does the lesson-style lock-in tend to sit?</summary>
+
+In the governance/operational layer — Unity Catalog and the surrounding platform glue — rather than the file format, since data can be Delta or open Iceberg in your own object store. You can read the files elsewhere, but the policies, lineage and managed-table conveniences are Databricks-native. So the question on exit is whether your governance survives the move.
+
+</details>
+
+<details><summary><b>65.</b> Snowflake-with-Iceberg: where does lock-in tend to sit?</summary>
+
+In the compute/pricing model and the catalog governance (Horizon / Open Catalog) rather than the storage format, since the tables can be open Iceberg in your bucket. You keep the data, but Snowflake's concurrency engine, security features and credit pricing are the sticky parts. The architect checks whether external engines can write the same tables through an open catalog API.
+
+</details>
+
+<details><summary><b>66.</b> Fabric / OneLake: where does lock-in tend to sit?</summary>
+
+In the tight integration with Power BI and the Microsoft 365 / Fabric capacity ecosystem, plus the Fabric capacity pricing model, rather than the open Delta/Parquet files in OneLake. The data is portable; the deep Power BI/governance integration and the capacity-based billing are the gravity. For a Microsoft-centric fund shop that integration is a feature, but it is also the exit cost.
+
+</details>
+
+<details><summary><b>67.</b> Why is "open table format" necessary but not sufficient to avoid lock-in?</summary>
+
+Open files mean other engines can read your data, but if only the vendor's catalog can safely commit writes, or governance/security policies live only in the vendor's platform, you still cannot fully operate the tables elsewhere. Lock-in moves from the file format up to the catalog/governance layer. So the architect must check the catalog and write path, not just the file format, before claiming portability.
+
+</details>
+
+<details><summary><b>68.</b> How does the lakehouse's single-tier design reduce a class of data-quality bugs versus the two-tier lake-plus-warehouse setup?</summary>
+
+By removing the repeated ETL copies between lake and warehouse, you remove the windows where the two copies drift, a load silently drops rows, or transformations diverge — there is one governed source of truth. Fewer copies means fewer reconciliation breaks between, say, the lake's NAV and the warehouse's NAV. The paper frames eliminating that duplication as a reliability win, not just a cost win.
+
+</details>
+
+<details><summary><b>69.</b> What is the difference between schema enforcement and schema evolution in a table format?</summary>
+
+Enforcement rejects writes that do not conform to the current schema (protecting against bad/changed data), while evolution lets you deliberately and safely change the schema over time — add a column, rename, widen a type — without rewriting all data files. Iceberg tracks columns by stable IDs so evolution does not break old data. A fund pipeline uses enforcement to catch malformed feeds and evolution to absorb a legitimate new EMT/EPT field.
+
+</details>
+
+<details><summary><b>70.</b> An auditor asks you to reproduce yesterday's NAV table exactly. Which lakehouse feature do you reach for and how?</summary>
+
+Time travel: query the Iceberg table as of yesterday's snapshot id or timestamp to return precisely the rows valid then, backed by the immutable transaction log proving no later edits altered that view. You do not need a manual dated backup. This is a concrete reason the format layer, not the bare object store, must carry the versioning guarantee.
+
+</details>
+
+<details><summary><b>71.</b> Why does the lesson pair "object store + open table format + catalog + query engines" as decoupled rather than as one product?</summary>
+
+To make explicit that a lakehouse is an architectural pattern of independent, contract-bound layers — not a single SKU — so you reason about each layer's vendor and guarantee separately. A managed product bundles all four, which is convenient but concentrates lock-in. Seeing the four layers is what lets you compare a bundle against an assembled-open stack honestly.
+
+</details>
+
+<details><summary><b>72.</b> A stakeholder says "Iceberg, Delta, Hudi — they're all the same, just pick one." How do you respond as an architect?</summary>
+
+They solve the same problem (ACID/metadata over files) but differ in maturity of features, engine support, catalog ecosystems and write mechanics, and swapping format later is the most invasive change — so the choice is consequential. As of 2026 Iceberg has the broadest cross-engine and catalog support, which lowers lock-in. The decision deserves a real evaluation, not a coin flip, because it is the hardest layer to swap.
+
+</details>
+
+<details><summary><b>73.</b> What does "open direct-access data formats" mean in the paper, and why is it foundational to the lakehouse claim?</summary>
+
+It means data is stored in open, documented formats (like Parquet) that any tool can read directly from the object store without going through a proprietary engine's API. This is foundational because it is what makes the format, catalog and engine independently swappable and breaks the warehouse's "data is hostage inside our system" model. Without direct-access open formats there is no real decoupling.
+
+</details>
+
+<details><summary><b>74.</b> Why does the lakehouse paper emphasize first-class ML/data-science support as a motivation?</summary>
+
+Because data scientists need direct file access to large datasets for training and feature engineering, which classic warehouses (SQL-only, data locked in proprietary format) made awkward, forcing yet another export. The lakehouse keeps data in open files an ML framework can read directly while still offering SQL/BI on the same tables. One copy serves both BI and ML — a core selling point.
+
+</details>
+
+<details><summary><b>75.</b> How does running MinIO locally help you reason about a cloud lakehouse for a Luxembourg fund?</summary>
+
+MinIO speaks the S3 API, so a local MinIO + Iceberg + Trino/DuckDB stack lets you prototype the exact layering, partitioning and lifecycle behaviour you would run on ADLS Gen2 or S3 in an EU region — testing concurrency, schema enforcement and time travel before committing to a cloud bill or vendor. It de-risks the design cheaply. You validate the pattern locally, then re-home the object store to an EU-resident cloud store.
+
+</details>
+
+<details><summary><b>76.</b> What is the practical meaning of "the warehouse still does ergonomics better" for a small fund team's day-to-day?</summary>
+
+It means with a warehouse the analysts mostly write SQL that just works, with tuning, security and connectors handled, whereas an open lakehouse asks the team to operate four layers and keep them compatible — a real burden for a 50-person shop. Ergonomics translates directly into how much engineering headcount you need. This is often the deciding factor in build-vs-buy for small administrators.
+
+</details>
+
+<details><summary><b>77.</b> How can a lakehouse cause "warehouse-priced cold archives" if you design it badly?</summary>
+
+If you put cold seven-year regulatory data into a priced warehouse engine's storage instead of into cheap object-store tiers with lifecycle rules, or you query archives with an always-on expensive engine, you pay warehouse rates for data that should be near-free at rest. The fix is keeping cold data as open files on cheap tiers, queried on demand by a serverless/scaled-down engine. Bad tiering, not the lakehouse pattern itself, creates the cost.
+
+</details>
+
+<details><summary><b>78.</b> Why is the atomic commit specifically a property of the catalog/format rather than the object store?</summary>
+
+Because object stores offer no multi-file atomic operation, the table format arranges that the only atomic step is a single pointer swap, and that swap is performed/coordinated by the catalog. So atomicity is engineered above the store, using the store's one cheap guarantee (atomic single-object write/pointer update). The store stays dumb; the catalog/format make the table transactional.
+
+</details>
+
+<details><summary><b>79.</b> A new engine you want to add cannot write to your tables, only read them. What does this tell you about your catalog?</summary>
+
+It signals the write path and governance are gated by your current catalog/vendor and not exposed through an open, multi-writer catalog API — so the catalog is your lock-in point even though reads are open. To make writes portable you need an open catalog (e.g. an Iceberg REST catalog like Polaris) that any compliant engine can commit through. Read-openness alone does not give you a real exit.
+
+</details>
+
+<details><summary><b>80.</b> How does the lakehouse pattern support DORA-style operational-resilience and exit requirements?</summary>
+
+Because storage, format, catalog and engine are independently swappable and data sits in open formats, you can demonstrate a credible exit/continuity plan from any single vendor without a wholesale data migration — a key operational-resilience and concentration-risk concern under DORA. The transaction log and time travel also give the auditability regulators expect. The architecture turns "what if our vendor fails" from a crisis into a documented single-layer swap.
+
+</details>
+
+<details><summary><b>81.</b> Why might "just use files on a share" actually pass a naive cost comparison, and why is that misleading?</summary>
+
+A share looks cheap because you only count storage and ignore the cost of the failures it invites — corrupted NAVs from non-atomic writes, no audit trail for regulators, manual reconciliation, and no fine-grained security. The lakehouse adds those guarantees on storage that is just as cheap, so the real comparison is "cheap-but-unsafe" versus "cheap-and-governed." The misleading part is pricing storage while ignoring the risk and labour the share imposes.
+
+</details>
+
+<details><summary><b>82.</b> What is the difference between the catalog and the metadata file in Iceberg?</summary>
+
+The `metadata.json` metadata file is per-table state (schema, snapshots, partition spec) stored alongside the data in the object store; the catalog is the external service that knows, for a named table, which metadata file is currently authoritative and performs the atomic pointer swap on commit. The catalog is the namespace and the commit coordinator; the metadata file is the table's own record. You need both — the catalog points at the metadata file.
+
+</details>
+
+<details><summary><b>83.</b> Why does the architect care which layer enforces security policies — catalog versus engine?</summary>
+
+If policies are enforced only in one engine, swapping engines (or letting a second engine in) bypasses your row/column security; if policies live in the catalog, every engine that uses the catalog inherits them. For regulated fund data, catalog-enforced policy is far safer and more portable. So "where is security enforced" is a design decision with direct lock-in and compliance consequences.
+
+</details>
+
+<details><summary><b>84.</b> How does the lakehouse let cold regulatory archives get cheap while staying queryable?</summary>
+
+The archives sit as open Parquet/Iceberg files on cheap, infrequent-access object-store tiers (with lifecycle rules moving them down), and an engine reads them only on demand rather than keeping them in priced warehouse storage with running compute. Time travel and the table format still make them auditable. You pay near-storage-only prices at rest and compute only when an auditor actually queries.
+
+</details>
+
+<details><summary><b>85.</b> Why is "the table format question is settled — Iceberg won" (a 2026 view) relevant to an architect's lock-in reasoning?</summary>
+
+Because broad, converging engine and catalog support for Iceberg means choosing it minimizes the risk that your format becomes a stranded niche, and it maximizes the number of engines that can read/write your tables — directly reducing lock-in. It also means vendors increasingly compete on catalog and compute, not format. The architect can lean on Iceberg as the low-lock-in default while still evaluating the catalog layer carefully.
+
+</details>
+
+<details><summary><b>86.</b> A vendor demo shows blazing query speed on open Iceberg files. What lets that be fast despite open formats?</summary>
+
+Caching of hot data, optimized data layout/clustering so queries skip irrelevant files, and auxiliary structures (statistics, zone maps, indexes) for file/row-group pruning — the exact techniques the lakehouse paper cites. The speed comes from the engine and format layers, not from a proprietary storage format. So fast does not require closed, which is the whole performance argument of the lakehouse.
+
+</details>
+
+<details><summary><b>87.</b> Why does the lesson frame this as a T1 (architect-tier) lesson rather than a hands-on build lesson?</summary>
+
+Because the deliverable is judgement and articulation — a build-vs-buy memo, scoring on cost/skills/lock-in/compliance, and the ability to rebut "just buy Snowflake" and "just use files" with specific consequences — not assembling the stack yourself. The "Done when" checks are all "can you explain/name/state," i.e. defend a design. The hands-on assembly lives in the T2 lessons around it.
+
+</details>
+
+<details><summary><b>88.</b> For the memo's recommendation, the lesson asks for "the one risk that would change it." What does that phrase force you to do?</summary>
+
+It forces you to name the single most important uncertainty whose resolution would flip your recommendation — for example, "if the team cannot hire two platform engineers, switch from open lakehouse to managed Databricks," or "if EU data-residency for vendor X cannot be guaranteed, drop it." This makes the recommendation honest and testable rather than absolute. An architect who can name the pivot risk has actually weighed the decision.
+
+</details>
+
+<details><summary><b>89.</b> Compare the lock-in profile of an assembled-open stack (MinIO/Iceberg/Trino/DuckDB) versus a managed bundle.</summary>
+
+The open stack pushes lock-in to nearly zero at every layer but demands real in-house operational skill to keep the layers compatible and maintained; the managed bundle concentrates lock-in in one layer (usually catalog/compute) in exchange for far lower operational burden. The trade is portability-and-effort versus convenience-and-stickiness. For a 50-person shop the operational burden often outweighs the lock-in saved.
+
+</details>
+
+<details><summary><b>90.</b> A fund's NAV table must support both heavy nightly batch loads and many concurrent morning BI reads. How do the lakehouse layers divide that work?</summary>
+
+The object store holds the Parquet files cheaply; the table format gives the nightly batch atomic commits and the morning readers a consistent snapshot; the catalog enforces who can read which columns; and you can use a batch engine (Spark) for the load and a high-concurrency engine (Trino, or a warehouse) for the morning reads over the same tables. Each layer carries its guarantee, and engines are chosen per workload. That separation is the lakehouse's answer to mixed workloads.
+
+</details>
+
+<details><summary><b>91.</b> Why does Inmon's perspective remain useful even though he is a "warehouse veteran" skeptical of lakes?</summary>
+
+Because his critique pinpoints exactly what lakes must not lose — governance, data quality, lineage, conformed definitions — and the lakehouse is strongest when it deliberately re-implements those disciplines rather than assuming open files alone are enough. Treating his objection as a checklist (do we have ownership, quality gates, lineage?) makes your design swamp-proof. Dismissing the warehouse veterans is how you build a swamp.
+
+</details>
+
+<details><summary><b>92.</b> What is the risk of letting "ELT, sort it out later" govern a regulated fund lakehouse?</summary>
+
+Inmon's warning applies: dumping raw feeds in with no enforcement, ownership or modelling lets the lake degrade into a swamp where analysts distrust the data and regulators cannot trace a figure's lineage. In a fund context that means unreliable NAVs and un-auditable reports. The lakehouse permits ELT but pairs it with schema enforcement, catalog governance and lineage so "later" actually happens with guarantees.
+
+</details>
+
+<details><summary><b>93.</b> How do you answer "can't we just put everything in one big warehouse and skip the lake entirely" for ML workloads?</summary>
+
+Warehouses historically lock data in a proprietary format that ML frameworks cannot read directly, forcing yet another export and a second copy for data science, plus you pay warehouse rates for large training datasets. The lakehouse keeps one open copy that both SQL/BI and ML tools read directly. So warehouse-only re-creates the two-tier copy problem the lakehouse was meant to remove, specifically for ML.
+
+</details>
+
+<details><summary><b>94.</b> In a vendor selection, why ask "does fine-grained security travel with the data or only with the engine?"</summary>
+
+Because if masking and row filters are enforced only inside one engine, any other engine reading the open files bypasses them — a serious risk for investor PII or restricted fund data — whereas catalog-enforced policy protects the data regardless of engine. The answer tells you both your compliance posture and your engine-swap freedom. For regulated data, "travels with the data/catalog" should be a hard requirement.
+
+</details>
+
+<details><summary><b>95.</b> What is Apache Polaris, and why does it matter to the catalog layer's lock-in story?</summary>
+
+Apache Polaris is a vendor-neutral, open-source implementation of the Iceberg REST catalog spec governed under the Apache Software Foundation, so multiple engines can register, read and commit tables through a common open API rather than a proprietary catalog. It matters because an open catalog is what turns "open files" into genuinely portable tables — you can leave a vendor and keep both your data and your governance. Snowflake Open Catalog is a managed Polaris, which is why the architect checks whether a vendor's catalog speaks the open REST spec.
+
+</details>
+
+<details><summary><b>96.</b> A scheduled compaction job on a fund's Iceberg table conflicts with a NAV writer and one commit is rejected. Is this a failure to fix or expected behaviour?</summary>
+
+It is expected optimistic-concurrency behaviour: compaction and the writer both committed against the same base snapshot, only one atomic pointer swap won, and the loser must retry against the new snapshot — no data is lost or corrupted. You design compaction to retry or to run in a low-write window rather than trying to eliminate the conflict. The gotcha is treating a normal commit conflict as an outage and over-engineering around it.
+
+</details>
+
+<details><summary><b>97.</b> Why does the lesson tell you to state consequences "with specific consequences" rather than general pros and cons?</summary>
+
+Because a steering committee discounts vague trade-offs but acts on concrete ones — "files-on-a-share means a half-written NAV can be read as final and you cannot prove yesterday's figure to an auditor" is decisive in a way "lakes are less reliable" is not. Specific, fund-relevant consequences are what let an architect actually win the build-vs-buy argument. The "Done when" check is explicitly the ability to rebut each alternative with named consequences.
+
+</details>
+
+<details><summary><b>98.</b> How does choosing an open catalog change your answer to "what is our exit plan from this vendor?"</summary>
+
+With an open catalog (Iceberg REST / Polaris-compatible) the exit plan is "re-point engines at a new catalog endpoint and keep the same open tables," because reads, writes and policies are not gated by one vendor — turning a wholesale migration into a single-layer swap. With a proprietary catalog, the exit plan involves migrating governance and possibly rewriting the write path, which is far costlier. For DORA-era resilience reviews, that difference is exactly what you must be able to demonstrate.
+
+</details>
+
+<details><summary><b>99.</b> Summarize, in architect terms, the single sentence the lakehouse paper is built to support.</summary>
+
+That you can add the warehouse's management features — ACID transactions, versioning, indexing, governance, performance optimizations — directly on top of cheap open-format data in object storage, so one platform unifies data warehousing and advanced analytics without copying data between two tiers. Everything else (formats, catalogs, engines, performance tricks) is in service of making that claim true on open storage. The architect's job is to know where each of those features actually lives in the stack.
+
+</details>
+
+<details><summary><b>100.</b> Final integration question — walk through what each lakehouse layer guarantees for a Luxembourg fund's month-end NAV pipeline, and name the layer that is your real lock-in risk.</summary>
+
+The object store (EU-resident S3/ADLS) guarantees cheap durable retention of NAV/holdings files; the table format (Iceberg) guarantees atomic month-end commits, schema enforcement on EMT/EPT feeds, and time travel for auditors; the catalog guarantees the namespace, the atomic commit, and column/row security on investor data; the engines (Trino/DuckDB or an attached warehouse) guarantee query performance and concurrency. The real lock-in risk is the catalog/governance layer, since open files do not help if only one vendor can safely write and govern the tables — so that is the layer whose exit plan you must prove for DORA.
+
+</details>
+
+
+## Phase 2 · 3.1.3 + 3.3.1 Data lake on object storage — 100 self-test questions
+
+<details><summary><b>1.</b> What is an object store, and how does it differ fundamentally from a POSIX filesystem?</summary>
+
+An object store is a key-value system that maps an opaque string key to an immutable blob of bytes plus metadata, accessed over HTTP rather than as a mounted device. Unlike a POSIX filesystem it has no inodes, no in-place byte updates, no atomic rename, and no real directory tree — the key space is flat. Treating it like a local disk (assuming cheap renames, partial writes, or fast `ls` on huge "folders") is the single most common architectural mistake when designing a lakehouse on S3 or MinIO.
+
+</details>
+
+<details><summary><b>2.</b> What does it mean that an S3-style key space is "flat"?</summary>
+
+It means there is exactly one level of namespace inside a bucket: every object is addressed by its full key string, and there is no native concept of a nested directory containing entries. A key like `bronze/dt=2026-06-13/nav.parquet` is one indivisible string, not a path walked through three folder objects. The slashes are pure convention that tooling interprets as a hierarchy, but the store itself just sees a long unique string.
+
+</details>
+
+<details><summary><b>3.</b> If S3 has no folders, why do tools like the AWS console and `mc ls` show a folder tree?</summary>
+
+They synthesize the appearance of folders by treating `/` in keys as a delimiter and grouping common prefixes, so `bronze/dt=2026-06-13/` looks like a folder. This is a presentation trick layered over a flat key space; no "folder object" exists on the server. The practical consequence is that creating, renaming, or deleting a "folder" is never a single server-side operation — it is an operation per object that happens to share that prefix.
+
+</details>
+
+<details><summary><b>4.</b> Why is there no atomic rename of an object on S3?</summary>
+
+Because S3 has no rename primitive at all — a "rename" must be implemented as a server-side copy of the object to the new key followed by a delete of the old key, which is two operations and therefore not atomic. Between the copy and the delete a reader can see both keys, neither, or a partially propagated state. This is why frameworks that rely on rename-to-commit (classic Hadoop output committers) are slow and unsafe on raw S3.
+
+</details>
+
+<details><summary><b>5.</b> Why is "no atomic rename" specifically dangerous for a data lake commit protocol?</summary>
+
+Many engines finalize a job by writing output to a temp location and then renaming it to the final path, treating the rename as the atomic "publish" step. On S3 that rename is a copy+delete loop over potentially thousands of files, so it is slow, costs money per object, and can leave the destination half-populated if it fails midway — readers may then see partial results. This is exactly why table formats like Iceberg and Delta use a separate atomic metadata-pointer swap instead of relying on object rename.
+
+</details>
+
+<details><summary><b>6.</b> What is the relationship between MinIO and the S3 API?</summary>
+
+MinIO is an open-source, S3-compatible object store that implements the Amazon S3 REST API, so the same SDKs, the `mc` client, and `s3://` tooling work against it unchanged. It lets you run the exact object-store semantics — flat keys, no rename, multipart upload, lifecycle rules — locally on your native Ubuntu laptop without a cloud account. That makes it the ideal local substrate for practising lakehouse design before moving the same code to AWS S3 or ADLS Gen2.
+
+</details>
+
+<details><summary><b>7.</b> How do you typically run MinIO locally for this lesson on Ubuntu?</summary>
+
+Run it as a container via Docker Compose, exposing the S3 API port (default `9000`) and the web console port (default `9001`), with `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` set as environment variables. You then point the `mc` client or a pyarrow/boto3 client at `http://localhost:9000` with those credentials. This mirrors how you would later target a real S3 or ADLS endpoint, only the endpoint URL and credentials change.
+
+</details>
+
+<details><summary><b>8.</b> What is a bucket, and what are its main constraints?</summary>
+
+A bucket is the top-level container for objects and the unit at which you set region, access policy, versioning, and lifecycle rules. Bucket names must be globally (on AWS) or server-unique, DNS-compatible (lowercase, no underscores in virtual-host style), and there is a soft cap on buckets per account, so you partition data by prefix inside a bucket rather than by spawning thousands of buckets. For a fund lakehouse you might use one bucket like `fund-lakehouse` and separate bronze/silver/gold by key prefix.
+
+</details>
+
+<details><summary><b>9.</b> What `mc` command creates a bucket on a MinIO server, and what must exist first?</summary>
+
+First you register the server as an alias, e.g. `mc alias set local http://localhost:9000 ACCESSKEY SECRETKEY`, then create the bucket with `mc mb local/fund-lakehouse`. The alias stores the endpoint and credentials so subsequent commands address `local/...` paths. If `mc mb` fails it is almost always because the alias is wrong, the server is unreachable on port `9000`, or the bucket name violates naming rules.
+
+</details>
+
+<details><summary><b>10.</b> What is a "prefix" in object-storage terminology?</summary>
+
+A prefix is any leading substring of object keys, most usefully the part up to a delimiter such as `bronze/dt=2026-06-13/`. Listing and many access policies operate on prefixes, so the prefix is the practical unit of "where" data lives even though no folder exists. Choosing a good prefix layout is the main lever you have over both query efficiency and request cost.
+
+</details>
+
+<details><summary><b>11.</b> How does partitioning data lake files map onto object-store keys?</summary>
+
+Partitioning is implemented purely by encoding partition values into the key prefix, typically as `key=value` segments like `dt=2026-06-13/region=LU/`. There is no partition metadata in the store itself — the partition scheme is a naming convention that query engines parse to prune. So "Hive-style partitioning" on S3 is just a disciplined prefix convention, not a server feature.
+
+</details>
+
+<details><summary><b>12.</b> Why is the layout of your keys a cost decision, not just an organizational one?</summary>
+
+Because object stores charge per request (LIST, GET, PUT) and a query engine discovers and reads files by issuing those requests against prefixes. A layout that lets the engine target a narrow prefix issues few LISTs and GETs; a flat or badly partitioned layout forces broad LISTs and reads of irrelevant files, inflating both latency and the per-request bill. Thus the same dataset can cost very differently to query depending solely on how its keys are shaped.
+
+</details>
+
+<details><summary><b>13.</b> What does a date-range scan cost, in request terms, over a `dt=YYYY-MM-DD/` layout?</summary>
+
+To scan a 30-day range the engine issues at least one LIST per day-prefix (more if a day has many files and listing paginates) plus one GET per file it actually reads. So the request count scales with the number of partitions touched and the number of files inside them, which is why over-partitioning into tiny files is as harmful as no partitioning. You estimate it as roughly (partitions in range × LIST pages) + (files read × GETs).
+
+</details>
+
+<details><summary><b>14.</b> Why is "too many small files" a recognized anti-pattern on object stores?</summary>
+
+Each file needs its own GET (and metadata/footer read), and each partition needs its own LIST, so a million tiny Parquet files turns one logical scan into millions of requests, dominating cost and latency regardless of total data size. Small files also waste compression and statistics efficiency and inflate metadata. The remedy is compaction: periodically rewriting many small files into fewer right-sized ones, often targeting roughly 128 MB to 1 GB per file.
+
+</details>
+
+<details><summary><b>15.</b> Conversely, why can files that are too large also hurt?</summary>
+
+Very large files reduce parallelism because an engine often assigns work at file or row-group granularity, so a few huge files leave most workers idle, and any single read failure forces re-reading a lot. They also make selective predicate pushdown coarser because fewer files means fewer chances to skip whole files by statistics. The goal is a middle ground that balances request overhead against parallelism, commonly hundreds of MB per file.
+
+</details>
+
+<details><summary><b>16.</b> What is the difference between durability and availability for an object store?</summary>
+
+Durability is the probability that stored bytes are not lost over time (commonly quoted as eleven nines, 99.999999999%, achieved by replication or erasure coding across devices). Availability is the probability the service can serve a request at a given moment (e.g. 99.9% or 99.99%), which can dip during an outage even when nothing is lost. You can have a temporarily unavailable but still perfectly durable store: your data is safe but you cannot read it right now.
+
+</details>
+
+<details><summary><b>17.</b> How does MinIO achieve durability across disks on a single deployment?</summary>
+
+MinIO uses erasure coding, splitting each object into data and parity shards distributed across drives (and nodes) so the object survives the loss of up to the configured number of drives. This is more space-efficient than full replication for the same fault tolerance. The trade-off is that you need a minimum number of drives/erasure-set members for the scheme to work, which is why production MinIO is deployed across multiple disks or servers.
+
+</details>
+
+<details><summary><b>18.</b> What is a storage tier (storage class), and why do they exist?</summary>
+
+A storage tier is a named cost/performance profile for objects, ranging from hot frequently-accessed tiers to cold archival tiers that are cheap to store but slow and pricier to retrieve. They exist because access patterns change over an object's life: a NAV file is hot at month-end and effectively never read after a year, so paying hot-tier prices for it forever is wasteful. Tiers let you pay for the access pattern you actually have.
+
+</details>
+
+<details><summary><b>19.</b> How do cold/archive tiers make long-term regulatory archives cheap?</summary>
+
+Archive tiers (S3 Glacier, ADLS Archive) drop the per-GB storage price dramatically in exchange for high retrieval latency (minutes to hours) and retrieval fees. Regulatory data such as fund records that must be retained for years but read almost never is the perfect fit: you pay almost nothing to keep it and accept slow, rare retrieval. The architect's job is to make sure nothing latency-sensitive ever lands in archive by accident.
+
+</details>
+
+<details><summary><b>20.</b> What is an object lifecycle policy?</summary>
+
+A lifecycle policy is a set of rules attached to a bucket that automatically transitions objects between storage tiers or expires (deletes) them based on age or other conditions, with no application code involved. It is how you operationalize the "hot now, cold later, gone eventually" plan declaratively. For example, transition bronze data to a cheaper tier after 90 days and delete it after retention expires.
+
+</details>
+
+<details><summary><b>21.</b> In the lesson's `Do`, you expire bronze objects after 30 days — what does an expiration rule actually do?</summary>
+
+An expiration rule causes the store to delete objects matching the rule's prefix/filter once they are older than the specified number of days, freeing storage and removing transient raw data automatically. It runs asynchronously on the server's schedule, so deletion may lag the exact 30-day mark by up to a day. This is ideal for bronze (raw landing) data that has already been promoted to cleaned silver tables and no longer needs to be retained.
+
+</details>
+
+<details><summary><b>22.</b> How would you set a lifecycle rule in MinIO with `mc`, and how do you confirm it?</summary>
+
+You add it with `mc ilm rule add --expire-days 30 --prefix "bronze/" local/fund-lakehouse` (older syntax: `mc ilm add --expiry-days 30 ...`), then verify with `mc ilm rule ls local/fund-lakehouse` which prints the configured rules. Seeing the rule listed against the bucket is the proof the lesson's "show a working lifecycle rule" step asks for. If it does not appear, check the bucket name, the prefix, and that you targeted the right alias.
+
+</details>
+
+<details><summary><b>23.</b> Why does lifecycle expiration not delete objects at the exact second they turn 30 days old?</summary>
+
+Lifecycle is implemented as a periodic background scan, not a per-object timer, so the store evaluates rules on its own schedule (typically daily). An object becomes eligible at the threshold but is physically removed on the next scan pass, which can be hours later. So treat expiration as "deleted within about a day after the threshold," not as a precise countdown.
+
+</details>
+
+<details><summary><b>24.</b> How do lifecycle rules interact with object versioning?</summary>
+
+With versioning enabled, a delete created by expiration usually inserts a delete marker rather than removing data, and you need separate rules (noncurrent-version expiration, expired-delete-marker cleanup) to actually reclaim space. Otherwise old versions accumulate silently and storage keeps growing despite the expiration rule. This is a classic "my lifecycle rule is not freeing space" gotcha: the rule fired, but versioned history is still there.
+
+</details>
+
+<details><summary><b>25.</b> What is multipart upload and what problem does it solve?</summary>
+
+Multipart upload lets you upload one large object as many independently transferred parts that the store reassembles into a single object on completion. It solves the reliability and throughput problem of large files: parts upload in parallel, and a failed part is retried alone instead of restarting the whole transfer. This is how multi-gigabyte holdings or NAV history files land dependably over an unreliable network.
+
+</details>
+
+<details><summary><b>26.</b> What are the three phases of a multipart upload?</summary>
+
+Initiate (CreateMultipartUpload) returns an `UploadId` that ties the parts together; Upload Part sends each chunk with a part number and receives an ETag per part; Complete (CompleteMultipartUpload) sends the list of part numbers and ETags so the server assembles the final object. Until you complete, the object does not exist as a readable key. You can also Abort to discard the in-progress upload.
+
+</details>
+
+<details><summary><b>27.</b> What is the minimum and maximum part size in an S3-style multipart upload?</summary>
+
+Each part must be at least 5 MiB except the last part, which can be any size, and each part can be at most 5 GiB. These bounds come from the S3 API and are honored by MinIO for compatibility. Choosing parts near the floor for a huge file is a mistake because you can exhaust the part-count limit.
+
+</details>
+
+<details><summary><b>28.</b> What is the maximum number of parts per multipart upload, and what does it imply for file size?</summary>
+
+The maximum is 10,000 parts per upload, and with a 5 GiB cap per part that yields a theoretical single-object ceiling of about 5 TiB. The practical implication is you must scale part size with file size: a 1 TB file with 5 MiB parts would need ~200,000 parts and fail, so you pick a part size (e.g. tens to hundreds of MB) that keeps the count under 10,000. Many SDKs do this sizing automatically.
+
+</details>
+
+<details><summary><b>29.</b> What is an ETag in the context of multipart upload, and why is it not always an MD5?</summary>
+
+For a single PUT, the ETag is typically the MD5 of the object, but for a multipart object the ETag is a hash of the concatenated part hashes followed by `-N` where N is the part count, so it is not the MD5 of the whole file. This means you cannot verify a multipart object's integrity by computing a plain MD5 and comparing to the ETag. If a tool reports a checksum mismatch on a large file, this format difference is the usual cause, not corruption.
+
+</details>
+
+<details><summary><b>30.</b> What happens to the parts if a multipart upload is never completed or aborted?</summary>
+
+The uploaded parts remain stored (and billable) as an incomplete multipart upload that is invisible in normal object listings but still consumes space. They linger until you abort the upload or a lifecycle rule cleans them up. This is a real and sneaky cost leak; mature setups add a lifecycle rule to abort incomplete multipart uploads after, say, 7 days.
+
+</details>
+
+<details><summary><b>31.</b> Which lifecycle action specifically cleans up abandoned multipart uploads?</summary>
+
+The `AbortIncompleteMultipartUpload` lifecycle action (configurable by days-after-initiation) tells the store to discard parts of uploads that were started but never completed. In `mc` this is part of ILM configuration alongside expiry rules. Adding it is best practice precisely because incomplete uploads are otherwise easy to forget and keep paying for.
+
+</details>
+
+<details><summary><b>32.</b> Why are multipart parts uploaded in parallel a big throughput win?</summary>
+
+A single TCP stream is limited by latency and window size, so one large sequential upload underuses available bandwidth, whereas N parts over N connections multiply throughput up to the link or server limit. Parallelism also isolates failures, so one flaky part retries without resending gigabytes. This is why moving a large NAV history dump completes far faster as a 32-part parallel upload than as one stream.
+
+</details>
+
+<details><summary><b>33.</b> How does pyarrow let you write Parquet directly to a MinIO/S3 bucket?</summary>
+
+You configure a filesystem (e.g. `pyarrow.fs.S3FileSystem` with `endpoint_override`, access key, secret, and `scheme="http"` for local MinIO) and pass an `s3://bucket/key` path to the Parquet/dataset writer. pyarrow then handles multipart upload under the hood for large outputs. Because the lesson mandates `uv run`, you invoke it like `uv run python write_nav.py` so the pinned environment and pyarrow version are used.
+
+</details>
+
+<details><summary><b>34.</b> For the lesson's `Do`, what key layout do you use when writing NAV Parquet files, and why?</summary>
+
+You write into a date-partitioned layout such as `bronze/nav/dt=2026-06-13/part-0.parquet`, encoding the valuation date as a `dt=` prefix segment. This lets a query engine prune to the exact dates a report needs by targeting that prefix, turning a full-bucket scan into a few LISTs and GETs. It also aligns naturally with how funds produce one NAV set per valuation day.
+
+</details>
+
+<details><summary><b>35.</b> Why is valuation date (`dt`) usually a better top-level partition key than, say, fund ISIN for a NAV bronze layer?</summary>
+
+Because most ingestion and most queries are time-scoped (load today's NAVs, report a date range), so partitioning by `dt` matches the dominant access pattern and keeps partition counts bounded (365 per year). Partitioning first by ISIN would create tens of thousands of tiny partitions and scatter a single day's load across them, hurting both write and scan efficiency. You can still partition by ISIN at a deeper level or rely on Parquet statistics within files for ISIN pruning.
+
+</details>
+
+<details><summary><b>36.</b> A query reads NAVs for a single ISIN across one month from a `dt=`-partitioned layout — how does pruning help and where does it stop?</summary>
+
+The `dt` partitioning lets the engine LIST and GET only the ~30 day-prefixes in range instead of the whole bucket, which is the big win. Within those files, ISIN filtering relies on Parquet column statistics and row-group min/max to skip irrelevant row groups, not on the key layout. So the partition prunes the time dimension cheaply, and Parquet internals prune the ISIN dimension inside the selected files.
+
+</details>
+
+<details><summary><b>37.</b> How would you estimate the LIST/GET cost of scanning a quarter of NAV data in this layout?</summary>
+
+Count the partitions in the range — about 90 day-prefixes for a quarter — and that gives roughly 90 LIST operations (more if any day's listing paginates beyond the page size, typically 1,000 keys). Then add one GET per file the engine decides to read after pruning. So cost ≈ (90 + pagination overhead) LISTs + (files read) GETs, which is why fat well-sized files per day keep the GET count low.
+
+</details>
+
+<details><summary><b>38.</b> What does a single `LIST` request return, and why does pagination matter for cost?</summary>
+
+A LIST (ListObjectsV2) returns up to a page of keys (default and max 1,000) under a prefix, plus a continuation token if more exist. To enumerate a prefix with 5,000 objects you therefore issue at least 5 LIST calls, each billed. This is why prefixes with huge numbers of objects are expensive to enumerate and why narrow, well-chosen prefixes save money.
+
+</details>
+
+<details><summary><b>39.</b> Why is `LIST` often the surprise cost in a poorly designed lake, more than `GET`?</summary>
+
+Because query planning frequently enumerates many prefixes to discover files before reading any data, and engines may re-list on every query if there is no metadata layer caching the file set. Over a flat or over-partitioned layout, planning can fan out into thousands of LISTs that read no actual data. Table formats like Iceberg fix this by tracking file lists in manifest metadata, replacing directory listing with a metadata read.
+
+</details>
+
+<details><summary><b>40.</b> How does a table format like Iceberg reduce object-store request costs versus raw directory listing?</summary>
+
+Iceberg records the exact set of data files (with partition values and statistics) in manifest files, so the engine reads a small amount of metadata to know precisely which files to GET, eliminating broad LIST scans entirely. It also gives atomic commits via a metadata pointer swap, sidestepping the no-atomic-rename problem. The net effect is fewer, more targeted requests and safe concurrent writers.
+
+</details>
+
+<details><summary><b>41.</b> What is "eventually consistent listing" and why did it historically bite data lakes?</summary>
+
+It means a freshly written object might not immediately appear in a LIST result, so an engine that writes files and then lists them to read back could miss some, producing silently incomplete results. AWS S3 historically had this for listings, which is why metadata-tracking layers (like S3Guard) existed. Modern S3 now provides strong read-after-write and listing consistency, but the design lesson — do not trust listing to reflect just-written state across systems — still informs lakehouse architecture.
+
+</details>
+
+<details><summary><b>42.</b> AWS S3 now offers strong read-after-write consistency — does that make a table format's metadata unnecessary?</summary>
+
+No. Strong consistency removes one failure mode (missing freshly written keys in a listing), but it does not give you atomic multi-file commits, efficient file discovery without LISTs, or schema/partition evolution. You still want Iceberg/Delta metadata for atomicity, cheap planning, and concurrent-writer safety. Consistency and a transactional table layer solve different problems.
+
+</details>
+
+<details><summary><b>43.</b> What is the ADLS Gen2 hierarchical namespace (HNS)?</summary>
+
+HNS is a feature of Azure Data Lake Storage Gen2 that overlays a real directory tree on top of blob storage, so directories are first-class objects rather than synthesized prefixes. With HNS enabled, the store understands paths and can manipulate whole directories as atomic units. It is enabled at account creation and turns flat blob storage into something with filesystem-like semantics for analytics.
+
+</details>
+
+<details><summary><b>44.</b> Why does ADLS Gen2 with HNS support atomic directory rename when S3 cannot?</summary>
+
+Because HNS maintains an actual directory structure in metadata, a directory rename is a single metadata update of the directory node, not a copy of every contained object. So renaming a directory of 10,000 files is one atomic operation instead of 10,000 copy+delete pairs. This is precisely the capability S3's flat key space lacks.
+
+</details>
+
+<details><summary><b>45.</b> What does atomic directory rename buy a data pipeline concretely?</summary>
+
+It enables the safe write-to-temp-then-rename publish pattern: a job writes all output into a temporary directory and atomically renames it to the final location, so consumers never see partial output and the publish is all-or-nothing. On HNS this rename is instant and atomic; on S3 it is a slow, non-atomic copy loop, which is why output committers are a pain there. It makes job finalization fast and correct.
+
+</details>
+
+<details><summary><b>46.</b> How does HNS change the cost and speed of renaming or deleting a large "folder"?</summary>
+
+Without HNS, renaming or deleting N objects under a prefix costs work proportional to N (one operation per object), so it is slow and racks up requests; with HNS it is a single metadata operation regardless of how many files are inside. So a folder rename that is O(N) and expensive on flat blob/S3 becomes O(1) on HNS. That is the central operational advantage the lesson points to.
+
+</details>
+
+<details><summary><b>47.</b> Does ADLS Gen2 expose both blob and filesystem APIs, and why does that matter?</summary>
+
+Yes — ADLS Gen2 offers the Blob REST API and the Data Lake Storage (DFS) filesystem API over the same data, so tools can use whichever fits. The DFS endpoint understands directories and atomic operations, while the blob endpoint gives broad compatibility with existing blob tooling. Knowing which API a tool uses matters because directory-atomic behavior is only available through the filesystem semantics.
+
+</details>
+
+<details><summary><b>48.</b> For the "explain why folder rename is a problem on S3 but atomic on ADLS Gen2" Done-when, what is the one-sentence answer?</summary>
+
+On S3 a folder is just a shared key prefix with no folder object, so renaming it means copying and deleting every object one by one (slow, non-atomic, billed per object), whereas ADLS Gen2's hierarchical namespace stores directories as real metadata nodes, so a rename is a single atomic metadata update independent of file count. The difference is flat-key-space-plus-no-rename versus a true directory tree.
+
+</details>
+
+<details><summary><b>49.</b> Why might you still choose flat S3-style storage despite lacking atomic rename?</summary>
+
+Because S3/MinIO are ubiquitous, cheap, massively scalable, and the de-facto standard that every engine and SDK supports, and modern table formats (Iceberg, Delta, Hudi) provide the atomicity you would otherwise want from rename via a metadata layer. So you get transactional behavior without HNS, plus portability across clouds. HNS is convenient but ties you to Azure's filesystem semantics.
+
+</details>
+
+<details><summary><b>50.</b> What is the practical difference between a bucket (S3) and a container/filesystem (ADLS Gen2)?</summary>
+
+They are analogous top-level scopes for objects, but an ADLS Gen2 "container" (filesystem) with HNS can contain a real directory hierarchy, whereas an S3 bucket holds a flat key space. The access model and naming rules differ, but conceptually both are the boundary for policy and the root of your prefix/path layout. When porting a lakehouse, a bucket maps to a filesystem and prefixes map to directories.
+
+</details>
+
+<details><summary><b>51.</b> What is object immutability on these stores, and how do you "update" an object?</summary>
+
+Objects are immutable: you cannot edit bytes in place, so an "update" means overwriting the key with a brand-new object (a fresh PUT) or, with versioning, creating a new version. There is no append-to-the-middle or partial write. This is why data lakes never mutate Parquet files; they write new files and let the table format track which files are current.
+
+</details>
+
+<details><summary><b>52.</b> How does object versioning work and what is it good for?</summary>
+
+With versioning enabled, each PUT to an existing key creates a new version with its own version ID while keeping prior versions, and a delete inserts a delete marker rather than erasing data. It protects against accidental overwrite or deletion and supports point-in-time recovery. The cost is storage growth from retained versions, which you manage with noncurrent-version lifecycle rules.
+
+</details>
+
+<details><summary><b>53.</b> What is object-store object lock / WORM, and why is it relevant in regulated funds?</summary>
+
+Object lock (WORM — write once, read many) prevents an object from being deleted or overwritten until a retention period expires or a legal hold is lifted. In regulated fund administration, records such as NAV evidence or reporting files often must be immutable for a mandated retention window (relevant to regimes like UCITS/AIFMD record-keeping and DORA resilience expectations). WORM gives auditable, tamper-evident retention enforced by the storage layer rather than by application discipline.
+
+</details>
+
+<details><summary><b>54.</b> How can lifecycle policies and object lock conflict, and how is that resolved?</summary>
+
+A lifecycle expiration cannot delete an object still under a retention lock, so the lock wins until retention elapses; the object simply is not removed even though the rule fires. This is by design for compliance — you cannot accidentally lifecycle-away locked regulatory records. The gotcha is being surprised that storage is not shrinking; check for object-lock retention before assuming the rule is broken.
+
+</details>
+
+<details><summary><b>55.</b> What is server-side encryption (SSE) on an object store, and what are the common modes?</summary>
+
+SSE encrypts object data at rest on the server, transparently on write and decrypt on read, with key-management modes typically being store-managed keys (SSE-S3), KMS-managed keys (SSE-KMS), or customer-provided keys (SSE-C). It protects data if the underlying disks are compromised and is often mandatory for regulated data. MinIO supports SSE with an external KMS for the customer-managed cases.
+
+</details>
+
+<details><summary><b>56.</b> Why is encryption-in-transit (HTTPS/TLS) to the object store also required, not just at-rest?</summary>
+
+At-rest encryption protects stored bytes but does nothing for data crossing the network, where credentials and object contents could be intercepted; TLS protects the request/response in flight. For regulated fund data both are expected. Locally against MinIO you may use plain HTTP for convenience (`scheme="http"`), but any real deployment must enforce HTTPS endpoints.
+
+</details>
+
+<details><summary><b>57.</b> What does an HTTP `403` from an object store typically indicate when your code "should" have access?</summary>
+
+A `403 Forbidden` (often `AccessDenied`) means authentication succeeded enough to be evaluated but authorization failed: the credentials lack permission for that action/resource, the bucket policy denies it, or the signature/clock is off. First checks are the exact action and ARN/prefix in the policy, whether the right credentials/alias are in use, and time skew. It is distinct from a `404`, which means the key or bucket was not found.
+
+</details>
+
+<details><summary><b>58.</b> What does a `404 NoSuchKey` versus `NoSuchBucket` tell you?</summary>
+
+`NoSuchKey` means the bucket exists but no object lives at that exact key — usually a prefix typo, a missing partition, or a case/trailing-slash mismatch. `NoSuchBucket` means the bucket name itself does not resolve — wrong name, wrong region/endpoint, or wrong alias. Because keys are exact strings, `NoSuchKey` is frequently just an off-by-one in the partition path like `dt=2026-6-13` instead of `dt=2026-06-13`.
+
+</details>
+
+<details><summary><b>59.</b> Your pyarrow write to MinIO fails with a connection/endpoint error — what do you check first?</summary>
+
+Verify the endpoint and scheme: for local MinIO you need `endpoint_override="localhost:9000"` and `scheme="http"` (not https), plus the correct access key/secret and `allow_bucket_creation`/region settings. Then confirm the MinIO container is actually up and listening on `9000` (e.g. `docker compose ps`). Most local failures are a wrong scheme, a stopped container, or mismatched credentials, not a code bug.
+
+</details>
+
+<details><summary><b>60.</b> A `mc ls` of a bucket returns nothing right after a big write — what are the candidate causes?</summary>
+
+Likely you listed the wrong prefix or alias, the writer used a different key layout than you expect, or a multipart upload never completed so the object does not yet exist. Confirm the exact prefix, check `mc ls --recursive`, and look for incomplete multipart uploads. On modern S3 strong consistency rules out "not yet visible," but on some systems eventual listing consistency could also explain it.
+
+</details>
+
+<details><summary><b>61.</b> What is the difference between path-style and virtual-hosted-style S3 addressing, and which does MinIO need?</summary>
+
+Virtual-hosted style puts the bucket in the hostname (`bucket.s3.amazonaws.com`), while path-style puts it in the URL path (`s3.endpoint/bucket/key`). Local MinIO typically requires path-style addressing, so clients must be configured with `force_path_style`/`path-style` enabled (pyarrow handles this when you set `endpoint_override`). A common local error is a DNS failure because the client tried virtual-hosted style against `localhost`.
+
+</details>
+
+<details><summary><b>62.</b> Why does a presigned URL exist and what does it let you do?</summary>
+
+A presigned URL embeds temporary, signed authorization in the URL itself, letting a party GET or PUT a specific object for a limited time without having your credentials. It is how you let an external system upload a holdings file or download a report directly to/from the bucket securely. The signature scopes the URL to one operation and key and expires, so leakage risk is bounded.
+
+</details>
+
+<details><summary><b>63.</b> What is the practical meaning of "object stores are not strongly ordered across keys"?</summary>
+
+There is no transaction spanning multiple keys, so writing several files is not atomic as a group — readers can observe some files present and others not mid-write. This is the deeper reason behind the temp-then-publish and table-format-commit patterns. You never rely on "I wrote files A, B, C" being visible together unless a metadata layer makes that commit atomic.
+
+</details>
+
+<details><summary><b>64.</b> How do you make multi-file writes appear atomic on a flat object store?</summary>
+
+Use a transactional table format (Iceberg/Delta) whose commit is a single atomic swap of a metadata pointer that references the new file set, so readers either see the old snapshot or the new one, never a mix. The data files can be written first in any order; only the metadata commit makes them "live." This converts an unsafe multi-file write into an atomic, isolated transaction over flat storage.
+
+</details>
+
+<details><summary><b>65.</b> What is request rate scaling on S3, and why does prefix design affect it?</summary>
+
+S3 scales request throughput per prefix, historically requiring high-entropy prefixes to avoid hotspotting; modern S3 auto-scales but very hot single prefixes can still throttle. Spreading writes across prefixes (e.g. by partition) distributes load and avoids `503 SlowDown`. So prefix design influences not just listing cost but also achievable write/read throughput.
+
+</details>
+
+<details><summary><b>66.</b> What does a `503 SlowDown` response from S3 mean and how do you handle it?</summary>
+
+It signals the service is throttling your request rate, often because a single prefix is too hot, and the correct response is exponential backoff with retry (most SDKs do this automatically). Persistent throttling means you should spread keys across more prefixes or reduce burst concurrency. It is a rate problem, not an auth or existence problem, so do not confuse it with `403`/`404`.
+
+</details>
+
+<details><summary><b>67.</b> In the bronze/silver/gold (medallion) model, how does each layer map to object-store prefixes and lifecycle?</summary>
+
+Bronze (raw landing) lives under a `bronze/` prefix and is typically short-lived with an aggressive expiration rule; silver (cleaned, conformed) and gold (curated marts) live under their own prefixes with longer or no expiration. Mapping layers to prefixes lets you apply different lifecycle, access, and tiering rules per layer with one bucket. Expiring bronze after 30 days, as in the lesson, is the canonical bronze lifecycle.
+
+</details>
+
+<details><summary><b>68.</b> Why expire bronze but retain silver/gold?</summary>
+
+Bronze is reproducible raw input that has already been transformed into silver/gold, so keeping it forever just stores redundant data and cost; silver/gold are the curated assets that downstream reporting depends on. Expiring bronze reclaims space while the value-added layers persist. The exception is when bronze itself is the system of record for audit, in which case you archive rather than delete it.
+
+</details>
+
+<details><summary><b>69.</b> How does compression choice interact with object-store request cost?</summary>
+
+Better compression (e.g. zstd vs snappy) shrinks each file, so a GET transfers fewer bytes and storage is cheaper, but it does not reduce the number of requests — those are driven by file and partition counts. So compression cuts byte-based costs and transfer time, while layout cuts request-based costs; you tune both. For a fund lakehouse, zstd on cold gold marts and snappy on hot frequently-decoded data is a common split.
+
+</details>
+
+<details><summary><b>70.</b> Why do object stores charge separately for storage, requests, and data transfer (egress)?</summary>
+
+Because each is a distinct resource: storage is per-GB-month, requests (LIST/GET/PUT) are per-operation, and egress is per-GB leaving the region/cloud. A design can be cheap on one axis and expensive on another — many small files are cheap to store but request-expensive, and cross-region reads add egress. The architect must reason about all three, not just total GB.
+
+</details>
+
+<details><summary><b>71.</b> Why is cross-region or cross-cloud egress a specific concern for EU fund data?</summary>
+
+Egress fees apply when data leaves a region, and for regulated EU funds there are also data-residency expectations that may forbid moving data outside the EU, so cross-region reads can be both costly and non-compliant. Keeping compute and storage in the same EU region (e.g. an Azure or AWS EU region) avoids egress and respects residency. The lesson's emphasis on EU-region posture ties directly to this.
+
+</details>
+
+<details><summary><b>72.</b> How do you compute the storage cost of keeping bronze NAV data without lifecycle versus with a 30-day expiry?</summary>
+
+Without expiry, cost grows linearly forever: daily bronze volume × per-GB price × days retained, accumulating indefinitely. With a 30-day expiry, retained data plateaus at roughly 30 days of volume because old objects are deleted as new ones arrive, capping steady-state cost. The expiry turns an ever-growing bill into a constant one proportional to one month of ingest.
+
+</details>
+
+<details><summary><b>73.</b> What is the role of `mc cp` versus `mc mirror`?</summary>
+
+`mc cp` copies individual objects or trees on demand, while `mc mirror` synchronizes a source and destination, copying only differences and optionally removing extras, like an object-store `rsync`. For one-off uploads you use `cp`; for keeping a local landing directory in sync with a bucket you use `mirror`. Both ultimately issue per-object PUTs, so on large trees they incur per-object request cost.
+
+</details>
+
+<details><summary><b>74.</b> Why can `mc mirror` of a huge directory be surprisingly slow or costly?</summary>
+
+Because it must LIST both sides to compute differences and then PUT each changed object individually, so cost scales with object count, and many tiny files dominate the time. The fix is fewer, larger files and limiting how often you full-mirror. It is the same small-files problem reappearing in a sync tool.
+
+</details>
+
+<details><summary><b>75.</b> What metadata can an object carry, and how is it used?</summary>
+
+Each object has system metadata (size, ETag, content-type, storage class, timestamps) and optional user metadata (arbitrary key-value pairs set at PUT). User metadata can tag objects with, say, source system or fund ID, but note it is fixed at write time and changing it requires rewriting (copying) the object. Lifecycle and some policies can filter on tags, which is a separate tagging mechanism from user metadata.
+
+</details>
+
+<details><summary><b>76.</b> What is the difference between object metadata and object tags for lifecycle filtering?</summary>
+
+Object tags are mutable key-value labels designed for access control and lifecycle filtering (you can change them without rewriting the object), whereas user metadata is set at write time and immutable thereafter. Lifecycle rules can target objects by tag, which is more flexible than by prefix alone. So to lifecycle-manage a subset that does not align to a prefix, you tag the objects.
+
+</details>
+
+<details><summary><b>77.</b> A lifecycle rule with a prefix filter is not deleting the objects you expect — what is the first thing to verify?</summary>
+
+Confirm the rule's prefix exactly matches the objects' keys, including any leading segment and case, because lifecycle prefix matching is literal string matching. A rule on `bronze/` will not touch keys under `Bronze/` or `landing/bronze/`. Also check the object ages are truly past the threshold and that versioning/object-lock is not preventing deletion.
+
+</details>
+
+<details><summary><b>78.</b> How does the choice of partition granularity (daily vs hourly) change request cost and file size?</summary>
+
+Finer granularity (hourly) multiplies partition count and tends to produce many smaller files, raising LIST and GET counts and metadata overhead, while coarser (daily) yields fewer, larger files that are cheaper to scan but coarser to prune. You pick granularity to match query selectivity and ingest volume. For once-daily NAV cycles, daily partitioning is the natural fit; intraday tick data might justify hourly.
+
+</details>
+
+<details><summary><b>79.</b> Why might over-partitioning a low-volume fund dataset hurt more than help?</summary>
+
+If each partition holds only a few small rows, you pay LIST and GET overhead per partition while gaining little pruning benefit and creating the small-files problem. The fixed per-request cost dominates the tiny per-partition data. For low-volume data, coarser partitions (or none, relying on Parquet statistics) are usually better.
+
+</details>
+
+<details><summary><b>80.</b> How do you reason about the cost of a "scan all funds for one date" query in the `dt=` layout?</summary>
+
+A single date is one partition prefix, so it is roughly one LIST (plus pagination if that day has more than ~1,000 files) and one GET per file in that day. Because all funds for the date sit under the same `dt=` prefix, this is the cheap, well-aligned query the layout is designed for. The opposite query — one fund across all dates — is the expensive one, touching every date partition.
+
+</details>
+
+<details><summary><b>81.</b> Why is "one fund across all history" the expensive query in a date-partitioned NAV lake, and how do you mitigate it?</summary>
+
+Because the fund's rows are spread across every `dt=` partition, the engine must touch all date prefixes, doing many LISTs and reading many files just to filter to one ISIN. Mitigations include relying on Parquet column statistics to skip row groups, maintaining a per-fund secondary layout or table, or using a table format whose metadata indexes file-level min/max on ISIN. The right fix depends on how common that access pattern is.
+
+</details>
+
+<details><summary><b>82.</b> What is the significance of an ISIN being a fixed 12-character identifier when stored in Parquet within these files?</summary>
+
+Its fixed, low-cardinality-per-file nature makes it an excellent candidate for dictionary encoding and for min/max statistics that enable row-group pruning, so filtering by ISIN inside a Parquet file is efficient even without ISIN-based partitioning. Sorting files by ISIN further tightens the min/max ranges and improves skipping. So the key layout handles the date dimension and Parquet internals handle the ISIN dimension.
+
+</details>
+
+<details><summary><b>83.</b> How would EMT/EPT files typically land in an object-store-based lake?</summary>
+
+They arrive as files (often structured CSV/XML payloads) and are PUT into a bronze landing prefix keyed by receipt date and source, e.g. `bronze/emt/dt=2026-06-13/<file>`, possibly via multipart upload if large. From there they are parsed into conformed silver tables. The object store is the durable, cheap landing zone; the transformation into queryable Parquet happens downstream.
+
+</details>
+
+<details><summary><b>84.</b> Why is multipart upload relevant when ingesting a large fund holdings extract?</summary>
+
+A full holdings extract across many funds can be gigabytes, and a single-stream upload over an unreliable link risks timeouts and restarts; multipart uploads it in parallel chunks with per-part retry, so it lands reliably and faster. It also lets you start uploading parts while still producing later parts. This is exactly the "large NAV/holdings files land reliably" point in the syllabus.
+
+</details>
+
+<details><summary><b>85.</b> How does object-store durability support regulatory retention requirements?</summary>
+
+The eleven-nines durability of replicated/erasure-coded object stores means archived regulatory records are extraordinarily unlikely to be lost over the retention window, satisfying the "we will still have it" requirement cheaply when combined with archive tiers. Add object lock for immutability and you also satisfy "it cannot be tampered with or deleted early." Together, durability plus WORM plus archive tier is the standard cheap-compliant-archive recipe.
+
+</details>
+
+<details><summary><b>86.</b> A monthly NAV reconciliation must read 12 month-end snapshots quickly, but they are in an archive tier — what is the design flaw?</summary>
+
+Archive tiers have minutes-to-hours retrieval latency and retrieval fees, so data that must be read on a schedule should never sit in archive; the flaw is tiering by age alone without considering access pattern. Month-end snapshots that are read every reconciliation cycle belong in a hot or infrequent-access tier, not archive. The fix is a lifecycle/tiering policy keyed to actual access, keeping recurrently-read data warm.
+
+</details>
+
+<details><summary><b>87.</b> Why is it risky to point a query engine at a bucket root with no partitioning for a large dataset?</summary>
+
+The engine must LIST the entire key space to discover files and may GET many irrelevant ones because it cannot prune, turning every query into a full enumeration and scan. Cost and latency then scale with total object count regardless of how selective the query is. Partitioning by a commonly-filtered key (like `dt=`) is what lets the engine target a small subset.
+
+</details>
+
+<details><summary><b>88.</b> How does "no atomic rename" affect a naive Spark job writing partitioned output to S3?</summary>
+
+With the older FileOutputCommitter (v1), Spark writes to task temp directories and renames them to final locations to commit, which on S3 becomes slow copy+delete and risks partial visibility on failure. This is why S3-aware committers (the S3A magic/directory committers) or table formats exist — they avoid rename-based commit. A symptom is a job whose compute finishes fast but spends ages "committing."
+
+</details>
+
+<details><summary><b>89.</b> What is the S3A committer and what problem does it solve?</summary>
+
+The S3A committers (magic and staging/directory) are Hadoop committers that finalize Spark/Hadoop output to S3 without rename, using multipart upload completion as the atomic commit step instead of copy-and-rename. They solve the slow, unsafe rename-based commit on flat object stores. They are a workaround for the missing atomic rename; table formats are the more modern, complete solution.
+
+</details>
+
+<details><summary><b>90.</b> How do you verify a lifecycle rule actually applied versus merely being configured?</summary>
+
+Configuration is verified by listing rules (`mc ilm rule ls`), but application is verified by observing that objects older than the threshold actually disappear over time, or by checking object counts/storage trending down after the next scan. Because the scan is periodic, you confirm by waiting a scan cycle and re-listing, not by expecting instant deletion. Seeing both the rule present and old objects gone is full proof.
+
+</details>
+
+<details><summary><b>91.</b> Why might storage keep growing even though your expiry rule is correctly configured and old objects are eligible?</summary>
+
+Common causes are versioning (deletes create delete markers while old versions persist), object lock retaining locked objects, incomplete multipart uploads accumulating invisible parts, or new ingest simply outpacing deletions. Each retains data the simple expiry rule does not remove. You diagnose by checking versioning status, object-lock retention, and incomplete uploads, then adding the matching cleanup rules.
+
+</details>
+
+<details><summary><b>92.</b> What is the difference between deleting an object and it being reclaimable when versioning is on?</summary>
+
+A delete with versioning on inserts a delete marker that hides the object from normal reads, but all prior versions still consume storage until noncurrent-version expiration removes them. So "deleted" logically does not mean "space freed." Reclaiming space requires lifecycle rules targeting noncurrent versions and expired delete markers.
+
+</details>
+
+<details><summary><b>93.</b> Why is `s3://` (or the MinIO equivalent) an HTTP-based protocol, and what latency implication follows?</summary>
+
+Every object operation is an HTTP request to a remote endpoint, so each GET/LIST/PUT incurs network round-trip latency far higher than a local disk seek. This is why minimizing request count (fewer, larger files; targeted prefixes; metadata-driven planning) matters so much — latency is per-request, not per-byte. Designs that issue thousands of tiny requests feel slow even on fast networks.
+
+</details>
+
+<details><summary><b>94.</b> How does reading a Parquet footer interact with object-store request cost?</summary>
+
+An engine typically issues a small ranged GET to read the file footer (schema and row-group statistics) and then further ranged GETs for the needed columns/row groups, so each file can cost multiple range requests. Many tiny files multiply these footer reads, again favoring fewer larger files. HTTP range requests (`Range:` header) let the reader fetch only the byte spans it needs instead of the whole object.
+
+</details>
+
+<details><summary><b>95.</b> What is an HTTP range request and why is it central to efficient Parquet reading on object storage?</summary>
+
+A range request uses the HTTP `Range` header to fetch only a specified byte span of an object, so a reader can pull just the footer and the specific column chunks it needs rather than the entire file. This is what makes columnar projection pushdown over object storage cheap: you download only the relevant bytes. Without range support, every read would transfer whole files, destroying the benefit of columnar layout.
+
+</details>
+
+<details><summary><b>96.</b> When porting a lakehouse from MinIO/S3 to ADLS Gen2, what changes and what stays the same?</summary>
+
+The conceptual model — prefixes/paths, lifecycle/tiering, multipart-style uploads, partitioned Parquet — stays the same, and table formats abstract most differences; what changes is the endpoint, auth model, and that ADLS Gen2 with HNS gives you real atomic directory operations you did not have on S3. You also swap S3-specific addressing for the DFS filesystem API. So the design transfers, but you can exploit HNS atomicity and must adjust credentials/endpoints.
+
+</details>
+
+<details><summary><b>97.</b> Why do architects say object-store semantics "leak upward" into table formats and engines?</summary>
+
+Because the absence of atomic rename, the per-request cost model, and listing behavior force design choices in everything above: table formats add metadata commits to get atomicity, engines add range reads and file pruning to control request cost, and pipelines avoid rename-based publish. You cannot design the upper layers correctly without understanding the storage layer's semantics. Ignoring them produces designs that corrupt under concurrency or cost a fortune in LISTs.
+
+</details>
+
+<details><summary><b>98.</b> Your `mc` commands suddenly fail with an access-denied or "unable to initialize" error after working yesterday — what do you check first?</summary>
+
+First confirm the alias still holds the right endpoint and credentials with `mc alias ls`, because a rotated `MINIO_ROOT_PASSWORD`, a recreated container with new keys, or an edited `~/.mc/config.json` will break auth while everything else looks fine. Then check the server is up and reachable on its port (`mc admin info local` or `docker compose ps`). Stale credentials in the alias are the most common cause of a setup that worked yesterday and fails today.
+
+</details>
+
+<details><summary><b>99.</b> Why does writing partitioned NAV Parquet with `uv run` rather than a system `python` matter for reproducibility here?</summary>
+
+Because `uv run` executes against the project's pinned, locked environment, so the exact pyarrow version — and therefore the Parquet writer behavior, default compression, and S3 filesystem handling — is deterministic across machines and reruns. A bare `python`/`pip` could pull a different pyarrow and silently change file layout or multipart behavior. For a regulated lakehouse where output must be reproducible and auditable, pinning the toolchain is part of the controls, not a convenience.
+
+</details>
+
+<details><summary><b>100.</b> Summarize why key layout choices are simultaneously cost, performance, and correctness choices.</summary>
+
+Layout determines how many LIST/GET requests a query issues (cost), how much irrelevant data is scanned and how parallel the read is (performance), and — together with a table format — whether concurrent writers and atomic publishes work (correctness). A `dt=`-partitioned, right-sized-file layout under a transactional table format gives cheap targeted scans, good parallelism, and safe commits. A flat, tiny-file, rename-dependent layout gives the opposite on all three axes, which at month-end is the difference between a NAV file that lands cleanly and one that is silently dropped.
+
+</details>
+
+
+## Phase 2 · 3.1.1 Cloud data warehouse — 100 self-test questions
+
+<details><summary><b>1.</b> What are the three architectural layers of Snowflake, named exactly?</summary>
+
+Snowflake separates into a database storage layer, a compute layer (virtual warehouses), and a cloud services layer. Storage holds the compressed columnar data, compute runs the SQL, and cloud services coordinates everything — authentication, metadata, query optimization, transaction management, and access control. The whole pitch is that these three scale independently, which is why you can resize compute without touching data.
+
+</details>
+
+<details><summary><b>2.</b> Why does separating storage from compute matter for cost in a warehouse like Snowflake?</summary>
+
+Because you pay for the two resources independently: storage is a small, steady, data-shaped cost, while compute is the large, spiky, workload-shaped cost you switch on only when running queries. This is the core of explaining to a CFO why a quiet warehouse storing the same data costs almost nothing until someone runs a heavy month-end report. Legacy coupled systems forced you to over-provision a fixed cluster sized for peak, paying for it 24/7.
+
+</details>
+
+<details><summary><b>3.</b> In Snowflake, what is a "virtual warehouse"?</summary>
+
+A virtual warehouse is an independent cluster of compute resources (CPU, memory, local SSD cache) that executes your SQL — it is the compute layer, not where data is stored. You can have many warehouses of different sizes running against the same data simultaneously, and each is isolated so one team's query does not slow another's. Sizing (XS, S, M, L, …) doubles the compute and the credit-per-hour rate at each step up.
+
+</details>
+
+<details><summary><b>4.</b> What is a Snowflake "credit" and how is warehouse compute billed?</summary>
+
+A credit is Snowflake's unit of compute consumption; a running warehouse burns credits at a rate set by its size. Billing is per-second, but with a 60-second minimum each time a warehouse starts or resumes — so frequent start/stop churn on a large warehouse wastes money on minimum charges. After the first minute, you are billed per-second for as long as the warehouse runs continuously.
+
+</details>
+
+<details><summary><b>5.</b> What does the cloud services layer in Snowflake actually do?</summary>
+
+It is the brain that coordinates the platform: authentication and access control, metadata management, query parsing and optimization, transaction and lock management, and infrastructure management. It is also what lets Snowflake prune micro-partitions using stored statistics before any compute runs. Most cloud-services usage is free, billed only when it exceeds 10% of daily compute credits.
+
+</details>
+
+<details><summary><b>6.</b> What is a micro-partition in Snowflake?</summary>
+
+A micro-partition is the immutable, columnar unit of physical storage Snowflake automatically creates as data lands — each holds 50–500 MB of uncompressed data (smaller on disk because it is always stored compressed). Snowflake keeps per-column metadata (min/max, distinct counts, null counts) on each one, which is the basis of pruning. You never create or manage them directly; they are an automatic, internal structure.
+
+</details>
+
+<details><summary><b>7.</b> Why are Snowflake micro-partitions described as immutable, and what happens on an UPDATE?</summary>
+
+They are immutable because Snowflake never edits a micro-partition in place; an `UPDATE` or `DELETE` writes new micro-partitions and marks the old ones as no longer current. This copy-on-write behavior is what makes Time Travel and zero-copy cloning possible — old versions still physically exist for the retention window. The gotcha is that heavy churn generates many new partitions and can hurt pruning until reclustering settles.
+
+</details>
+
+<details><summary><b>8.</b> How does Snowflake prune data without you defining explicit partitions?</summary>
+
+It uses the min/max (and other) metadata stored per micro-partition: for a `WHERE` predicate, the optimizer checks each micro-partition's range and skips any that cannot contain matching rows, reading only the survivors. This is automatic — there is no `PARTITION BY` clause at table creation like in Hive-style systems. Effective pruning depends on the data being naturally or deliberately clustered on the filter columns.
+
+</details>
+
+<details><summary><b>9.</b> What is a clustering key in Snowflake and when do you need one?</summary>
+
+A clustering key is a set of columns you designate so Snowflake co-locates rows with similar values into the same micro-partitions, improving pruning for queries that filter on those columns. You typically only need it on very large tables (multi-TB) where the natural load order does not match the query filter pattern. Automatic Clustering then maintains the ordering in the background as new data arrives, consuming credits to do so.
+
+</details>
+
+<details><summary><b>10.</b> How does Snowflake's clustering differ from explicit Hive-style partitioning?</summary>
+
+Explicit partitioning physically splits a table into directories by a column value and you must choose the partition scheme up front, risking skew and small-file problems. Snowflake's clustering is a soft, statistical co-location of rows within automatically managed micro-partitions, with no directory structure and no query rewrite needed. The win is that you avoid the classic "wrong partition key" trap, but you trade it for clustering-maintenance credit cost.
+
+</details>
+
+<details><summary><b>11.</b> A Snowflake query on a 5 TB table scans the whole table despite a `WHERE trade_date = ...` filter — what is the first thing to check?</summary>
+
+Check the table's clustering quality on `trade_date` using `SYSTEM$CLUSTERING_INFORMATION`, because poor clustering means the date is spread across most micro-partitions, defeating pruning. If the table was loaded in random order, every micro-partition's min/max range likely spans all dates, so none can be skipped. The fix is to define a clustering key on `trade_date` (or load in date order) so pruning becomes effective.
+
+</details>
+
+<details><summary><b>12.</b> What does it mean that Snowflake costs are "workload-shaped, not data-shaped"?</summary>
+
+It means the dominant cost is driven by how much compute you run (warehouse size × time × concurrency), not by how many terabytes you store. You can store huge volumes cheaply and pay almost nothing while idle, but a single oversized warehouse left running, or a flood of month-end reports, spikes the bill. This is the exact line you give a CFO: the budget tracks query activity, so the lever is compute discipline, not data deletion.
+
+</details>
+
+<details><summary><b>13.</b> How does an idle Snowflake warehouse run up cost, and what setting prevents it?</summary>
+
+A warehouse keeps burning credits for as long as it is in the running state, even with no queries executing, so one left on overnight is pure waste. The fix is `AUTO_SUSPEND` (e.g. 60 seconds) so it pauses after a short idle period, paired with `AUTO_RESUME` so it wakes on the next query. Beware setting auto-suspend too aggressively, since each resume incurs the 60-second minimum billing and loses warm cache.
+
+</details>
+
+<details><summary><b>14.</b> Why can a full table scan in Snowflake be a runaway-cost pattern?</summary>
+
+A query with no selective predicate (or one that defeats pruning) forces compute to read every micro-partition, so a large warehouse churns credits proportional to the data scanned and the time it takes. On a multi-TB holdings table this turns a careless `SELECT *` or a non-sargable filter into a measurable budget hit. The defense is selective, sargable predicates on clustered columns plus right-sized warehouses.
+
+</details>
+
+<details><summary><b>15.</b> How does an unpartitioned/poorly clustered query specifically cause cost blow-ups in Snowflake?</summary>
+
+Without effective clustering, the optimizer cannot prune micro-partitions, so even a narrow date filter reads the whole table, multiplying both scan volume and warehouse runtime. The same logical query that should touch 1% of the data ends up touching 100%, and you pay for all of it. Monitoring with `QUERY_HISTORY` for high `BYTES_SCANNED` relative to result size flags these offenders.
+
+</details>
+
+<details><summary><b>16.</b> What is BigQuery's storage layer called, and what is it separate from?</summary>
+
+BigQuery stores table data in Colossus, Google's distributed file system, fully separate from the compute layer. This separation means storage scales and is billed independently of the slots that run queries, mirroring the storage/compute split Snowflake pioneered. You are charged for active vs long-term storage by bytes stored, regardless of whether any query is running.
+
+</details>
+
+<details><summary><b>17.</b> What columnar on-disk format does BigQuery use, and why does it matter?</summary>
+
+BigQuery stores data in Capacitor, a proprietary columnar format that compresses well and supports column projection so a query reads only the columns it references. Columnar layout plus per-column statistics is what makes scanning a narrow set of columns over huge tables fast and cheap. It is the BigQuery analogue of Parquet's column-chunk design, but managed internally.
+
+</details>
+
+<details><summary><b>18.</b> What is the Dremel engine in BigQuery?</summary>
+
+Dremel is the distributed execution engine that runs BigQuery queries by building a multi-level serving tree: a root node plans the query, mixer (intermediate) nodes aggregate, and leaf nodes (the slots) read and filter data in parallel from Colossus. This tree structure is what gives BigQuery massively parallel, serverless execution without you sizing a cluster. The architecture is why adding more slots can speed a query nearly linearly up to a point.
+
+</details>
+
+<details><summary><b>19.</b> What exactly is a BigQuery "slot"?</summary>
+
+A slot is BigQuery's unit of compute — roughly a virtual CPU with associated memory — that does the scanning, filtering, and aggregation work in Dremel's leaf and mixer nodes. Slots are a fungible pool, not a fixed-size cluster you provision and keep; BigQuery allocates them to your queries dynamically. Query speed scales with how many slots a query can grab in parallel.
+
+</details>
+
+<details><summary><b>20.</b> Why is BigQuery called "serverless" while Snowflake is not, strictly speaking?</summary>
+
+In BigQuery you never create, size, or manage a compute cluster — you submit SQL and Google's shared slot pool runs it, allocating compute transparently. In Snowflake you explicitly create and size virtual warehouses and decide when they run. Both separate storage from compute, but BigQuery hides the compute unit behind a serverless pool whereas Snowflake exposes it as a named, sized resource you control.
+
+</details>
+
+<details><summary><b>21.</b> What is BigQuery's on-demand pricing model, and what is the per-TB rate concept?</summary>
+
+On-demand pricing charges by bytes scanned (read) by the query — historically around $6.25 per TB after the first 1 TB free per month — independent of how long the query runs. Because you pay for data read, not time, a poorly written query that scans extra columns or rows directly costs more money. This is why `SELECT *` is a cost anti-pattern in on-demand BigQuery.
+
+</details>
+
+<details><summary><b>22.</b> What is the minimum data BigQuery bills per table referenced in an on-demand query?</summary>
+
+BigQuery bills a minimum of 10 MB per table referenced, even if the table is smaller. So a query touching many tiny tables still accrues 10 MB each, which matters for workloads with thousands of small reference tables. For most analytics tables this minimum is irrelevant, but it surprises people running highly fan-out queries over many small dimensions.
+
+</details>
+
+<details><summary><b>23.</b> What are BigQuery capacity-based "editions," and how do they differ from on-demand?</summary>
+
+Editions — Standard, Enterprise, and Enterprise Plus — are the capacity (reservation) model where you buy slots by the hour instead of paying per byte scanned. Higher editions add features and higher per-slot-hour rates (e.g. Standard cheapest, Enterprise Plus most expensive and most capable). You pick capacity pricing when workloads are heavy and predictable enough that committed/autoscaled slots beat per-TB scanning costs.
+
+</details>
+
+<details><summary><b>24.</b> What is a BigQuery reservation and what is slot autoscaling?</summary>
+
+A reservation is a pool of slots (purchased under an edition) that you assign to projects/workloads so they get dedicated capacity. Autoscaling lets a reservation grow and shrink its slot count automatically with demand, so you pay for baseline plus scaled slots rather than a fixed maximum. Commitments (1-year or 3-year) lower the per-slot rate for the baseline you reserve.
+
+</details>
+
+<details><summary><b>25.</b> A BigQuery on-demand query costs far more than expected even though it returns few rows — what is the likely cause?</summary>
+
+On-demand billing is by bytes scanned, not rows returned, so a query that reads many columns or whole partitions scans (and bills for) far more than the small result implies. The usual culprits are `SELECT *`, missing partition/cluster filters, or scanning a wide table for a couple of columns. Use the dry-run estimate (`--dry_run` / the UI's estimated bytes) before running and add partition filters.
+
+</details>
+
+<details><summary><b>26.</b> How does partitioning help control on-demand cost in BigQuery, unlike Snowflake?</summary>
+
+BigQuery supports explicit table partitioning (by date/timestamp, integer range, or ingestion time), and a query that filters on the partition column reads only matching partitions, scanning fewer bytes and so costing less. This is a deliberate design choice you make at table creation, in contrast to Snowflake's automatic micro-partitioning. Clustering in BigQuery further sorts data within partitions to cut bytes scanned.
+
+</details>
+
+<details><summary><b>27.</b> What is the difference between BigQuery clustering and BigQuery partitioning?</summary>
+
+Partitioning splits a table into separate segments by a column (typically date), and the engine prunes whole partitions on a matching filter. Clustering sorts the data within each partition by up to four columns so the engine can skip blocks inside a partition for filters on the cluster columns. They compose: partition by date, cluster by fund and ISIN, and a query filtering all three scans the least data.
+
+</details>
+
+<details><summary><b>28.</b> What is the difference between Azure Synapse "dedicated SQL pool" and "serverless SQL pool"?</summary>
+
+A dedicated SQL pool is a provisioned MPP warehouse sized in DWUs that you pay for by the hour whether or not it is querying (and can pause to stop charges). A serverless SQL pool has no provisioned cluster; it queries data in the lake on demand and bills per terabyte of data processed. Dedicated suits steady, high-concurrency warehousing; serverless suits ad-hoc querying over files in storage.
+
+</details>
+
+<details><summary><b>29.</b> What is a DWU in Azure Synapse dedicated SQL pool?</summary>
+
+A DWU (Data Warehouse Unit) is a bundled measure of compute, memory, and I/O that you provision to size a dedicated SQL pool — more DWUs means more compute nodes and throughput. You pay per hour for the provisioned DWU level regardless of utilization, which is why pausing the pool when idle is the key cost lever. It is closer to "sizing a cluster" than to BigQuery's fungible slots.
+
+</details>
+
+<details><summary><b>30.</b> How is Synapse serverless SQL pool billed, and what is the cost gotcha?</summary>
+
+It is billed per terabyte of data processed by your queries, with no infrastructure to provision. The gotcha is that querying many small or uncompressed files, or running `SELECT *` over a large lake, processes lots of bytes and runs up cost fast. Using columnar formats (Parquet), filtering on partitioned folder paths, and `OPENROWSET` with explicit column lists keeps bytes processed down.
+
+</details>
+
+<details><summary><b>31.</b> Where does the Microsoft Fabric Warehouse fit relative to Synapse?</summary>
+
+Fabric Warehouse is Microsoft's next-generation, fully managed SaaS warehouse that supersedes much of standalone Synapse Analytics, running on the unified Fabric platform with OneLake as its storage. It uses a serverless distributed engine and stores tables in open Delta/Parquet format in OneLake rather than a proprietary store. Microsoft positions it so customers can retire standalone Synapse dedicated pools onto Fabric.
+
+</details>
+
+<details><summary><b>32.</b> How is compute billed in Microsoft Fabric, and what is a Capacity Unit?</summary>
+
+Fabric compute is bought as a capacity (an F-SKU such as F2, F8, F64), and each SKU provides a fixed number of Capacity Units (CUs) shared across all Fabric workloads on that capacity. Compute is a single pooled capacity rather than a per-warehouse cluster, and one CU maps to a fixed amount of Warehouse vCores (roughly 1 CU = 0.5 Warehouse vCore). Storage in OneLake is billed separately, similar to ADLS pricing.
+
+</details>
+
+<details><summary><b>33.</b> What storage does Fabric Warehouse use, and in what format?</summary>
+
+Fabric Warehouse stores all data in OneLake, the tenant-wide logical data lake, and tables are persisted in open Delta Lake (Parquet) format rather than a proprietary internal store. This is the key differentiator: the warehouse's tables are directly readable by Spark, the SQL endpoint, and external Iceberg consumers via metadata translation. OneLake is "the OneDrive for data," one lake per tenant.
+
+</details>
+
+<details><summary><b>34.</b> State Snowflake's Iceberg story in one sentence.</summary>
+
+Snowflake supports native Apache Iceberg tables that you can run either with a Snowflake-managed catalog (full read/write) or against an external catalog (such as AWS Glue or a REST catalog) where Snowflake reads Iceberg data managed elsewhere. This lets a fund platform keep one copy of holdings data in open Iceberg format and query it from Snowflake without ingesting it into proprietary storage.
+
+</details>
+
+<details><summary><b>35.</b> State BigQuery's Iceberg story in one sentence.</summary>
+
+BigQuery reads and writes Apache Iceberg through BigLake — external/managed Iceberg tables backed by Cloud Storage and the BigLake Metastore — so it can query the same Iceberg files other engines write. This gives an open-format, interoperable lakehouse path rather than locking data into BigQuery's native storage.
+
+</details>
+
+<details><summary><b>36.</b> State Microsoft Fabric's Iceberg story in one sentence.</summary>
+
+Fabric stores tables as Delta in OneLake but provides automatic metadata translation so the same physical Parquet data is exposed as Apache Iceberg (and vice versa), letting Iceberg engines like Snowflake read Fabric tables without copying. This metadata virtualization is how OneLake offers bi-directional Delta/Iceberg interoperability.
+
+</details>
+
+<details><summary><b>37.</b> Why is the Iceberg/open-format story a vendor-selection question for a fund administrator?</summary>
+
+Because regulated fund platforms must avoid lock-in and prove they can move or share holdings, NAV, and transaction data across engines and auditors over a long retention horizon. An engine that reads/writes open Iceberg means one governed copy of the data serves BI, ML, and regulatory access without proprietary export. It de-risks both exit and multi-engine architectures, which matters in vendor due diligence.
+
+</details>
+
+<details><summary><b>38.</b> For a Luxembourg-domiciled fund administrator, why does an engine's EU-region and compliance posture matter?</summary>
+
+Fund and investor data often must reside and be processed within the EU/EEA for GDPR and regulator expectations, so the warehouse must offer EU regions (e.g. a Luxembourg or other EU data residency) and contractual/compliance commitments. Under DORA, the firm must also assess the provider as a critical ICT third party. A US-only or non-compliant region choice can be a deal-breaker regardless of price.
+
+</details>
+
+<details><summary><b>39.</b> How do you explain to a CFO why a month-end reporting spike inflates the Snowflake bill?</summary>
+
+Month-end concentrates many heavy queries (NAV reconciliation, regulatory extracts) into a few days, so warehouses run larger and longer and at higher concurrency, burning far more credits than a quiet mid-month day. Because cost is workload-shaped, the bill follows that activity curve, not the data volume. The mitigation is multi-cluster auto-scaling sized to the spike plus auto-suspend, so you pay for the peak only while it lasts.
+
+</details>
+
+<details><summary><b>40.</b> What is a multi-cluster (auto-scaling) warehouse in Snowflake and what problem does it solve?</summary>
+
+A multi-cluster warehouse can spin up additional identical clusters when query concurrency exceeds what one cluster handles, then scale back down when demand falls. It solves the queuing problem during concurrency spikes (like month-end), preserving response time without permanently oversizing. You pay only for the extra clusters while they run, which keeps the cost tied to actual peak demand.
+
+</details>
+
+<details><summary><b>41.</b> In Snowflake, what is the difference between scaling up and scaling out?</summary>
+
+Scaling up means choosing a larger warehouse size (e.g. M to L) to make a single complex query faster by giving it more compute. Scaling out means adding more clusters (multi-cluster) to handle more concurrent queries without each one slowing down. Use up for heavy individual queries and out for high-concurrency BI; conflating them leads to either slow reports or wasted credits.
+
+</details>
+
+<details><summary><b>42.</b> Why might a fund platform keep a warehouse for BI even in a lakehouse-first architecture?</summary>
+
+Warehouses still deliver superior high-concurrency interactive BI and fine-grained, mature security/governance that many lakehouse engines are only catching up to. For hundreds of analysts hitting NAV and performance dashboards at once with row/column-level controls, the warehouse's optimizer, caching, and access model are battle-tested. The lakehouse holds the open, governed copy; the warehouse serves the demanding serving layer.
+
+</details>
+
+<details><summary><b>43.</b> What is BigQuery's result cache and how does it affect on-demand cost?</summary>
+
+BigQuery caches query results for about 24 hours, and a repeated identical query served from cache scans zero bytes, so it is free under on-demand pricing. This rewards deterministic, repeated dashboard queries but the cache misses if the underlying tables change or the query text differs even trivially. It is one reason raw byte-scanned cost can vary between seemingly identical runs.
+
+</details>
+
+<details><summary><b>44.</b> How does Snowflake's result cache differ in scope from its warehouse cache?</summary>
+
+Snowflake has a result cache in the cloud services layer that returns identical-query results without using any warehouse (no credits, ~24 hours, invalidated by data changes), and a local SSD data cache on each warehouse that speeds repeated scans while the warehouse is warm. The result cache needs no running warehouse; the local cache is lost when the warehouse suspends. Aggressive auto-suspend therefore trades credit savings for lost warm cache.
+
+</details>
+
+<details><summary><b>45.</b> What does it mean that BigQuery slots are a "fungible pool, not a sized cluster"?</summary>
+
+It means compute is not a fixed-size machine you reserve and keep warm; BigQuery draws slots from a shared, elastic pool and assigns however many a query can use at that moment. You do not (in on-demand) decide a cluster size — you submit SQL and the system parallelizes across available slots. With capacity editions you do cap/reserve slots, but they are still allocated as a fungible quantity, not a named server.
+
+</details>
+
+<details><summary><b>46.</b> Why is Snowflake's compute model better described as a "sized cluster" than a fungible pool?</summary>
+
+Because you explicitly create named virtual warehouses at a chosen size (XS–6XL), and that size fixes the compute capacity and credit rate until you resize or suspend it. Queries run on the warehouse you route them to, not on an anonymous shared pool. This gives precise workload isolation but puts the sizing decision (and the risk of over/under-provisioning) on you.
+
+</details>
+
+<details><summary><b>47.</b> Name each engine's primary pricing unit in one line each.</summary>
+
+Snowflake bills compute in credits (per-second, 60-second minimum) plus storage by TB. BigQuery bills either bytes scanned (on-demand, per TB) or slot-hours (capacity editions), plus storage by bytes. Synapse dedicated bills provisioned DWU-hours and serverless bills per TB processed; Fabric bills Capacity Units via an F-SKU plus OneLake storage.
+
+</details>
+
+<details><summary><b>48.</b> Name each engine's workload-isolation mechanism in one line each.</summary>
+
+Snowflake isolates with independent virtual warehouses (and multi-cluster scale-out). BigQuery isolates with reservations/assignments of slots per workload (and project-level on-demand slot quotas). Synapse dedicated isolates by resource classes/workload groups within a provisioned pool; Fabric isolates by capacity (F-SKU) with workload-level smoothing and bursting.
+
+</details>
+
+<details><summary><b>49.</b> What is a "resource class" / workload group in Synapse dedicated SQL pool?</summary>
+
+Resource classes (and the newer workload management groups) control how much memory and concurrency a query or user gets within the fixed DWU pool, so heavy ETL does not starve interactive queries. Because a dedicated pool is one provisioned cluster, isolation is achieved by partitioning its resources rather than by spinning up separate clusters. This is a different isolation philosophy from Snowflake's "just add another warehouse."
+
+</details>
+
+<details><summary><b>50.</b> Why can BigQuery costs run away even though it is serverless?</summary>
+
+Serverless removes cluster management but not cost: on-demand you pay per byte scanned, so unfiltered `SELECT *`, unpartitioned scans, or full-table joins read enormous volumes and bill accordingly. There is no idle cluster to forget, but a single careless analyst query over a multi-TB table can be expensive. Cost controls (per-query and per-user byte limits, required partition filters, dry-runs) are the guardrails.
+
+</details>
+
+<details><summary><b>51.</b> What BigQuery feature forces analysts to filter a partitioned table to avoid full scans?</summary>
+
+The table option "require partition filter" (`require_partition_filter`) makes BigQuery reject any query on the table that does not include a predicate on the partition column. This is a strong cost guardrail on large partitioned tables — for example a holdings table partitioned by `trade_date` — because it prevents accidental whole-table scans. It turns a soft best-practice into an enforced one.
+
+</details>
+
+<details><summary><b>52.</b> What is the single most common way costs run away in Snowflake?</summary>
+
+Warehouses left running idle (and/or oversized) so they keep burning credits with no work, compounded by start/stop churn that triggers the 60-second minimum repeatedly. The single biggest lever is `AUTO_SUSPEND` plus right-sizing, then watching `WAREHOUSE_METERING_HISTORY`. Full scans from poor clustering are the second-most-common offender.
+
+</details>
+
+<details><summary><b>53.</b> What is the single most common way costs run away in BigQuery on-demand?</summary>
+
+Queries scanning far more bytes than needed — `SELECT *`, missing partition/cluster filters, or repeatedly re-scanning large tables — because billing is per byte scanned. The fix is column projection, partition filters, materialized/aggregate tables, and dry-run estimates before running. Setting maximum-bytes-billed per query caps the blast radius.
+
+</details>
+
+<details><summary><b>54.</b> What is the single most common way costs run away in Synapse / Fabric?</summary>
+
+For Synapse dedicated, leaving a large DWU pool provisioned (and not paused) so you pay hourly around the clock; for serverless and Fabric, scanning many small/uncompressed files or oversized capacities sitting idle. The levers are pausing dedicated pools, compacting to Parquet for serverless, and right-sizing the Fabric F-SKU. Idle provisioned compute is the recurring theme.
+
+</details>
+
+<details><summary><b>55.</b> Why does an architect care that costs are "workload-shaped, not data-shaped" when sizing a NAV reporting platform?</summary>
+
+Because the budgeting model must follow the reporting calendar: cost peaks around daily/monthly NAV strikes and regulatory deadlines, not steadily with stored history. You size elastic compute (multi-cluster or autoscaled slots) for the spike and let it shrink afterward, instead of provisioning a fixed cluster for peak all month. Getting this wrong turns a predictable monthly cycle into a budget incident.
+
+</details>
+
+<details><summary><b>56.</b> What is DuckDB and why is it used as a local stand-in for warehouse exercises?</summary>
+
+DuckDB is an in-process, columnar, vectorized analytical SQL engine — like "SQLite for OLAP" — that runs on your laptop with no server. It reproduces warehouse-style concepts (columnar scans, predicate pushdown over Parquet, analytical SQL) so you can practice query and storage behavior locally before touching a paid cloud warehouse. On native Ubuntu you just `uv run` a Python script or use the CLI; no cloud account or credits needed.
+
+</details>
+
+<details><summary><b>57.</b> Why is DuckDB a reasonable proxy for warehouse pruning behavior?</summary>
+
+Because it reads Parquet using row-group statistics and does projection/predicate pushdown, so you can observe how filtering on a well-laid-out column skips data — the same principle behind Snowflake micro-partition pruning and BigQuery partition skipping. You can measure bytes/rows read with different file layouts locally and reason about cost implications. It is not identical to any cloud engine, but the storage-layout intuition transfers.
+
+</details>
+
+<details><summary><b>58.</b> In Snowflake, what does `SYSTEM$CLUSTERING_INFORMATION` tell you?</summary>
+
+It returns clustering metrics for a table on given columns — such as the average number of overlapping micro-partitions and clustering depth — indicating how well pruning will work for filters on those columns. High overlap/depth means poor clustering and weak pruning, signaling you should define or reapply a clustering key. It is the diagnostic you run before blaming the engine for slow scans.
+
+</details>
+
+<details><summary><b>59.</b> Which Snowflake view shows how many credits each warehouse consumed?</summary>
+
+`WAREHOUSE_METERING_HISTORY` (in `SNOWFLAKE.ACCOUNT_USAGE` or the `INFORMATION_SCHEMA` table function) reports credits used per warehouse over time. It is the first place to look when investigating a cost spike, letting you attribute credits to specific warehouses and time windows. Pair it with `QUERY_HISTORY` to find the offending queries.
+
+</details>
+
+<details><summary><b>60.</b> How would you estimate a BigQuery query's cost before running it?</summary>
+
+Run a dry run — `bq query --dry_run` on the CLI or the editor's validator — which returns the bytes the query will scan without executing or billing it. Multiply estimated bytes by the on-demand per-TB rate to get the cost. This is the standard discipline before running anything large in on-demand BigQuery, and it catches `SELECT *` mistakes early.
+
+</details>
+
+<details><summary><b>61.</b> What is the difference between active and long-term storage pricing in BigQuery?</summary>
+
+BigQuery automatically discounts storage for a table partition that has not been modified for 90 consecutive days, moving it to a roughly half-price long-term storage tier with no change in performance or access. Active (recently modified) data is billed at the standard rate. This rewards append-only/immutable historical tables, common for fund holdings and transaction history.
+
+</details>
+
+<details><summary><b>62.</b> Why is `SELECT *` specifically dangerous in BigQuery on-demand and in Synapse serverless?</summary>
+
+Both bill by data read/processed, and columnar storage means `SELECT *` defeats column projection by forcing the engine to read every column, multiplying bytes scanned and therefore cost. Selecting only the needed columns can cut a query's bill by an order of magnitude on a wide table. The same query in a credit/DWU model wastes time rather than bytes, but it is still wasteful.
+
+</details>
+
+<details><summary><b>63.</b> How does column projection reduce cost in a columnar warehouse?</summary>
+
+Because data is stored column by column, the engine reads only the columns a query references and skips the rest, so a query touching 3 of 200 columns reads a fraction of the bytes. In byte-billed engines (BigQuery on-demand, Synapse serverless) this directly lowers cost; in credit/slot engines it lowers runtime. This is why explicit column lists beat `SELECT *` everywhere.
+
+</details>
+
+<details><summary><b>64.</b> What is predicate pushdown and how does it relate to warehouse pruning?</summary>
+
+Predicate pushdown means the filter from the `WHERE` clause is applied as early as possible — at the storage/scan level — so the engine reads only blocks/partitions that can satisfy it. In Snowflake this is micro-partition pruning via min/max stats; in BigQuery it is partition/cluster pruning; in DuckDB/Parquet it is row-group skipping. The shared idea is "decide what not to read before reading."
+
+</details>
+
+<details><summary><b>65.</b> Why does loading a fund holdings table sorted by `trade_date` improve Snowflake pruning?</summary>
+
+Sorting on load co-locates rows of the same date into the same micro-partitions, so each partition's min/max range for `trade_date` is narrow and non-overlapping. A query filtering one date then prunes to just the relevant partitions instead of scanning all of them. It is the cheap alternative to defining and maintaining a clustering key when you control load order.
+
+</details>
+
+<details><summary><b>66.</b> A daily NAV job in Snowflake updates yesterday's rows and the bill jumps — why?</summary>
+
+Because micro-partitions are immutable, every `UPDATE` rewrites whole partitions and marks the old ones stale, generating churn that both costs compute and degrades clustering until reclustering runs. Frequent small updates are an anti-pattern; Snowflake favors append/`MERGE` patterns over row-by-row updates. Batching changes and clustering on the update key reduces the damage.
+
+</details>
+
+<details><summary><b>67.</b> Why is concurrency, not just data size, central to comparing these warehouses for fund BI?</summary>
+
+A month-end opens hundreds of simultaneous dashboard and report queries, and an engine's ability to isolate and scale that concurrency (Snowflake multi-cluster, BigQuery slot reservations, Synapse workload groups, Fabric capacity bursting) determines both response time and cost. The same total data can be cheap or a queuing disaster depending on concurrency handling. Architects evaluate the isolation mechanism precisely because of this.
+
+</details>
+
+<details><summary><b>68.</b> How does Snowflake achieve workload isolation between, say, an ETL team and a BI team?</summary>
+
+You give each team its own virtual warehouse against the same shared data, so ETL's heavy loads run on one warehouse and BI's interactive queries on another, with no compute contention. Each warehouse is independently sized, suspended, and billed. This "separate compute, shared storage" pattern is the canonical Snowflake isolation answer.
+
+</details>
+
+<details><summary><b>69.</b> How does BigQuery achieve workload isolation in the capacity model?</summary>
+
+You create reservations of slots and assign projects or workloads to them, so an ETL reservation cannot starve a BI reservation of slots. Idle slots can optionally be shared across reservations in the same admin project for efficiency. This gives Snowflake-like isolation while keeping the serverless, pool-based allocation underneath.
+
+</details>
+
+<details><summary><b>70.</b> Why might Synapse dedicated SQL pool be a harder cost story to a CFO than Snowflake?</summary>
+
+Because a dedicated pool bills for provisioned DWUs by the hour whether or not it is querying, the cost is more "capacity-shaped" — you pay for the cluster you reserved, like a leased machine. The lever is remembering to pause it, which is easy to forget and risky to automate around active reporting. Snowflake's auto-suspend makes idle waste self-correcting, which is an easier conversation.
+
+</details>
+
+<details><summary><b>71.</b> What does "compute as a fungible pool" let BigQuery do that a sized cluster cannot?</summary>
+
+It lets a single query burst across thousands of slots for a short heavy operation and then release them, without you pre-sizing or paying to keep a big cluster warm. Capacity scales to the shape of the query rather than to a fixed maximum you chose in advance. The tradeoff is less predictable per-query performance under shared on-demand quotas.
+
+</details>
+
+<details><summary><b>72.</b> How does Snowflake's separation of services from compute help during a metadata-only operation?</summary>
+
+Operations like `SHOW`, `DESCRIBE`, listing tables, or queries answerable purely from metadata/statistics can be served by the cloud services layer without resuming a warehouse, so they consume no credits. This is why some "queries" return instantly even with all warehouses suspended. It is the practical payoff of having a distinct services layer.
+
+</details>
+
+<details><summary><b>73.</b> An analyst complains a Snowflake dashboard got slower after hours — what cache effect explains it?</summary>
+
+After auto-suspend, the warehouse's local SSD data cache is cleared, so the first queries when it resumes must re-read from remote storage (cold cache) and run slower until the cache warms. The result cache still helps for identical queries, but new or changed queries pay the cold-start penalty. Tuning `AUTO_SUSPEND` higher trades some idle cost for warm caches during business hours.
+
+</details>
+
+<details><summary><b>74.</b> Why is BigQuery's pricing sometimes hard to predict for a finance team?</summary>
+
+Under on-demand, cost depends on bytes each query scans, which varies with query patterns, partition filters, and cache hits, making month-to-month spend bumpy. The same dashboard can be free (cached) one run and expensive (full scan) the next. Teams seeking predictability move predictable workloads onto a fixed slot reservation/edition so spend becomes flat capacity rather than variable scanning.
+
+</details>
+
+<details><summary><b>75.</b> What does it mean to say each of these engines separates storage and compute, and why is it the common thread?</summary>
+
+All three (Snowflake, BigQuery, Synapse/Fabric in their modern forms) keep data in scalable object/lake storage independent of the compute that queries it, so you scale and pay for each separately. This is the architectural premise that makes elasticity, multi-engine access, and workload-shaped cost possible. The differences are in how compute is packaged: sized warehouses, fungible slots, provisioned DWUs, or pooled capacity units.
+
+</details>
+
+<details><summary><b>76.</b> In a vendor-selection comparison table, what five attributes does the syllabus ask you to fill per engine?</summary>
+
+Architecture, pricing unit, workload-isolation mechanism, Iceberg/open-format story, and EU-region/compliance posture. These five let you compare Snowflake, BigQuery, and Synapse/Fabric on the dimensions a regulated fund administrator actually decides on. The sixth practical note is the single most common runaway-cost pattern for each.
+
+</details>
+
+<details><summary><b>77.</b> Summarize Snowflake's row in such a comparison table.</summary>
+
+Architecture: three layers (storage, virtual-warehouse compute, cloud services) with separate scaling. Pricing: credits per-second (60s minimum) plus storage; workload isolation via independent/multi-cluster warehouses; Iceberg via managed or external-catalog Iceberg tables; EU regions across AWS/Azure/GCP with strong compliance attestations. Runaway cost: idle/oversized warehouses.
+
+</details>
+
+<details><summary><b>78.</b> Summarize BigQuery's row in such a comparison table.</summary>
+
+Architecture: serverless with Colossus storage, Capacitor columnar format, Dremel execution over a fungible slot pool. Pricing: bytes scanned on-demand or slot-hours (editions) plus storage; isolation via slot reservations; Iceberg via BigLake external/managed Iceberg tables; EU multi-regions and region-pinning with GDPR/compliance support. Runaway cost: unfiltered full-table scans billed per byte.
+
+</details>
+
+<details><summary><b>79.</b> Summarize Synapse/Fabric's row in such a comparison table.</summary>
+
+Architecture: Synapse dedicated MPP pool (DWU) vs serverless SQL over the lake, evolving into Fabric Warehouse on OneLake (Delta/Parquet). Pricing: DWU-hours or per-TB processed (Synapse) / Capacity Units via F-SKU (Fabric); isolation via workload groups (Synapse) or capacity (Fabric); Iceberg via OneLake Delta-to-Iceberg metadata translation; EU regions with Microsoft compliance posture. Runaway cost: idle provisioned compute.
+
+</details>
+
+<details><summary><b>80.</b> Why does a fund administrator weigh "fine-grained security" when choosing a warehouse over a bare lakehouse?</summary>
+
+Investor and holdings data demand row- and column-level access control, dynamic data masking, and auditable governance — for example masking investor PII or restricting one client's NAV from another's analysts. Mature warehouses provide these natively and provably, which matters for GDPR, audit, and segregation-of-duties. A lakehouse engine may need extra tooling to match this, so security maturity is a real selection axis.
+
+</details>
+
+<details><summary><b>81.</b> What is dynamic data masking and why does it matter for fund investor data?</summary>
+
+Dynamic data masking applies a masking policy at query time so unauthorized users see obfuscated values (e.g. a redacted investor name or account number) while the underlying data is unchanged. It lets one governed table serve many audiences without copies, which suits transfer-agency data where most analysts must not see investor PII. Snowflake, BigQuery, and Synapse all offer forms of column masking and row-level security.
+
+</details>
+
+<details><summary><b>82.</b> Why is high-concurrency BI a reason to keep a warehouse rather than query the lake directly?</summary>
+
+Warehouses are engineered for many short, interactive queries at once with caching, result reuse, and concurrency scaling, giving sub-second dashboards under load. Direct lake querying can be slower and less consistent under hundreds of concurrent users without a serving optimization. So the lakehouse holds the open governed copy and a warehouse (or warehouse-style serving layer) handles the demanding interactive tier.
+
+</details>
+
+<details><summary><b>83.</b> How does DORA influence cloud-warehouse vendor selection for an EU fund administrator?</summary>
+
+DORA treats major cloud providers as critical ICT third parties, so the firm must assess concentration risk, ensure contractual rights (audit, exit, sub-outsourcing transparency), and have resilience/exit plans. The open-format (Iceberg) story directly supports a credible exit strategy, and EU-region availability supports data residency. Vendor selection therefore weighs regulatory and exit posture alongside price and performance.
+
+</details>
+
+<details><summary><b>84.</b> Why does the Iceberg story strengthen a DORA exit plan?</summary>
+
+If holdings, NAV, and transaction data live in open Apache Iceberg rather than a proprietary store, you can repoint another compliant engine at the same files without a costly export/reload, making the exit credible and testable. Lock-in to a proprietary format is exactly the concentration risk DORA wants firms to mitigate. So an engine's native Iceberg support is a regulatory as well as a technical asset.
+
+</details>
+
+<details><summary><b>85.</b> What is the practical difference between Snowflake managed Iceberg tables and external-catalog Iceberg tables?</summary>
+
+With a Snowflake-managed Iceberg table, Snowflake owns the catalog and can fully read and write/compact the Iceberg data. With an external catalog (e.g. Glue or a REST catalog), another system owns the metadata and Snowflake typically reads (and in some configurations writes) the same files. Managed gives full lifecycle control; external maximizes interoperability with engines that write the table.
+
+</details>
+
+<details><summary><b>86.</b> Why might BigQuery's `require_partition_filter` be set on a regulatory transaction table?</summary>
+
+Because such tables are huge (every transaction over years) and analysts rarely need a full scan, enforcing a partition filter (e.g. on `event_date`) prevents accidental whole-table reads that would be slow and expensive on-demand. It bakes cost discipline into the schema so a careless query simply errors rather than billing for terabytes. This is a governance control as much as a performance one.
+
+</details>
+
+<details><summary><b>87.</b> How does storage being billed separately change the architect's mental model of "the cost of a table"?</summary>
+
+A table's storage cost is small and steady (bytes × rate), while its real expense is the compute every query against it consumes, which can vastly exceed storage over a table's life. So a rarely queried 50 TB archive can be cheaper than a 1 TB hot table scanned thousands of times a day. The architect optimizes query/compute patterns, not just data footprint.
+
+</details>
+
+<details><summary><b>88.</b> Why can two teams query the same Snowflake data with zero performance interference?</summary>
+
+Because storage is shared and compute is isolated: each team runs its own virtual warehouse, and warehouses do not share compute resources, so one team's heavy job cannot slow another's. They read the same single copy of the data from the storage layer concurrently. This is the architectural answer to "how do you isolate without copying data."
+
+</details>
+
+<details><summary><b>89.</b> What goes wrong if you set Snowflake `AUTO_SUSPEND` to a very low value like 1 second?</summary>
+
+The warehouse suspends almost immediately between queries, so bursty interactive workloads constantly resume — each resume incurring the 60-second minimum billing and losing the warm local cache. You can end up paying more (and running slower from cold caches) than with a sensible 60–300 second value. Tune auto-suspend to the gap between queries in the workload, not to the absolute minimum.
+
+</details>
+
+<details><summary><b>90.</b> Why does BigQuery's serverless model not eliminate the need for good data modeling?</summary>
+
+Because cost and speed still depend on how much data each query reads, so partitioning, clustering, column pruning, and avoiding needless joins remain essential. Serverless removes cluster ops, not the physics of scanning bytes. A well-modeled, partitioned table can be an order of magnitude cheaper and faster than a flat unpartitioned dump of the same data.
+
+</details>
+
+<details><summary><b>91.</b> How would you cap the worst-case cost of a single BigQuery on-demand query?</summary>
+
+Set a maximum-bytes-billed limit (`--maximum_bytes_billed` / the `maximumBytesBilled` job property), and BigQuery will fail any query that would scan more than that, rather than running and billing it. This caps the blast radius of an accidental full scan. Combined with custom per-user/per-project quotas, it bounds spend without trusting every analyst to dry-run first.
+
+</details>
+
+<details><summary><b>92.</b> Why does Snowflake store data compressed and columnar inside micro-partitions?</summary>
+
+Columnar layout lets a query read only the columns it needs and compresses far better than row storage because each column holds homogeneous values, cutting both storage cost and bytes read per scan. Snowflake chooses and applies the compression automatically, so the on-disk micro-partition is much smaller than the 50–500 MB uncompressed figure. This is the same columnar-plus-compression principle behind Parquet and BigQuery's Capacitor, just managed internally.
+
+</details>
+
+<details><summary><b>93.</b> Why can BigQuery streaming inserts cost more than batch loads?</summary>
+
+Streaming inserts (the legacy streaming API or the Storage Write API's real-time path) carry a per-row/per-byte ingestion charge, whereas batch loads from Cloud Storage are free of ingestion fees. For a high-frequency feed you pay a premium for immediacy, so if near-real-time is not required, batching is materially cheaper. Architects weigh latency need against this ingestion cost when designing a feed.
+
+</details>
+
+<details><summary><b>94.</b> What is an external table in Synapse serverless SQL pool, and why does it matter for cost?</summary>
+
+An external table (or `OPENROWSET`) lets serverless SQL query files directly in the lake (e.g. Parquet in ADLS) without loading them into a provisioned store, billing per terabyte processed. Because cost is bytes processed, the file format and layout matter enormously — Parquet with folder partitioning processes far fewer bytes than raw CSV. It is the pay-per-query way to query lake data without a dedicated pool.
+
+</details>
+
+<details><summary><b>95.</b> A daily EMT/EPT file feed must land in the warehouse for regulatory reporting at month-end — how does the engine's pricing model shape the design?</summary>
+
+The feed is a predictable daily batch with a concentrated reporting spike, so you want cheap/free batch ingestion and elastic compute that scales only for the reporting window. On Snowflake that is batch `COPY INTO` plus an auto-suspended warehouse (multi-cluster for the spike); on BigQuery, free batch loads plus on-demand or an autoscaled reservation; on Fabric, a right-sized capacity. Modeling the EMT/EPT data partitioned by reporting date keeps both scan cost and pruning efficient.
+
+</details>
+
+<details><summary><b>96.</b> Why is "fine-grained security" sometimes cited as a reason warehouses persist despite lakehouses?</summary>
+
+Mature warehouses ship row-level security, column masking, tag-based policies, and detailed audit out of the box and proven at scale, whereas equivalent lakehouse governance can require extra catalog/policy tooling to match. For regulated investor data, "provably enforced and audited" beats "possible to configure." That maturity is a legitimate, non-performance reason to keep a warehouse in the serving tier.
+
+</details>
+
+<details><summary><b>97.</b> What is the difference between BigQuery on-demand slot access and a dedicated reservation for predictability?</summary>
+
+On-demand shares a pool (commonly up to ~2,000 slots per project) with cost driven by bytes scanned and variable performance under contention. A reservation gives you a committed/autoscaled number of slots at a fixed slot-hour cost, decoupling spend from bytes and stabilizing performance. Finance teams pick reservations to convert spiky variable cost into predictable capacity cost.
+
+</details>
+
+<details><summary><b>98.</b> How does a fund's daily ISIN/holdings load pattern inform warehouse choice and cost?</summary>
+
+A predictable daily batch load plus a concentrated reporting window favors elastic compute that scales for the window and shrinks after — auto-suspend/multi-cluster (Snowflake), autoscaled reservations (BigQuery), or right-sized capacity (Fabric). Append-friendly modeling (load by `trade_date`/ISIN, avoid row-level updates) keeps clustering and bytes-scanned costs down. The shape of the daily cycle, not the raw data size, drives the design.
+
+</details>
+
+<details><summary><b>99.</b> Why is it wrong to tell a CFO "we can cut the warehouse bill by deleting old data"?</summary>
+
+Because cost is workload-shaped: storage of old data is cheap and steady, so deleting it barely moves the bill, while compute on active queries dominates. The real savings come from suspending idle warehouses, right-sizing compute, pruning scans, and reusing caches. Framing it as a data problem leads to deleting useful history for negligible savings.
+
+</details>
+
+<details><summary><b>100.</b> What single sentence captures why an architect must understand all three pricing models?</summary>
+
+Because the same workload can be cheapest on different engines depending on whether cost is shaped by credits (time), bytes scanned, or provisioned capacity — and getting the model wrong turns a fund administrator's predictable month-end into a budget incident. The architect's job in vendor selection is to map the firm's actual query and concurrency patterns onto the model that bills them most favorably, with the right isolation and open-format posture for regulatory comfort.
+
+</details>
+
+
+## Phase 2 · 3.4.1 File formats — 100 self-test questions
+
+<details><summary><b>1.</b> What is Apache Parquet and what kind of storage layout does it use?</summary>
+
+Parquet is an open-source, columnar on-disk file format designed for analytical (OLAP) workloads. Storing values of one column contiguously lets readers scan only the columns a query needs and lets each column be compressed and encoded independently, which is far more efficient than a row format when queries touch a few columns of wide tables. In a fund lakehouse a holdings table might have 60 columns but a NAV scan only reads `fund_id`, `isin`, `quantity`, and `price`, so columnar layout pays off immediately.
+
+</details>
+
+<details><summary><b>2.</b> Name the four-level physical hierarchy of a Parquet file from largest to smallest container.</summary>
+
+A Parquet file is split into row groups; each row group contains one column chunk per column; each column chunk is divided into pages; and pages hold the actual encoded values. So the nesting is file → row group → column chunk → page. This hierarchy is the unit structure that pruning and pushdown operate on — row groups are skipped wholesale, columns chunks are skipped by projection, and pages are the smallest unit of encoding and compression.
+
+</details>
+
+<details><summary><b>3.</b> What is a row group in Parquet and why does its size matter?</summary>
+
+A row group is a horizontal slice of the table holding a bounded number of rows, and within it every column is stored as a column chunk. Row-group size is the central tuning knob: it is the granularity at which min/max statistics let a reader skip data, so larger row groups mean fewer footer entries but coarser pruning, while smaller ones prune more precisely at the cost of more metadata and smaller compression windows. A common default target is around 128 MB of in-memory data per row group.
+
+</details>
+
+<details><summary><b>4.</b> What is a column chunk?</summary>
+
+A column chunk is the data for a single column within a single row group — the contiguous region on disk holding that column's encoded and compressed pages for those rows. Because each column chunk is independent, the reader can seek directly to the chunks for the projected columns and skip the rest, and the footer records each chunk's byte offset and statistics. There is exactly one column chunk per column per row group.
+
+</details>
+
+<details><summary><b>5.</b> What is a page in Parquet and what page types exist?</summary>
+
+A page is the smallest unit of encoding and compression inside a column chunk, and there are several types: data pages (V1 and V2) holding values, dictionary pages holding the dictionary for dictionary-encoded chunks, and index pages. The dictionary page, when present, is the first page of the column chunk and stores the distinct values; subsequent data pages then store integer ids referencing it. Compression is applied per page, so a page is also the unit at which a codec like snappy or zstd operates.
+
+</details>
+
+<details><summary><b>6.</b> Where is the schema and metadata stored in a Parquet file, and why there?</summary>
+
+Parquet metadata — the schema, row-group locations, column-chunk offsets, encodings, and statistics — is written in a Thrift-serialized footer at the end of the file, followed by a 4-byte little-endian length and the closing magic number. It is at the end because Parquet is written in a single forward pass: the writer cannot know final offsets and stats until the data is written, so it emits metadata last. A reader therefore seeks to the end first to read the footer before touching any data.
+
+</details>
+
+<details><summary><b>7.</b> What is the `PAR1` magic number and where does it appear?</summary>
+
+`PAR1` is the 4-byte ASCII magic number that appears both at the very start and the very end of every Parquet file, framing the data and footer. Its presence at both ends lets tools quickly validate that a file is Parquet and is not truncated, and the trailing copy sits right after the footer-length field. If a tool reports a bad magic number, the file is corrupt, truncated, or not actually Parquet.
+
+</details>
+
+<details><summary><b>8.</b> How does a Parquet reader locate the data it needs given that metadata is at the end?</summary>
+
+The reader first seeks to the end of the file, reads the closing `PAR1` and the 4-byte footer length immediately before it, then reads the Thrift footer of that length. The footer gives it the schema plus, for every row group and column chunk, the byte offset, size, encodings, and statistics — so the reader can then seek directly to only the column chunks it needs. This is why reading Parquet over object storage typically needs at least two range requests: one for the footer, then one or more for the selected chunks.
+
+</details>
+
+<details><summary><b>9.</b> What information does the Parquet footer hold for each column chunk?</summary>
+
+For each column chunk the footer records its starting byte offset, total compressed and uncompressed size, the codec used, the encodings present, the number of values, and column statistics such as min, max, null count, and (in newer files) distinct count. These per-chunk entries are exactly what the reader uses to decide which chunks to skip and which to read. Reading the footer with a tool like `parquet_metadata()` in DuckDB exposes all of this without scanning the data.
+
+</details>
+
+<details><summary><b>10.</b> What is predicate (filter) pushdown in Parquet reading?</summary>
+
+Predicate pushdown means the query engine pushes a `WHERE` filter down into the Parquet scan so the reader can use row-group min/max statistics to skip entire row groups whose value range cannot satisfy the predicate. For example, a filter `nav_date = '2026-06-12'` lets the reader skip any row group whose min/max date range excludes that day, avoiding decompression of that data entirely. DuckDB calls these stored min/max ranges zonemaps and applies them automatically.
+
+</details>
+
+<details><summary><b>11.</b> What is projection pushdown and how does it differ from predicate pushdown?</summary>
+
+Projection pushdown means only the columns referenced by the query are read from disk; the reader seeks to just those column chunks and ignores the rest. It differs from predicate pushdown, which uses statistics to skip rows (whole row groups) based on a filter — projection prunes columns, predicate prunes rows. Selecting `SELECT fund_id, nav` instead of `SELECT *` triggers projection pushdown and can cut I/O by an order of magnitude on a wide table.
+
+</details>
+
+<details><summary><b>12.</b> A DuckDB query over a large Parquet file is slow even though it filters on one fund and one date. What is the first thing to check?</summary>
+
+Check whether the data is actually laid out so that row-group statistics can prune — i.e. run `EXPLAIN ANALYZE` and inspect how many row groups were read versus skipped, and look at the file's footer with `parquet_metadata()`. If the rows for that fund and date are scattered across every row group, the min/max ranges overlap and nothing is pruned, so you read the whole file regardless of the filter. The fix is usually to sort or partition the data on the filter columns before writing so each row group covers a narrow range.
+
+</details>
+
+<details><summary><b>13.</b> Why does sorting data before writing Parquet often dramatically improve filtered query speed?</summary>
+
+Sorting on the columns you filter by makes each row group cover a narrow, non-overlapping range of those values, so the min/max statistics become selective and the reader can skip most row groups for a given predicate. Without sorting, values are spread randomly and every row group's range spans the whole domain, defeating pruning. For a holdings table, sorting by `nav_date` then `fund_id` is what turns a multi-minute full scan into a sub-second pruned scan.
+
+</details>
+
+<details><summary><b>14.</b> What is dictionary encoding in Parquet and when is it effective?</summary>
+
+Dictionary encoding replaces each value with a small integer id into a per-column-chunk dictionary page of distinct values, and the ids are then stored with RLE/bit-packing. It is highly effective on low-cardinality columns — currency codes, fund ids, ISINs that repeat — because storing 2-byte ids plus one copy of each distinct string is far smaller than repeating the strings. The dictionary lives in the first page of the column chunk and the data pages reference it.
+
+</details>
+
+<details><summary><b>15.</b> When does the Parquet writer fall back from dictionary encoding to plain encoding?</summary>
+
+If the dictionary grows too large — in byte size or number of distinct values past a configured threshold — the writer abandons dictionary encoding for that column chunk and falls back to plain encoding. This protects against high-cardinality columns (like unique trade ids or timestamps at microsecond precision) where a dictionary would be as large as the data and would not help. The fallback is per column chunk, so the same column can be dictionary-encoded in one row group and plain in another.
+
+</details>
+
+<details><summary><b>16.</b> What is the RLE/bit-packing hybrid encoding and what is it used for?</summary>
+
+It is a hybrid that alternates between run-length-encoded runs (a value repeated, stored once with a count) and bit-packed runs (several values packed LSB-first into the minimum number of bits), choosing whichever is smaller for each segment. Parquet uses it to encode dictionary ids, definition levels, and repetition levels, all of which are small integers with frequent repeats. The data page records the bit width in one leading byte before the encoded run.
+
+</details>
+
+<details><summary><b>17.</b> What does the plain encoding (`PLAIN`, code 0) do?</summary>
+
+Plain encoding stores values back-to-back in their raw little-endian binary form with no compression of the values themselves — fixed-width types take their natural width and byte arrays are length-prefixed. It is the universal fallback used when dictionary encoding is disabled or has overflowed, and it is the simplest to decode. Page-level compression (snappy, zstd) is still applied on top, so plain-encoded pages are not necessarily large on disk.
+
+</details>
+
+<details><summary><b>18.</b> What does `RLE_DICTIONARY` (encoding code 8) signify in a Parquet column?</summary>
+
+`RLE_DICTIONARY` is the current encoding marker indicating that the data pages store dictionary ids using the RLE/bit-packing hybrid, with the dictionary itself in a separate dictionary page. It superseded the deprecated `PLAIN_DICTIONARY` (code 2), which used the same scheme but was tagged differently. Seeing `RLE_DICTIONARY` in `parquet_metadata()` output tells you that column chunk was dictionary-encoded.
+
+</details>
+
+<details><summary><b>19.</b> What are the delta encodings (`DELTA_BINARY_PACKED`, `DELTA_BYTE_ARRAY`) good for?</summary>
+
+`DELTA_BINARY_PACKED` (code 5) encodes integers as deltas between consecutive values, which is compact for sorted or slowly-changing sequences such as timestamps, ids, or sequence numbers. `DELTA_BYTE_ARRAY` (code 7) and `DELTA_LENGTH_BYTE_ARRAY` (code 6) apply delta techniques to byte arrays by sharing common prefixes or storing lengths separately, which helps with sorted strings like ISINs or sorted keys. They shine where values change little from row to row.
+
+</details>
+
+<details><summary><b>20.</b> What are Parquet column statistics and how do they enable pruning?</summary>
+
+Column statistics are per-column-chunk (and optionally per-page) summaries stored in the footer: minimum value, maximum value, null count, and sometimes distinct count. A reader compares a query predicate against the min/max range and, if the range cannot satisfy the predicate, skips the whole chunk without decompressing it. These stats are the mechanism behind predicate pushdown — without them the engine would have to read every value to evaluate the filter.
+
+</details>
+
+<details><summary><b>21.</b> Why can a Parquet file have statistics yet still not prune well?</summary>
+
+Statistics only help when each row group's min/max range is narrow and selective; if the data is unsorted, every row group's range spans nearly the full domain and overlaps every predicate, so nothing is skipped. The stats exist but are useless for pruning. This is why "the file has stats" is not enough — you must check data clustering, which is why sorting or partitioning on filter columns is the real fix.
+
+</details>
+
+<details><summary><b>22.</b> What is the difference between row-group-level and page-level statistics in Parquet?</summary>
+
+Row-group (column-chunk) statistics in the footer let the reader skip entire row groups, while page-level statistics, stored in a separate page index, let it skip individual pages within a chosen column chunk for finer-grained pruning. Page indexes (column index and offset index) were added so readers need not decode a whole row group when only a few pages match. Page-level pruning gives more precision but adds metadata, so not all writers emit it.
+
+</details>
+
+<details><summary><b>23.</b> Compare snappy and zstd as Parquet compression codecs.</summary>
+
+Snappy is extremely fast to compress and decompress with very low CPU cost but a modest compression ratio, so it minimizes CPU at the expense of file size. Zstd achieves noticeably smaller files — often roughly 15–20% smaller than snappy — for somewhat higher compression CPU and a small read overhead, and it is tunable by level. Snappy suits hot, frequently-written data where CPU is the bottleneck; zstd suits data you write once and store long-term where storage and scan I/O dominate.
+
+</details>
+
+<details><summary><b>24.</b> For a holdings table written once daily and queried many times, which Parquet codec is usually the better default and why?</summary>
+
+Zstd is usually the better default because the file is written once but scanned repeatedly, so the higher one-time compression cost buys smaller files that reduce storage spend and cut the I/O of every later scan. The roughly 15–20% size reduction over snappy directly lowers bytes read from object storage on each NAV or holdings query. Snappy would only win if write CPU or write latency were the binding constraint, which is rare for a daily batch.
+
+</details>
+
+<details><summary><b>25.</b> Does raising the zstd compression level from, say, 3 to 19 keep shrinking Parquet files proportionally?</summary>
+
+No — gains diminish sharply with level. Benchmarks show that pushing zstd from a moderate level to a high one often yields only around a 1–1.5% further size reduction while multiplying compression time roughly two- to threefold. So a moderate zstd level captures almost all the benefit, and very high levels mostly waste write CPU for negligible storage savings.
+
+</details>
+
+<details><summary><b>26.</b> How does page-level compression interact with encoding in Parquet?</summary>
+
+Encoding (dictionary, RLE, delta, plain) is applied first to turn values into a compact byte stream, and then the chosen codec (snappy, zstd, gzip, none) compresses that already-encoded page. Because encoding has already removed much redundancy — repeated ISINs become small ids — the codec often has less to do, which is why a well-encoded column may barely shrink under heavy compression. Both layers are recorded per chunk in the footer.
+
+</details>
+
+<details><summary><b>27.</b> What is Apache Avro and how does it differ fundamentally from Parquet?</summary>
+
+Avro is a row-oriented binary serialization format that stores whole records together, whereas Parquet is columnar and stores each column together. Avro is optimized for writing and transporting individual records and for schema evolution, not for analytical column scans, so it fits streaming and landing zones rather than query-time scans. The two are complementary: land or stream in Avro, then compact into Parquet for analytics.
+
+</details>
+
+<details><summary><b>28.</b> How does an Avro object container file store its schema, and why does that matter?</summary>
+
+An Avro object container file embeds the full writer schema as JSON in the file header, along with a 16-byte sync marker, before the data blocks. Because the schema travels with the data, any reader can deserialize the file without consulting an external registry, which makes Avro files self-describing and durable. The header magic bytes are `Obj` followed by `0x01`.
+
+</details>
+
+<details><summary><b>29.</b> Why is Avro the common choice for Kafka topics and landing zones?</summary>
+
+Avro's compact binary record encoding plus first-class schema evolution make it ideal for streaming, where producers and consumers deploy independently and schemas change over time. With a schema registry, Kafka messages carry only a small schema id rather than the whole schema, keeping payloads tiny while still allowing the consumer to resolve the writer schema. This is why fund event streams and raw landing data often arrive as Avro before being compacted to Parquet.
+
+</details>
+
+<details><summary><b>30.</b> Explain Avro schema resolution between a writer schema and a reader schema.</summary>
+
+When a reader's schema differs from the writer's, Avro resolves them field by field by name: fields present only in the writer are ignored, fields present only in the reader use the reader's declared default, and compatible type promotions are allowed. This reader-writer separation lets producers and consumers evolve independently as long as changes stay compatible. It is the core mechanism that makes Avro the schema-evolution format.
+
+</details>
+
+<details><summary><b>31.</b> How do default values and aliases support schema evolution in Avro?</summary>
+
+A default value on a reader field lets old data that lacks that field still be read — the reader fills in the default — which enables backward-compatible additions. Aliases let a reader map a renamed field or type back to the writer's old name, so renames do not break deserialization. Together they let you add and rename fields without rewriting historical data, which is exactly what a long-lived fund event stream needs.
+
+</details>
+
+<details><summary><b>32.</b> What does it mean that Avro records carry no field names in their binary payload?</summary>
+
+Avro encodes only the field values, concatenated in the order the schema declares, with no field names or type tags in the data stream — the schema alone tells the reader how to interpret the bytes. This makes the payload very compact, which is why Avro is efficient on the wire for Kafka. The trade-off is that the data is meaningless without its schema, hence the schema-in-header or schema-registry pattern.
+
+</details>
+
+<details><summary><b>33.</b> What is Apache Arrow and what problem does it solve?</summary>
+
+Arrow is a columnar in-memory format and a standard for representing tabular data in RAM, designed so different tools and languages can share data without serialization or copying. It solves the cost of repeatedly converting data between each engine's private in-memory representation: a producer and consumer that both speak Arrow can hand off a buffer directly. It is an interchange and compute standard, not a file-on-disk archival format like Parquet.
+
+</details>
+
+<details><summary><b>34.</b> How do Arrow and Parquet relate to each other in a typical pipeline?</summary>
+
+Parquet is the on-disk columnar storage format and Arrow is the in-memory columnar format; readers like pyarrow decode Parquet pages into Arrow arrays, and engines compute over Arrow then write Parquet back out. They are deliberately aligned — both columnar — so the conversion between them is cheap. A common flow is read Parquet → Arrow in memory → process → write Parquet, with Arrow as the zero-copy hand-off between steps.
+
+</details>
+
+<details><summary><b>35.</b> What is the difference between the Arrow IPC format and Parquet?</summary>
+
+The Arrow IPC (Feather) format serializes Arrow's in-memory columnar layout to disk or a stream with minimal transformation, optimized for fast read/write and inter-process transfer, while Parquet is optimized for compact long-term storage with rich encodings and statistics. Arrow IPC trades file size for speed and faithful in-memory representation; Parquet trades some read speed for smaller files and pushdown metadata. Use Arrow IPC for transient interchange, Parquet for the lake.
+
+</details>
+
+<details><summary><b>36.</b> What is Apache ORC and where does it sit relative to Parquet (awareness level)?</summary>
+
+ORC (Optimized Row Columnar) is another open columnar on-disk format, born in the Hadoop/Hive ecosystem, conceptually similar to Parquet with stripes (its row groups), column data, and a footer with statistics and indexes. In practice the modern lakehouse standardizes on Parquet, with ORC encountered mainly in legacy Hive estates. An architect should recognize ORC and know it is a peer of Parquet, not adopt it for new fund-platform tables without a specific reason.
+
+</details>
+
+<details><summary><b>37.</b> Why is "an architect who cannot read a footer argues from vibes" a fair statement?</summary>
+
+Because the footer holds the ground truth — how many row groups exist, what their value ranges are, which encodings and codec are used, and how big each chunk is — so any claim about why a query is slow can be checked, not guessed. Without reading it you cannot say whether pruning is even possible, and you end up blaming the engine for a layout problem. Reading the footer turns "the lake is slow" into a concrete, fixable diagnosis.
+
+</details>
+
+<details><summary><b>38.</b> How would you inspect a Parquet file's footer using DuckDB?</summary>
+
+Use the metadata table functions: `SELECT * FROM parquet_metadata('file.parquet')` for per-row-group, per-column statistics and offsets, `parquet_schema('file.parquet')` for the column structure, and `parquet_file_metadata('file.parquet')` for file-level info like the writer and total row groups. These read only the footer, so they are fast even on huge files. They are the first tools to reach for when diagnosing pruning.
+
+</details>
+
+<details><summary><b>39.</b> What does the DuckDB `parquet_metadata()` function return that is useful for diagnosing slow scans?</summary>
+
+`parquet_metadata()` returns one row per column chunk with the row-group id, column path, compressed and uncompressed sizes, encodings, and the min/max statistics. By inspecting the min/max columns you can see directly whether each row group's range is narrow enough to prune a given predicate, and the sizes reveal which columns dominate the file. This is how you confirm, rather than assume, whether row-group pruning is achievable.
+
+</details>
+
+<details><summary><b>40.</b> What does the DuckDB `parquet_kv_metadata()` function expose?</summary>
+
+`parquet_kv_metadata()` returns the arbitrary key-value metadata pairs stored in the Parquet footer, which writers use to embed things like the producing library version, a logical schema, or table-format pointers. It is useful for forensic questions such as which tool and version wrote a file, or whether a table-format engine left markers. The values are returned as raw bytes that you may need to cast or decode.
+
+</details>
+
+<details><summary><b>41.</b> How would you confirm with `EXPLAIN ANALYZE` in DuckDB that pushdown is actually happening?</summary>
+
+Run `EXPLAIN ANALYZE SELECT ... FROM 'file.parquet' WHERE ...` and read the Parquet scan operator, which reports how many rows and bytes were actually read versus the file total. If the filter is selective but the scan still reports reading nearly all rows, pushdown is not pruning and the data layout is the problem. This turns the pushdown question into an observed fact rather than a hope.
+
+</details>
+
+<details><summary><b>42.</b> What is the DuckDB `binary_as_string` option for and when do you need it?</summary>
+
+`binary_as_string` tells DuckDB to interpret `BYTE_ARRAY` columns as strings when reading older Parquet files that stored text without setting the UTF8 logical type flag. Without it, such columns come back as `BLOB` and look like binary garbage. You set it when a legacy file's string columns appear as binary — common with files produced by old writers.
+
+</details>
+
+<details><summary><b>43.</b> What does DuckDB's `hive_partitioning` option do when reading Parquet?</summary>
+
+`hive_partitioning` makes DuckDB parse partition values out of directory names like `nav_date=2026-06-12/fund=ABC/` and expose them as virtual columns, and it lets filters on those columns prune whole directories before any file is opened. It is auto-detected by default. For a lake laid out by date and fund, this turns a directory-level filter into the cheapest possible pruning — entire days are skipped without reading footers.
+
+</details>
+
+<details><summary><b>44.</b> In the lab you write a 10M-row holdings table at three row-group sizes and two compressions. Which combination produces the smallest file, and why?</summary>
+
+The combination with the largest row groups and zstd compression typically yields the smallest file, because larger row groups give the codec longer windows and more redundancy to exploit, and zstd compresses harder than snappy. Bigger row groups also reduce the per-group metadata overhead. The trade-off is coarser pruning and more memory to write each group, so smallest-on-disk is not automatically fastest-to-query.
+
+</details>
+
+<details><summary><b>45.</b> After writing several Parquet variants, your filtered DuckDB scan is fastest on the file with smaller row groups. Why might that be?</summary>
+
+Smaller row groups produce narrower min/max ranges per group, so a selective filter on one fund and date range can skip a larger fraction of groups, reading far less data. Even though the file may be marginally larger, the query touches less of it. This illustrates that file size and query latency are decided by different aspects of structure — size by compression and encoding, latency largely by how well the layout supports pruning.
+
+</details>
+
+<details><summary><b>46.</b> How do you read a Parquet footer's row-group count and reason about how many a predicate would skip?</summary>
+
+Read the footer (e.g. `parquet_metadata()` grouped by `row_group_id`, or `parquet_file_metadata()` for the count), then for each row group compare your predicate against that group's min/max for the filtered column. Every group whose range cannot contain a matching value is skippable. Counting those gives a concrete answer like "this predicate skips 47 of 50 row groups," which is the architect-level statement the lesson asks for.
+
+</details>
+
+<details><summary><b>47.</b> Why is the choice of row-group size and compression for a holdings table a real engineering decision rather than a default?</summary>
+
+Because the two choices pull in opposite directions on cost and latency: large groups plus zstd minimize storage but can hurt pruning and write memory, while small groups plus snappy speed writes and pruning but cost storage and CPU on read. The right point depends on query patterns (how selective and frequent), data clustering, and whether storage or compute is the binding cost. Defaulting blindly leaves either money or latency on the table.
+
+</details>
+
+<details><summary><b>48.</b> What is a sensible default row-group target size and why is "too small" harmful?</summary>
+
+A common target is roughly 128 MB of data per row group, balancing pruning granularity against metadata and compression efficiency. Too-small row groups bloat the footer with statistics entries, shrink compression windows so files grow, and create many tiny I/O requests, all of which slow both reads and writes. Too-large groups conversely waste pruning opportunity, so the target is a deliberate middle ground.
+
+</details>
+
+<details><summary><b>49.</b> Why does Parquet write metadata after the data instead of before?</summary>
+
+Because Parquet is designed for single-pass streaming writes: the writer emits column chunks as it goes and only knows the final byte offsets, sizes, and statistics once all data is written, so the footer is assembled and written last. Putting it up front would require buffering the whole file or seeking back. The cost is that readers must seek to the end first, which is a cheap range request even on object storage.
+
+</details>
+
+<details><summary><b>50.</b> A teammate says "just add an index to the Parquet file to speed it up." How do you respond?</summary>
+
+Parquet has no secondary B-tree indexes like a database; its "indexing" is the built-in min/max statistics (zonemaps) plus optional page indexes, and they only help if the data is clustered on the filter column. The way to make scans fast is to sort/partition the data so those statistics become selective, not to bolt on an index. So the right move is to reorganize the data layout, not to look for an index feature that does not exist.
+
+</details>
+
+<details><summary><b>51.</b> What is the role of null counts in Parquet statistics?</summary>
+
+Each column chunk's statistics include a null count, letting an engine answer `IS NULL` / `IS NOT NULL` or `COUNT(col)` style predicates without reading the data — for instance skipping a chunk for `col IS NOT NULL` if the whole chunk is null. It also helps query planners estimate selectivity. For fund data, a chunk where every `lei` is null can be pruned for a `lei IS NOT NULL` filter using the count alone.
+
+</details>
+
+<details><summary><b>52.</b> Why is min/max-based pruning ineffective for a predicate like `isin LIKE '%123%'`?</summary>
+
+Min/max statistics describe only the lexicographic range of values in a chunk, so they can answer range and equality predicates but not a substring or middle-of-string match, because any chunk's range could contain a value with `123` somewhere inside. The reader cannot prove a chunk is irrelevant and must read it. Anchored prefixes like `isin LIKE 'LU%'` can sometimes prune because they reduce to a range, but unanchored `%123%` cannot.
+
+</details>
+
+<details><summary><b>53.</b> What is the difference between a data page V1 and V2 in Parquet (awareness level)?</summary>
+
+Data page V2 separates the repetition and definition levels from the encoded values so that levels are not compressed together with data, and it stores explicit row and null counts in the page header, improving the ability to skip pages. V1 compresses the whole page including levels as one unit. Most readers handle both, and the distinction mainly matters when you are debugging page-level behaviour or a writer-compatibility issue.
+
+</details>
+
+<details><summary><b>54.</b> How do definition and repetition levels relate to Parquet's handling of nested and nullable data?</summary>
+
+Definition levels encode how deeply a value is defined, which is how Parquet represents nulls and optional fields, and repetition levels encode where a value sits within a repeated (list) structure. Together they let Parquet shred nested and nullable columns into flat columnar storage and reconstruct the original structure on read. They are small integers, which is why they are stored with the RLE/bit-packing hybrid.
+
+</details>
+
+<details><summary><b>55.</b> Your DuckDB scan reads every byte of a 5 GB Parquet file despite a tight date filter. Walk through your diagnosis.</summary>
+
+First confirm with `EXPLAIN ANALYZE` that the scan really reads all rows, then open `parquet_metadata()` and inspect the date column's min/max per row group; if every group spans the full date range, the data is unsorted and pruning is impossible. The remedy is to rewrite the file sorted (or partitioned) by date so each group covers a narrow range. The point is you diagnose from the footer, not by blaming DuckDB.
+
+</details>
+
+<details><summary><b>56.</b> For a column of repeating ISINs, which encoding does Parquet typically choose and why is it compact?</summary>
+
+It typically dictionary-encodes the column, because ISINs are low-cardinality relative to row count and each distinct 12-character ISIN is stored once in the dictionary page while the data pages hold small integer ids. This collapses many repeated 12-byte strings into 1- or 2-byte ids plus a compact dictionary. The result compresses further under the page codec, making such columns very small on disk.
+
+</details>
+
+<details><summary><b>57.</b> For a high-cardinality column like a microsecond timestamp, why might dictionary encoding be a poor fit?</summary>
+
+If nearly every value is distinct, the dictionary would hold almost as many entries as there are rows, providing no compression benefit and possibly exceeding the dictionary size limit, so the writer falls back to plain or a delta encoding. For sorted timestamps, `DELTA_BINARY_PACKED` is far better because consecutive deltas are small. So the encoding choice depends on cardinality and ordering, not a fixed rule.
+
+</details>
+
+<details><summary><b>58.</b> What does "predicate pushdown only works on stored columns" mean in practice?</summary>
+
+Pushdown uses statistics that exist for stored columns, so a filter on a column physically present and with min/max stats can prune row groups, but a filter computed from an expression the reader cannot map to a stored column's stats (for example a complex UDF over the data) cannot be pushed down and must be evaluated after reading. So designing the layout around the columns you actually filter on is what makes pushdown possible. Filtering on a derived value that has no stored statistics forfeits pruning.
+
+</details>
+
+<details><summary><b>59.</b> Why does projection pushdown matter more on wide tables than narrow ones?</summary>
+
+On a wide table the unselected columns are most of the bytes, so reading only the few projected column chunks avoids the bulk of the I/O, whereas on a narrow table there is little to skip. A 60-column holdings file queried for 4 columns reads roughly a fifteenth of the column data when projection pushdown works. This is why `SELECT *` is especially costly on wide fund tables and explicit column lists pay off.
+
+</details>
+
+<details><summary><b>60.</b> How does columnar storage improve compression compared to row storage?</summary>
+
+In columnar storage, values of the same type and similar distribution sit together, so encodings (dictionary, RLE, delta) and codecs find far more redundancy than in row storage where adjacent bytes belong to unrelated columns. A column of repeated currency codes or sorted dates compresses dramatically; the same values interleaved across rows do not. This per-column homogeneity is a core reason Parquet files are small.
+
+</details>
+
+<details><summary><b>61.</b> What is the practical meaning of "zonemap" in DuckDB's Parquet reader?</summary>
+
+A zonemap is DuckDB's term for the per-row-group min/max statistics stored in the Parquet footer that bound the values in each zone (row group). The reader consults the zonemap to skip any row group whose value range cannot satisfy the filter, which is exactly predicate pushdown. So "zonemap pruning" and "row-group skipping via min/max stats" describe the same mechanism.
+
+</details>
+
+<details><summary><b>62.</b> When compacting many small Avro landing files into Parquet, what layout decisions most affect later query speed?</summary>
+
+The biggest levers are sorting the data on the columns analysts filter by (e.g. `nav_date`, `fund_id`) so row-group statistics become selective, choosing an appropriate row-group size, and partitioning on a coarse key like date. These determine whether predicate and projection pushdown can prune at query time. Compression choice affects storage and scan I/O but pruning is what governs latency, so layout comes first.
+
+</details>
+
+<details><summary><b>63.</b> Why is Avro, not Parquet, usually the format at the Kafka/landing boundary in a fund platform?</summary>
+
+Because at the boundary you are writing individual records as events arrive and you need robust schema evolution as upstream schemas change, both of which are Avro's strengths, while Parquet's columnar layout and footer statistics only pay off when you later scan many rows by column. Writing per-event Parquet would produce tiny, inefficient files with heavy metadata overhead. So you land in Avro and compact to Parquet for analytics.
+
+</details>
+
+<details><summary><b>64.</b> What goes wrong if you write one Parquet file per incoming record?</summary>
+
+You get the small-files problem: each tiny file carries a full footer and magic numbers, so metadata dominates, compression windows are useless, and the reader must open thousands of files with two-plus range requests each. Query planners and object stores both suffer. The fix is to buffer/land records (often in Avro) and compact into appropriately sized Parquet files with reasonable row groups.
+
+</details>
+
+<details><summary><b>65.</b> How does Parquet's single-pass write design interact with object storage like S3 or MinIO?</summary>
+
+Because the footer is at the end, a reader on object storage issues a range GET for the tail to read the footer, then further range GETs for only the selected column chunks, so reads are a handful of targeted requests rather than a full download. Writes stream the file out in one pass and finalize with the footer. This pattern is why Parquet performs well on object storage despite its high per-request latency.
+
+</details>
+
+<details><summary><b>66.</b> Why might `SELECT count(*)` over a Parquet file be nearly instant?</summary>
+
+Because the row count is recorded in the footer per row group, an engine can sum those counts without reading any column data — it reads only metadata. So a bare `count(*)` is answered from the footer alone. Adding a `WHERE` filter changes this: now the engine must use statistics to prune and may still need to read surviving row groups to count matching rows.
+
+</details>
+
+<details><summary><b>67.</b> A regulator asks you to reproduce a holdings extract exactly as it was queried last quarter. How do file formats and layout help?</summary>
+
+If the data is stored as immutable Parquet files, the same files re-scanned with the same projection and filter reproduce the extract deterministically, and the footer lets you verify which row groups and columns were involved. Format alone gives reproducibility of a fixed file set; full point-in-time reproduction across corrections is the job of a table format like Iceberg on top. So Parquet provides the stable physical substrate the audit relies on.
+
+</details>
+
+<details><summary><b>68.</b> Why does choosing the wrong compression codec rarely change query correctness but can change cost a lot?</summary>
+
+Compression is transparent to the reader — any supported codec decompresses to the same values, so results are identical regardless of snappy vs zstd. What changes is storage footprint and the CPU/I/O profile of reads and writes, which drive cost and latency. So codec choice is an economics decision, not a correctness one, and should be made from the workload's read/write balance.
+
+</details>
+
+<details><summary><b>69.</b> What is the relationship between page size and pruning granularity within a row group?</summary>
+
+Smaller pages, combined with a page index, let the reader skip individual pages inside a row group it has decided to read, giving finer pruning than row-group statistics alone. Larger pages reduce overhead but offer coarser skipping. So page size is a secondary tuning knob beneath row-group size when you need very selective intra-group filtering and the writer emits page indexes.
+
+</details>
+
+<details><summary><b>70.</b> Why can adding more columns to a Parquet table have little effect on the cost of queries that do not use them?</summary>
+
+Thanks to projection pushdown, queries read only the column chunks they reference, so unused columns sit on disk untouched and add only a small amount of footer metadata to read. Adding a rarely-used `lei` or `mic` column does not slow existing NAV queries. This is a key advantage of columnar storage for wide, evolving fund schemas.
+
+</details>
+
+<details><summary><b>71.</b> How does Parquet support schema evolution compared with Avro?</summary>
+
+Parquet supports additive evolution — readers can select a subset of columns and engines can union schemas across files, so adding columns is generally safe — but it lacks Avro's rich reader/writer resolution with defaults and aliases for renames and type changes. Parquet evolution is handled more at the table-format or query-engine layer. Avro is the format built specifically for record-level schema evolution, which is why it owns the streaming/landing role.
+
+</details>
+
+<details><summary><b>72.</b> What does it mean that Arrow enables "zero-copy" data sharing?</summary>
+
+Because Arrow defines a standard in-memory columnar layout, two processes or libraries that both use Arrow can share the same memory buffers (or map them across processes) without serializing and re-parsing the data. This eliminates the conversion cost that normally dominates moving data between, say, a query engine and a Python data-science library. Zero-copy is why Arrow is the interchange standard rather than just another format.
+
+</details>
+
+<details><summary><b>73.</b> Why is "read Parquet into Arrow" cheap while "read CSV into Arrow" is expensive?</summary>
+
+Parquet is already columnar with typed, encoded data and statistics, so decoding it into Arrow arrays is a fairly direct, type-aware transformation. CSV is untyped text that must be parsed line by line, with type inference and conversion for every field, which is CPU-heavy and error-prone. This contrast is a core reason analytical pipelines prefer Parquet over CSV for storage.
+
+</details>
+
+<details><summary><b>74.</b> When would you still reach for ORC over Parquet in a modern stack?</summary>
+
+Almost never for greenfield work — you would use ORC mainly to interoperate with an existing Hive/Hadoop estate that already standardized on it, or where a specific tool reads ORC more efficiently. For a new fund lakehouse Parquet is the default because of its broad engine support and tooling. Knowing ORC at awareness level means recognizing it as a peer format you may inherit, not one you would newly adopt.
+
+</details>
+
+<details><summary><b>75.</b> What is a "column chunk offset" in the footer used for?</summary>
+
+The column-chunk offset is the byte position where that chunk's data begins in the file, recorded in the footer so a reader can seek directly to a projected column without scanning intervening data. Combined with the chunk size, it defines the exact range to read. This is what makes projection pushdown a precise seek-and-read rather than a full scan.
+
+</details>
+
+<details><summary><b>76.</b> Why does Parquet store the footer length as a 4-byte little-endian integer right before the trailing magic?</summary>
+
+So a reader can do a fixed-size tail read: it fetches the last few bytes, interprets the 4 bytes immediately before the closing `PAR1` as the footer length, and then reads exactly that many bytes back from the end to get the footer. The little-endian convention is fixed by the format. This tiny header is what lets readers find the variable-length footer without scanning the whole file.
+
+</details>
+
+<details><summary><b>77.</b> How do you justify zstd over gzip for a Parquet holdings archive?</summary>
+
+Zstd typically achieves compression ratios comparable to or better than gzip while decompressing substantially faster, so for an archive that is scanned repeatedly zstd lowers both storage and the CPU cost of every read. Gzip's slower decompression penalizes each query. Zstd's tunable levels also let you dial in the size/CPU balance, which gzip does less flexibly.
+
+</details>
+
+<details><summary><b>78.</b> What is the danger of setting a very large row-group size for a table that is frequently filtered selectively?</summary>
+
+Very large row groups widen each group's min/max ranges, so a selective predicate matches almost every group and pruning collapses, forcing the reader to scan most of the file. They also raise the memory needed to write and read a group. So for selective query patterns, oversized row groups trade away the very pruning that makes columnar storage fast.
+
+</details>
+
+<details><summary><b>79.</b> How does compression affect predicate pushdown — does the reader decompress before pruning?</summary>
+
+No — pruning by min/max statistics happens against the uncompressed footer metadata, so a reader can skip a row group without ever decompressing its data pages. Decompression only occurs for the chunks that survive pruning and projection. This ordering is why pushdown saves CPU as well as I/O: skipped groups are never decompressed.
+
+</details>
+
+<details><summary><b>80.</b> Why is it useful that Parquet statistics include both min and max rather than just one?</summary>
+
+Both bounds are needed to evaluate range predicates from either side: max lets you skip groups for `col > X` when `max <= X`, and min lets you skip for `col < Y` when `min >= Y`, and together they handle `BETWEEN` and equality. With only one bound, half of the range predicates could not be pruned. So the pair is what makes full range pushdown possible.
+
+</details>
+
+<details><summary><b>81.</b> For a `nav_date BETWEEN '2026-01-01' AND '2026-03-31'` filter, how does the reader use statistics?</summary>
+
+For each row group it checks the stored min and max of `nav_date`: if the group's max is before the range start or its min is after the range end, the group cannot contain matching rows and is skipped; otherwise it is read. If the data is sorted by date, only the few row groups overlapping Q1 are read. This is exactly the pruning that turns a quarter-filter on a year of data into a fraction of the I/O.
+
+</details>
+
+<details><summary><b>82.</b> What is the trade-off when enabling page-level (column index) statistics in Parquet?</summary>
+
+Page indexes add footer metadata and a little write cost, but they let the reader skip individual pages within a row group, giving finer pruning for very selective filters. The trade-off is more metadata to write and read versus better intra-group skipping. Enable them when row-group-level pruning is too coarse for your selectivity, otherwise the extra metadata is overhead.
+
+</details>
+
+<details><summary><b>83.</b> Why does `parquet_schema()` matter when validating an EMT or EPT file delivered as Parquet?</summary>
+
+`parquet_schema()` shows each column's name, physical type, logical type, and nesting, letting you confirm the delivered file matches the agreed EMT/EPT field definitions and types before ingesting. A mismatched type (a numeric field stored as string, say) is caught here rather than after a downstream failure. It reads only the footer, so validating schema is cheap even for large regulatory files.
+
+</details>
+
+<details><summary><b>84.</b> A vendor sends a Parquet file whose string columns show up as binary blobs in DuckDB. What is the likely cause and fix?</summary>
+
+The file was likely written by an older tool that did not set the UTF8 logical type on those `BYTE_ARRAY` columns, so DuckDB treats them as `BLOB`. The fix is to read with `binary_as_string=true`, which tells DuckDB to interpret those byte arrays as strings. Longer term, ask the vendor to write with proper UTF8 string logical types.
+
+</details>
+
+<details><summary><b>85.</b> How does the number of row groups in a file relate to write-time memory?</summary>
+
+The writer buffers a full row group in memory before flushing it, so a larger row-group target means more memory per group but fewer groups, while a smaller target means many groups and less peak memory each. This is one reason oversized row groups are not free even before query time. It also influences parallelism, since groups are often the unit of parallel read and write.
+
+</details>
+
+<details><summary><b>86.</b> Why can converting a CSV of holdings to Parquet shrink it many-fold?</summary>
+
+CSV stores everything as text with delimiters and no typing, so a number like `1234.56` takes its full character width and repeated strings are stored in full every time. Parquet stores typed binary values columnarly, dictionary-encodes repeats, and compresses pages, collapsing redundancy that CSV cannot. For a holdings file with many repeated ISINs and currencies, the reduction can be an order of magnitude.
+
+</details>
+
+<details><summary><b>87.</b> What does it mean to say Parquet is "self-describing"?</summary>
+
+Parquet embeds its full schema and per-chunk metadata in the footer, so any compliant reader can interpret the file without an external schema definition — types, nesting, encodings, and statistics all travel with the data. This makes Parquet files durable and portable across engines. It contrasts with raw CSV, which carries no types, and aligns with Avro, which is self-describing in its own header.
+
+</details>
+
+<details><summary><b>88.</b> When inspecting a footer, you see a column chunk with encoding `PLAIN` and a huge size. What might that indicate?</summary>
+
+It often indicates a high-cardinality column where dictionary encoding either was disabled or overflowed its size limit and fell back to plain, so values are stored raw and the chunk is large. This is normal for things like unique ids or unsorted timestamps, but if it is unexpected it may signal a writer misconfiguration. Checking whether the data could be sorted to enable a delta encoding may shrink it.
+
+</details>
+
+<details><summary><b>89.</b> How would you decide between snappy and zstd for the bronze (raw landing) versus gold (curated mart) layers?</summary>
+
+For a bronze layer written continuously and possibly re-processed, snappy's low CPU favors fast writes; for a gold mart written once and queried heavily, zstd's smaller files cut storage and per-query I/O. The deciding factor is the read/write ratio and which resource is the binding cost at each layer. So it is common to see snappy in landing and zstd in curated marts.
+
+</details>
+
+<details><summary><b>90.</b> Why does Parquet keep statistics per column chunk rather than only per file?</summary>
+
+Per-chunk (per-row-group) statistics are what enable selective skipping of parts of the file; a single file-level min/max would only let you skip the entire file, which is useless once you have decided to read it. Granular statistics are the entire basis of row-group pruning. The footer therefore carries one statistics record per column per row group.
+
+</details>
+
+<details><summary><b>91.</b> A filtered scan is fast on a partitioned-by-date layout but slow on a single big file with the same data. Why?</summary>
+
+With Hive-style date partitioning the engine can prune at the directory level, skipping entire days without opening any file footers, which is the cheapest possible pruning. In the single big file it must at best rely on row-group statistics, and if the file is unsorted by date it prunes poorly and scans most of it. Partitioning moves pruning earlier and coarser, before any file I/O.
+
+</details>
+
+<details><summary><b>92.</b> What is the risk of over-partitioning a Parquet dataset (e.g. by date and fund and currency)?</summary>
+
+Over-partitioning explodes the number of directories and produces many tiny files per partition, reviving the small-files problem: heavy metadata overhead, poor compression, and slow listing and planning. The pruning benefit saturates while the small-file cost grows. The right granularity partitions on the few high-selectivity columns (often date) and lets row-group statistics handle the rest.
+
+</details>
+
+<details><summary><b>93.</b> How do Arrow and Parquet differ in their treatment of compression?</summary>
+
+Parquet compresses pages on disk with codecs like snappy or zstd because storage size matters, whereas Arrow's in-memory format is typically uncompressed (or lightly encoded) so data is immediately usable by compute kernels without a decompression step. The Arrow IPC on-disk form can be compressed, but in memory the priority is direct access. This reflects their roles: Parquet for compact storage, Arrow for fast in-memory compute.
+
+</details>
+
+<details><summary><b>94.</b> Why might `pyarrow` be the natural tool for the lab where you write the holdings table at various settings?</summary>
+
+`pyarrow` exposes Parquet write options directly — row-group size, compression codec and level, dictionary settings, and statistics — and integrates with Arrow tables in memory, so you can write the same data many ways and read footers programmatically. It is the reference implementation of both Arrow and Parquet in Python. Run via `uv run` per the project's Python policy to keep the environment reproducible.
+
+</details>
+
+<details><summary><b>95.</b> How would you measure the file-size effect of row-group size and compression in the lab fairly?</summary>
+
+Hold the data and schema constant, vary one factor at a time (three row-group sizes × two codecs), and record the resulting file size for each of the six combinations from the same source table. Writing the identical 10M-row holdings table each time isolates the effect of the settings. Then read the footers to attribute the size differences to row-group count, encodings, and codec.
+
+</details>
+
+<details><summary><b>96.</b> How would you measure the query-time effect of those Parquet variants fairly?</summary>
+
+Run the same filtered DuckDB query (one fund, one date range) against each file, warming and repeating to reduce noise, and use `EXPLAIN ANALYZE` to capture rows and bytes read alongside wall-clock time. Comparing time and bytes-read across variants shows how layout drives pruning. Keeping the query and hardware fixed isolates the file structure as the variable.
+
+</details>
+
+<details><summary><b>97.</b> Why can a smaller Parquet file sometimes be slower to query than a larger one?</summary>
+
+Because size is driven by compression and encoding while query speed is driven by pruning: a heavily zstd-compressed file with large row groups may be smallest yet prune poorly, forcing a near-full scan, whereas a slightly larger file with smaller, well-sorted row groups skips most data. So minimizing bytes-on-disk and minimizing bytes-read are different objectives. The architect optimizes for the workload, not just for file size.
+
+</details>
+
+<details><summary><b>98.</b> What does "an architect who checks row-group pruning before blaming the engine" do concretely when a lake query is slow?</summary>
+
+They open the file footer (e.g. `parquet_metadata()`), examine the filter column's min/max per row group to see if pruning is even possible, and run `EXPLAIN ANALYZE` to confirm how much was actually read, before concluding anything about the engine. If the layout precludes pruning, the fix is to rewrite the data sorted or partitioned. Only after the layout is ruled out do they look at the engine or hardware.
+
+</details>
+
+<details><summary><b>99.</b> Why is knowledge of Parquet internals described as vendor-neutral and paying off on every engine?</summary>
+
+Because Parquet is an open specification consumed identically by DuckDB, Spark, Trino, BigQuery, Snowflake, and others, the same footer, row groups, encodings, and statistics govern performance everywhere. A layout that prunes well in DuckDB prunes well in Trino. So understanding row groups and pushdown is a transferable skill that is not tied to any one product, unlike vendor-specific tuning knobs.
+
+</details>
+
+<details><summary><b>100.</b> Summarize where Parquet, Avro, Arrow, and ORC each fit in a fund data platform.</summary>
+
+Parquet is the columnar on-disk format for analytical storage in the lake; Avro is the row-oriented, schema-evolving format for Kafka streams and raw landing; Arrow is the in-memory columnar standard for zero-copy interchange between engines and libraries; and ORC is a Parquet-peer columnar format you mainly encounter in legacy Hive estates. The typical flow lands in Avro, compacts to Parquet, and moves through Arrow in memory, with ORC recognized but not chosen for new work.
+
+</details>
+
+
+## Phase 2 · 3.4.2 Table formats (Iceberg, Delta) — 100 self-test questions
+
+<details><summary><b>1.</b> What problem does an open table format like Apache Iceberg solve that plain Parquet files in object storage do not?</summary>
+
+Bare Parquet files in a directory have no transactional guarantees, no schema-evolution rules, and no consistent snapshot of "which files belong to the table right now". Iceberg adds an ACID metadata layer on top of the data files so that commits are atomic, readers see a consistent set of files, and you get schema evolution, time travel, and partition evolution. This metadata layer is what turns a pile of files into a queryable, governable table — the heart of the lakehouse.
+
+</details>
+
+<details><summary><b>2.</b> Name the four levels of the Iceberg metadata tree from top to bottom.</summary>
+
+From top to bottom: the table metadata file (the `metadata.json`), the manifest list, the manifest files, and finally the data files. The catalog holds a pointer to the current `metadata.json`; that file points to a manifest list per snapshot; the manifest list points to manifests; and manifests point to the actual data (and delete) files. Walking this tree is how every engine resolves "what files make up this table".
+
+</details>
+
+<details><summary><b>3.</b> What does the Iceberg catalog itself store, as distinct from the metadata file?</summary>
+
+The catalog stores only a small pointer: the mapping from a table identifier (namespace plus name) to the location of the current `metadata.json` file. It does not store schema, snapshots, or file lists — those live inside the metadata file. This is why an atomic commit is just an atomic swap of that one pointer from the old metadata file to the new one.
+
+</details>
+
+<details><summary><b>4.</b> What information is recorded inside an Iceberg table's `metadata.json` file?</summary>
+
+The `metadata.json` records the table's full current schema and the history of schemas, all partition specs and sort orders, table properties, the current snapshot ID, and the list of all snapshots with their pointers to manifest lists. It is the single document an engine reads first to understand the table's structure and history. Every commit writes a brand-new `metadata.json` rather than editing the old one in place.
+
+</details>
+
+<details><summary><b>5.</b> What is a manifest list in Iceberg and how many exist per snapshot?</summary>
+
+A manifest list is an Avro file that enumerates all the manifest files that make up one snapshot — there is exactly one manifest list per snapshot. For each manifest it records summary statistics such as partition value ranges and added/deleted file counts, which lets an engine skip whole manifests during planning. The current snapshot's `manifest_list` field in `metadata.json` points to this file.
+
+</details>
+
+<details><summary><b>6.</b> What does a single Iceberg manifest file contain?</summary>
+
+A manifest file is an Avro file that lists a subset of the table's data files (or delete files), one row per file, together with per-file statistics: partition values, record counts, file size, and column-level lower/upper bounds and null counts. These column stats are what allow predicate pushdown to prune files without opening them. A snapshot is the union of all files referenced by all the manifests in its manifest list.
+
+</details>
+
+<details><summary><b>7.</b> In what file format are Iceberg manifest lists and manifest files stored, and why does that matter?</summary>
+
+Both manifest lists and manifests are stored as Avro files (data files are typically Parquet/ORC/Avro). Avro is a compact, schema-evolvable, row-oriented format well suited to the many small metadata records being appended per commit. Knowing this matters operationally: if you want to inspect a manifest by hand you reach for an Avro reader, not a Parquet one.
+
+</details>
+
+<details><summary><b>8.</b> How do the column-level lower and upper bounds stored in manifests speed up queries?</summary>
+
+Those bounds let the engine prune at planning time: if a manifest entry says a data file's `nav_date` ranges from `2026-01-01` to `2026-01-31` and your query filters `nav_date = '2026-03-15'`, the engine skips that file entirely without reading it. This file-level skipping (plus partition pruning) is why a well-maintained Iceberg table reads far fewer bytes than a full scan. Bad statistics or no stats means the engine must read everything.
+
+</details>
+
+<details><summary><b>9.</b> Define an Iceberg snapshot.</summary>
+
+A snapshot is the complete state of the table at one point in time — effectively the full set of data and delete files valid after a particular commit. Each snapshot has a unique snapshot ID, a parent snapshot ID, a timestamp, an operation summary (append, overwrite, delete), and a pointer to its manifest list. Querying the table normally means querying its current snapshot.
+
+</details>
+
+<details><summary><b>10.</b> How does each commit to an Iceberg table create a new snapshot?</summary>
+
+Every write operation produces new data/delete files, writes new manifests and a new manifest list describing the resulting file set, writes a new `metadata.json` that adds this snapshot and marks it current, and then atomically swaps the catalog pointer to that new metadata file. The previous snapshot is left untouched and remains queryable. This append-only, immutable design is what makes commits atomic and time travel possible.
+
+</details>
+
+<details><summary><b>11.</b> What is "time travel" in Iceberg and what makes it cheap?</summary>
+
+Time travel is querying the table as it existed at an earlier snapshot, by ID or by timestamp, rather than its current state. It is cheap because old snapshots are not copies — each snapshot just references a set of immutable data files that are still present on storage, so reading an old snapshot is reading files that already exist. No data is duplicated to support it; you only pay storage for files that haven't been expired.
+
+</details>
+
+<details><summary><b>12.</b> In Trino, what is the syntax to read an Iceberg table at a specific snapshot ID?</summary>
+
+You use `SELECT * FROM schema.table FOR VERSION AS OF 8954597067493422955`, where the number is a snapshot ID from the `$snapshots` metadata table. This reads the table exactly as it existed at that commit. It is the snapshot-ID form of time travel, deterministic regardless of when you run it.
+
+</details>
+
+<details><summary><b>13.</b> In Trino, how do you query an Iceberg table as of a particular wall-clock time?</summary>
+
+You use `SELECT * FROM schema.table FOR TIMESTAMP AS OF TIMESTAMP '2026-01-31 17:00:00.000 Europe/Luxembourg'`, and Trino resolves that to the snapshot current at that instant. This is handy when you know "the state at end of the Luxembourg business day" but not the exact snapshot ID. Internally it still maps to a single snapshot from the snapshot history.
+
+</details>
+
+<details><summary><b>14.</b> A NAV correction landed this morning; how do you reproduce yesterday's published NAV report from the same Iceberg table?</summary>
+
+Find the snapshot that was current before the correction commit (from the `$snapshots` or `$history` metadata table) and time-travel to it with `FOR VERSION AS OF <snapshot_id>` or `FOR TIMESTAMP AS OF` the publication time. Re-running the report against that snapshot reproduces the exact figures, because that snapshot still references the pre-correction data files. This is the audit-grade reproducibility that makes time travel a regulatory feature, not just a convenience.
+
+</details>
+
+<details><summary><b>15.</b> Which Trino metadata table lists the snapshot history of an Iceberg table, and why is it your first stop for time travel?</summary>
+
+The `"table_name$snapshots"` metadata table lists each snapshot's ID, parent ID, timestamp, operation, and a summary of changes. It is the first stop because time travel needs a concrete snapshot ID or timestamp, and this table is where you find the one you want. You typically `ORDER BY committed_at` and pick the row just before the change you are trying to reproduce.
+
+</details>
+
+<details><summary><b>16.</b> What does the `"table_name$history"` metadata table show that `$snapshots` does not emphasise?</summary>
+
+The `$history` table shows the lineage of which snapshot was the table's current state over time, including the parent relationships and whether ancestors were rolled back or replaced. It answers "what was the live snapshot at moment X" rather than just "what snapshots exist". This matters because a rollback can make a later-timestamped snapshot no longer an ancestor of the current one.
+
+</details>
+
+<details><summary><b>17.</b> What is hidden partitioning in Iceberg and how does it differ from Hive-style partitioning?</summary>
+
+Hidden partitioning means Iceberg derives partition values from a column via a transform (for example `day(nav_date)`) and tracks them in metadata, instead of requiring physical partition directories and extra partition columns in the path. Unlike Hive, the user does not have to write a separate partition predicate or manage directory layout — querying `WHERE nav_date = '2026-01-31'` automatically benefits from the partition without any special syntax. The partitioning is "hidden" because it is invisible to the query author.
+
+</details>
+
+<details><summary><b>18.</b> Why does Hive's explicit partitioning often lead to accidental full scans that Iceberg avoids?</summary>
+
+In Hive you must filter on the literal partition column (often a separate `dt` string) for pruning to kick in; filtering on the underlying timestamp column instead silently scans everything. Iceberg ties the transform to the source column in metadata, so a filter on the real column prunes correctly without the user knowing the partitioning scheme. This removes a whole class of "why is my query reading the entire table" bugs.
+
+</details>
+
+<details><summary><b>19.</b> Name several partition transforms Iceberg supports for hidden partitioning.</summary>
+
+Iceberg supports `identity`, `year`, `month`, `day`, `hour`, `bucket[N]`, and `truncate[W]` transforms. For a NAV fact table you might partition by `day(nav_date)` for time pruning and `bucket(16, fund_id)` to spread funds evenly across files. The transform is stored in the partition spec, so the engine knows how to map predicates to partitions.
+
+</details>
+
+<details><summary><b>20.</b> What is partition evolution in Iceberg and what is its key benefit?</summary>
+
+Partition evolution lets you change a table's partition spec — say from `month(nav_date)` to `day(nav_date)` — without rewriting any existing data. New writes use the new spec while old data keeps its old spec, and Iceberg tracks both. The benefit is you can refine partitioning as data volume grows without an expensive full rewrite or breaking existing queries.
+
+</details>
+
+<details><summary><b>21.</b> After you evolve a partition spec, do existing queries need to be rewritten?</summary>
+
+No — because partitioning is hidden, queries filter on the source columns, not on partition layout, so the same SQL keeps working across the spec change. Iceberg applies whichever spec each data file was written under during planning. This is the headline reason hidden partitioning and partition evolution are designed together.
+
+</details>
+
+<details><summary><b>22.</b> How does Iceberg store the fact that different data files use different partition specs?</summary>
+
+Each partition spec is assigned a `spec-id`, and every data file's manifest entry records which `spec-id` it was written with. The `metadata.json` keeps the full list of historical specs keyed by id. At plan time the engine reads each file's spec-id to interpret its partition values correctly, which is how old and new specs coexist in one table.
+
+</details>
+
+<details><summary><b>23.</b> What is copy-on-write (COW) in Iceberg?</summary>
+
+Copy-on-write means that when you UPDATE or DELETE rows, Iceberg rewrites every data file that contained an affected row, producing new files with the changes applied and dropping the old ones from the new snapshot. There are no separate delete files — the new snapshot's data files are already correct. It is the default for Iceberg and optimises read performance at the cost of write amplification.
+
+</details>
+
+<details><summary><b>24.</b> What is merge-on-read (MOR) in Iceberg?</summary>
+
+Merge-on-read means an UPDATE or DELETE does not rewrite the original data files; instead it writes small delete files that mark which rows are invalidated, and readers merge data files with their delete files at query time. This makes writes cheap and fast but pushes cost onto every read until compaction reconciles them. MOR was introduced with the Iceberg v2 spec.
+
+</details>
+
+<details><summary><b>25.</b> What is the core read-versus-write tradeoff between COW and MOR?</summary>
+
+COW makes reads cheap (files are already correct) but writes expensive (whole files rewritten per change), so it suits read-heavy tables with infrequent or batched updates. MOR makes writes cheap (only small delete files appended) but reads more expensive (data and delete files must be merged), so it suits high-frequency row-level changes. The architect picks per workload, and you can even set different modes for delete, update, and merge.
+
+</details>
+
+<details><summary><b>26.</b> What two kinds of delete files does Iceberg merge-on-read use?</summary>
+
+Position deletes and equality deletes. A position delete identifies invalidated rows by referencing a specific data file path plus the ordinal row positions within it. An equality delete identifies rows by column values (for example "delete where `holding_id = 123`") without naming a specific file. Each suits a different write pattern.
+
+</details>
+
+<details><summary><b>27.</b> When is a position delete preferable to an equality delete, and vice versa?</summary>
+
+Position deletes are efficient to read because they point straight at file-and-row offsets, but they require the writer to know exactly where the row lives, so they are typically slower/heavier to produce. Equality deletes are quick to write — you just record the matching key values — but slower to read because the engine must evaluate that predicate against data files. Streaming upserts often favour equality deletes; batch operations favour position deletes.
+
+</details>
+
+<details><summary><b>28.</b> Which Iceberg table properties control COW versus MOR, and what are their values?</summary>
+
+The properties are `write.delete.mode`, `write.update.mode`, and `write.merge.mode`, each set to either `copy-on-write` or `merge-on-read`. You set them independently, so a table can do MOR deletes but COW merges, for example. They are stored in `metadata.json` table properties and read by the writing engine.
+
+</details>
+
+<details><summary><b>29.</b> If a merge-on-read Iceberg table feels slow to query, what is the likely cause and the fix?</summary>
+
+The likely cause is an accumulation of delete files that every read must merge against the data files — read amplification grows with each un-compacted upsert. The fix is to run compaction (rewrite data files) so the deletes are applied and the data files become clean again, after which reads no longer pay the merge cost. This is exactly the operational hygiene MOR demands.
+
+</details>
+
+<details><summary><b>30.</b> What is compaction in the Iceberg context?</summary>
+
+Compaction is rewriting many small data files (and applying any MOR delete files) into fewer, larger, well-sized data files. It improves read performance by reducing per-file overhead and the number of files an engine must open, and it materialises MOR deletes so reads stop merging them. It is a maintenance operation, not a data change — the logical contents are identical.
+
+</details>
+
+<details><summary><b>31.</b> In Trino, what statement compacts (optimizes) an Iceberg table's data files?</summary>
+
+You run `ALTER TABLE table_name EXECUTE optimize`, optionally with `optimize(file_size_threshold => '128MB')` to only rewrite files below a size, and optionally a `WHERE` clause to limit it to certain partitions. This rewrites small files into larger ones for that scope. It is the Trino equivalent of the `rewrite_data_files` action in the Iceberg core API.
+
+</details>
+
+<details><summary><b>32.</b> Why is "small files" such a common problem on Iceberg tables, and how does compaction help?</summary>
+
+Frequent streaming or micro-batch commits each write at least one small data file, so over time a table accumulates thousands of tiny files; planning and opening them dominates query cost and inflates metadata. Compaction merges them into appropriately sized files (commonly targeting ~128–512 MB), cutting per-file overhead and shrinking manifests. Without it, read latency and metadata size grow without the table's logical data growing.
+
+</details>
+
+<details><summary><b>33.</b> What does expiring snapshots do, and why is it necessary?</summary>
+
+Expiring snapshots removes old snapshots from the table history and deletes the data and metadata files that are referenced only by those expired snapshots and nothing current. It is necessary because every commit retains old files for time travel, so storage grows unbounded until you expire — without it a frequently updated table balloons in size. The tradeoff is you lose the ability to time-travel to expired snapshots.
+
+</details>
+
+<details><summary><b>34.</b> In Trino, how do you expire Iceberg snapshots older than a retention threshold?</summary>
+
+You run `ALTER TABLE table_name EXECUTE expire_snapshots(retention_threshold => '7d')`, which expires snapshots older than seven days and deletes files no longer reachable from a retained snapshot. You can also pass `retain_last` to guarantee a minimum number of snapshots are kept. Be deliberate: anything expired can no longer be reached by time travel.
+
+</details>
+
+<details><summary><b>35.</b> What is the danger of setting an aggressive snapshot-expiry window on a regulated NAV table?</summary>
+
+If you expire snapshots faster than your reproducibility/audit requirement, you destroy the ability to time-travel to a needed historical state — for example reproducing a NAV as published on a given date for a regulator. Retention must be governed by the audit and correction-reprocessing window, not just storage cost. A common gotcha is matching expiry to a vague "save space" goal and only discovering the gap when an auditor asks.
+
+</details>
+
+<details><summary><b>36.</b> What does rewriting/optimizing manifests achieve, separate from rewriting data files?</summary>
+
+Rewriting manifests reorganises and compacts the manifest files themselves so that manifests are well-sized and well-clustered (often by partition), which speeds up query planning. In Trino this is `ALTER TABLE table_name EXECUTE optimize_manifests`. It is distinct from data-file compaction: here you are tidying the metadata layer, not the data.
+
+</details>
+
+<details><summary><b>37.</b> What problem do orphan files cause, and how does Iceberg clean them?</summary>
+
+Orphan files are data or metadata files left on storage that no live snapshot references — typically from failed writes or aborted jobs — and they silently consume storage and confuse manual inspection. In Trino, `ALTER TABLE table_name EXECUTE remove_orphan_files(retention_threshold => '7d')` deletes unreferenced files older than the threshold. The threshold guards against deleting files from in-flight commits.
+
+</details>
+
+<details><summary><b>38.</b> Why must `remove_orphan_files` use a conservative retention threshold?</summary>
+
+Because a write that is still in progress has already written data files that are not yet referenced by a committed snapshot; if you delete "unreferenced" files too eagerly you can corrupt an in-flight commit. The retention threshold (for example `7d`) ensures only files older than any plausibly running job are removed. This is the classic gotcha that turns a cleanup job into data loss.
+
+</details>
+
+<details><summary><b>39.</b> How would you debug "why is this Iceberg table slow or huge" using the manifests alone?</summary>
+
+Query `$files` and `$partitions` to see file counts and sizes per partition, and `$manifests` to see how many manifests and entries exist; a slow/huge table typically shows thousands of tiny data files, many delete files, or bloated manifests. From those numbers you decide the remedy: `optimize` for small files, compaction to apply MOR deletes, `optimize_manifests` for manifest bloat, and `expire_snapshots` plus `remove_orphan_files` for retained/orphaned bytes. The point is you diagnose purely from metadata before touching the data.
+
+</details>
+
+<details><summary><b>40.</b> What is the rule that makes Iceberg schema evolution safe across engines?</summary>
+
+Iceberg assigns every column a unique, immutable field ID and tracks columns by that ID, not by name or position. Adding, dropping, renaming, or reordering columns is a metadata-only change because old data files are read by mapping their stored field IDs to the current schema. This is why schema evolution never requires rewriting data and never silently misreads an old file.
+
+</details>
+
+<details><summary><b>41.</b> Which schema changes does Iceberg consider safe and metadata-only?</summary>
+
+Adding a new column (it reads as null for old rows), dropping a column, renaming a column, reordering columns, and widening certain types (for example `int` to `long`, `float` to `double`, increasing decimal precision) are safe metadata-only operations. They are safe precisely because resolution is by field ID, so existing data files are reinterpreted rather than rewritten. Narrowing a type or other lossy changes are not allowed.
+
+</details>
+
+<details><summary><b>42.</b> Why does adding a column to an Iceberg table not require rewriting existing data files?</summary>
+
+Because the new column simply gets a new field ID that does not appear in any existing data file; when those old files are read, the missing field ID resolves to null. The change is recorded only in `metadata.json` as a new schema. So an `ADD COLUMN` is instantaneous regardless of table size, which is a major operational advantage over rewrite-based formats.
+
+</details>
+
+<details><summary><b>43.</b> You add a `lei` column to an existing Iceberg holdings table — what do queries return for rows written before the change?</summary>
+
+They return `NULL` for `lei` on all pre-existing rows, because those data files have no field with the new column's field ID, and Iceberg resolves the absent ID to null. No backfill happens automatically; the old files are untouched. To populate historical `lei` values you would run a separate UPDATE/backfill, which is a real data change with its own snapshot.
+
+</details>
+
+<details><summary><b>44.</b> Describe the Delta Lake log model at a high level.</summary>
+
+Delta Lake records table state in a `_delta_log` directory containing ordered JSON commit files, one per transaction, each holding a list of actions such as `add` (a data file added), `remove` (a file removed), `metaData`, and `protocol`. The current table state is the result of replaying these actions in order. Periodically Delta writes a Parquet checkpoint that snapshots the full state so readers don't have to replay every JSON file.
+
+</details>
+
+<details><summary><b>45.</b> What are Delta checkpoint files and why do they exist?</summary>
+
+Checkpoint files are Parquet files that Delta writes every N commits (10 by default) summarising the entire table state up to that point. They exist so a reader can load the latest checkpoint and then replay only the few JSON commits after it, instead of replaying potentially thousands of JSON files from the beginning. This keeps read/recovery time bounded as the log grows.
+
+</details>
+
+<details><summary><b>46.</b> How does the Delta commit/log model contrast with the Iceberg metadata-tree model?</summary>
+
+Delta is log-structured: state is derived by replaying an ordered sequence of JSON action files (with periodic Parquet checkpoints) in a single `_delta_log`. Iceberg is tree-structured: each commit writes a self-contained snapshot via a new metadata file pointing to a manifest list and manifests, and the catalog pointer is swapped. Both achieve ACID and time travel, but Iceberg's per-snapshot immutable tree and catalog pointer differ from Delta's append-and-checkpoint log.
+
+</details>
+
+<details><summary><b>47.</b> What is Delta UniForm and what problem does it address?</summary>
+
+UniForm (Universal Format) lets a Delta table expose itself to Iceberg (and Hudi) readers by asynchronously generating the Iceberg metadata alongside the Delta log when data is written. It addresses interoperability: a single physical Delta table can be queried by Iceberg-native engines without a separate copy or conversion. The data files are shared; only the extra metadata is generated.
+
+</details>
+
+<details><summary><b>48.</b> At what level should you know Apache Hudi for this lesson, and what is its distinguishing feature?</summary>
+
+Awareness level: you should recognise Hudi as the third major open table format, originally from Uber, designed around fast upserts and incremental pulls. Its distinguishing feature is record-level indexing and built-in support for copy-on-write and merge-on-read table types tuned for streaming ingestion. You are not expected to operate it here, only to place it alongside Iceberg and Delta in the format landscape.
+
+</details>
+
+<details><summary><b>49.</b> What goes into an Iceberg-vs-Delta ADR for a given estate?</summary>
+
+The ADR weighs concrete factors: existing engine and vendor footprint (Databricks favours Delta; multi-engine/open favours Iceberg), catalog strategy and credential vending, who else must read the data, maturity of partition/schema evolution needs, and operational tooling for maintenance. You state the decision, the forces (lock-in, interoperability via UniForm, team skills), and the consequences. The deliverable is a defensible recommendation with reasons, not a feature checklist.
+
+</details>
+
+<details><summary><b>50.</b> For a multi-engine Luxembourg fund platform where Trino, Spark, and a future Snowflake all read the same tables, which format leans favourable and why?</summary>
+
+Iceberg leans favourable because it is engine-neutral with broad native support (Trino, Spark, Snowflake managed Iceberg, Flink) and a vendor-independent REST catalog story, minimising lock-in across that heterogeneous estate. Delta is strongest inside the Databricks ecosystem and reaches other engines mainly via UniForm. The ADR would cite multi-engine read access and catalog openness as the deciding forces.
+
+</details>
+
+<details><summary><b>51.</b> What is the practical effect of Iceberg commits being atomic via a single pointer swap?</summary>
+
+Because committing means atomically swapping the catalog's pointer from the old `metadata.json` to the new one, a reader either sees the entire previous state or the entire new state — never a half-written mix. Concurrent readers continue on the old metadata file until they refresh. This is the mechanism behind Iceberg's snapshot isolation.
+
+</details>
+
+<details><summary><b>52.</b> How does Iceberg handle two concurrent writers committing to the same table?</summary>
+
+Iceberg uses optimistic concurrency: each writer builds its new metadata based on the snapshot it read, then attempts the atomic pointer swap, which succeeds only if the table's current metadata is still the one it started from. If another writer committed first, the swap fails and the losing writer must retry by re-reading the latest metadata and re-applying its changes. This guarantees serializable commits without locking the whole table.
+
+</details>
+
+<details><summary><b>53.</b> What is snapshot isolation and how does Iceberg provide it?</summary>
+
+Snapshot isolation means a reader sees a consistent snapshot of the table for the duration of its query, unaffected by concurrent writers. Iceberg provides it because a query binds to the current snapshot (via the immutable metadata file) when it starts, and later commits only swap the pointer forward without altering the files that snapshot references. The reader's files never disappear mid-query.
+
+</details>
+
+<details><summary><b>54.</b> Which Trino metadata table would you use to see the actual data files in the current snapshot, and what is one column you'd inspect?</summary>
+
+You query `"table_name$files"`, which lists each data file with columns like `file_path`, `record_count`, `file_size_in_bytes`, and per-column value bounds. Inspecting `file_size_in_bytes` (and the count of rows) quickly reveals a small-files problem worth compacting. It is the most direct way to confirm file sizing before running `optimize`.
+
+</details>
+
+<details><summary><b>55.</b> What does the `"table_name$partitions"` metadata table tell you in Trino?</summary>
+
+It aggregates the current snapshot by partition, showing per-partition record counts, file counts, and total sizes. This is how you spot skew — one partition holding far more (or far more files) than others — and decide whether to compact or revisit the partition spec. For a fund table partitioned by `day(nav_date)`, it shows which dates have the most data and the most files.
+
+</details>
+
+<details><summary><b>56.</b> How do you list the manifests of an Iceberg table in Trino, and what would high manifest counts suggest?</summary>
+
+You query `"table_name$manifests"` (and `"table_name$all_manifests"` for history), which shows each manifest's path, length, and added/existing/deleted file counts. A high number of manifests, or manifests with few entries each, suggests manifest bloat that slows planning and warrants `optimize_manifests`. It is part of diagnosing "why is planning slow" purely from metadata.
+
+</details>
+
+<details><summary><b>57.</b> What is the difference between data files and delete files in an Iceberg snapshot?</summary>
+
+Data files (typically Parquet) hold the actual table rows. Delete files exist only in merge-on-read tables and mark rows in data files as logically removed — either by position (file path plus row offset) or by equality (matching column values). A reader of a MOR snapshot must combine data files with their applicable delete files to produce correct results.
+
+</details>
+
+<details><summary><b>58.</b> Why is Iceberg sometimes described as "immutable metadata, immutable data"?</summary>
+
+Because no existing file is ever modified in place: each commit writes new data files (or delete files), new manifests, a new manifest list, and a new metadata file, leaving all prior files untouched. Mutation is expressed as new files plus a pointer swap, never as edits. This immutability is what makes time travel, atomic commits, and easy rollback possible.
+
+</details>
+
+<details><summary><b>59.</b> How do you roll back an Iceberg table to a previous snapshot in Trino?</summary>
+
+You run `ALTER TABLE table_name EXECUTE rollback_to_snapshot(<snapshot_id>)`, which sets the table's current snapshot back to that earlier one. Because the old snapshot's files still exist (assuming they weren't expired), this is a fast metadata operation, not a data restore. It is the operational counterpart to "undo the bad commit".
+
+</details>
+
+<details><summary><b>60.</b> What is the difference between time travel and rollback in Iceberg?</summary>
+
+Time travel is a read-only query against an old snapshot (`FOR VERSION/TIMESTAMP AS OF`) that does not change the table's current state. Rollback (`rollback_to_snapshot`) actually changes the table's current pointer so the old snapshot becomes the live state again, affecting all future reads. Use time travel to inspect or reproduce; use rollback to recover from a bad commit.
+
+</details>
+
+<details><summary><b>61.</b> Why does a "botched compaction" risk silently tripling a table's storage?</summary>
+
+Compaction writes new larger files but does not delete the old small files until those old snapshots are expired; if you compact aggressively without then expiring snapshots and removing orphans, you keep both the old and new file sets. Repeated compaction cycles can multiply retained bytes several times over. The fix is to pair compaction with `expire_snapshots` and `remove_orphan_files` on a governed schedule.
+
+</details>
+
+<details><summary><b>62.</b> What sequence of maintenance operations keeps an Iceberg table healthy?</summary>
+
+A typical cadence is: compact data files (`optimize`/rewrite) to fix small files and apply MOR deletes, optionally rewrite manifests (`optimize_manifests`), then `expire_snapshots` to drop old snapshots beyond your retention window, and finally `remove_orphan_files` to clear stragglers. Order matters because expiry and orphan removal reclaim the storage that compaction's rewrites left behind. Run on a schedule tuned to write frequency and your audit retention.
+
+</details>
+
+<details><summary><b>63.</b> A daily NAV table grows from 50 GB to 150 GB over a month with no extra source data — what is the first thing to check?</summary>
+
+First check snapshot retention: every daily commit (and any compaction) retains old data files for time travel, so without `expire_snapshots` the table accumulates a month of historical file versions. Query `$snapshots` to see how many are retained and `$files` to see retained bytes, then expire beyond your audit window and run `remove_orphan_files`. Unbounded snapshot retention is the most common cause of silent growth.
+
+</details>
+
+<details><summary><b>64.</b> How is an Iceberg table's current schema resolved when reading an old data file with fewer columns?</summary>
+
+The engine reads the old file's columns by their field IDs and projects them into the current schema; any current column whose field ID is absent in the file resolves to null, and dropped columns are simply ignored. This field-ID-based projection is what lets one query span files written under different schema versions. No file is rewritten to "catch up" to the current schema.
+
+</details>
+
+<details><summary><b>65.</b> Why must you never rely on column position or name for Iceberg correctness across schema changes?</summary>
+
+Because Iceberg resolves columns by immutable field ID, not by position or name — a rename changes the name but keeps the ID, and reordering changes positions but keeps IDs. Code or assumptions that depend on ordinal position or string name can break after an evolution that Iceberg itself handles cleanly. Always think in field IDs when reasoning about evolution correctness.
+
+</details>
+
+<details><summary><b>66.</b> What does an UPDATE statement physically produce on a copy-on-write Iceberg table?</summary>
+
+On COW, the UPDATE rewrites every data file containing at least one matching row into a new file with the updates applied, writes new manifests and a manifest list, and commits a new snapshot whose data files are already correct. The old files remain referenced only by prior snapshots. Even a one-row change can rewrite a large file — the write-amplification cost of COW.
+
+</details>
+
+<details><summary><b>67.</b> What does the same UPDATE produce on a merge-on-read Iceberg table?</summary>
+
+On MOR, the UPDATE leaves existing data files in place and writes small delete files marking the old row versions invalid plus new data files holding the updated rows, committing a new snapshot. Reads then merge data and delete files to see the correct result. Writes are cheap, but read cost rises until compaction reconciles the deletes.
+
+</details>
+
+<details><summary><b>68.</b> A late-arriving holding must be inserted into yesterday's partition of an Iceberg NAV table — does this break time travel?</summary>
+
+No — inserting it is just another commit that creates a new snapshot with the additional data file; all earlier snapshots still reference their original file sets, so time travel to them is unaffected. Querying the current snapshot now includes the late holding, while a `FOR VERSION AS OF` an earlier snapshot does not. This is exactly the late-arriving-data scenario the lesson's MERGE exercise simulates.
+
+</details>
+
+<details><summary><b>69.</b> Why is Iceberg's MERGE statement central to handling NAV corrections and late data?</summary>
+
+MERGE expresses upsert logic in one atomic statement — match existing rows to update/delete them and insert new ones — which maps directly to "apply a correction and add late holdings". It commits as a single snapshot, so the table is never in a partial state, and you can time-travel to before it. The COW/MOR mode you chose decides whether MERGE rewrites files or writes delete files.
+
+</details>
+
+<details><summary><b>70.</b> What is write amplification and why does it favour MOR for high-frequency updates?</summary>
+
+Write amplification is the ratio of bytes physically written to bytes logically changed; COW rewrites whole files for tiny edits, so a one-row change in a large file amplifies enormously. MOR avoids this by only appending small delete/data files, keeping write cost proportional to the change. For streaming upserts or frequent corrections, MOR's low amplification is the deciding factor — at the price of read-time merging.
+
+</details>
+
+<details><summary><b>71.</b> When is COW the better default despite its write cost?</summary>
+
+COW is better for read-heavy tables that change infrequently or in large batches, because reads never pay a merge penalty and there are no delete files to maintain. A reference table updated nightly and queried thousands of times a day fits COW well. The architect chooses COW to optimise the common read path when updates are rare and batched.
+
+</details>
+
+<details><summary><b>72.</b> How does Iceberg's design let one query read across multiple snapshots' worth of data files written under different specs and schemas?</summary>
+
+At plan time the engine reads, per data file from the manifests, that file's partition `spec-id` and the schema (via field IDs) under which it was written, and reconciles each against the table's current spec and schema. This per-file metadata is why old and new files coexist transparently. The query author writes ordinary SQL against the current schema and partitioning.
+
+</details>
+
+<details><summary><b>73.</b> What is the role of the `$entries` (manifest entries) metadata table in Trino?</summary>
+
+The `$entries` table exposes the raw manifest-entry rows for the current snapshot — each entry being a data or delete file with its status (added/existing/deleted), partition data, and stats. It is the lowest-level view, useful when you need to see exactly what each manifest records about each file. Most diagnostics use `$files`/`$manifests`, but `$entries` is there for deep inspection.
+
+</details>
+
+<details><summary><b>74.</b> On MinIO, where would you look on disk to inspect the Iceberg metadata tree, and in what order?</summary>
+
+Under the table's `metadata/` prefix you find the `*.metadata.json` files (the latest is current), the `snap-*.avro` manifest lists, and the `*.avro` manifest files; the `data/` prefix holds the Parquet data files. You narrate the tree by opening the current `metadata.json`, following its current snapshot's `manifest_list` to the snap Avro, then reading that to the manifest Avros, then to the listed data files. That walk is the lesson's "narrate the tree out loud" exercise.
+
+</details>
+
+<details><summary><b>75.</b> Why is the catalog (not the format) ultimately what decides openness, even with Iceberg files?</summary>
+
+Because the catalog owns the pointer to current metadata and brokers access; if your catalog is engine-bundled and proprietary, other engines cannot resolve or write the table even though the underlying files are open Iceberg. The data format being open is necessary but not sufficient for interoperability. This is why the next lesson on catalogs is the real lock-in battleground — here you just note it.
+
+</details>
+
+<details><summary><b>76.</b> What format are Iceberg data files most commonly stored in, and is that fixed?</summary>
+
+Most commonly Parquet, though Iceberg also supports ORC and Avro for data files. The choice is independent of the metadata layer — the manifests just record each file's format. Parquet's columnar layout and statistics make it the default for analytical NAV/holdings tables.
+
+</details>
+
+<details><summary><b>77.</b> How does Iceberg avoid the expensive directory listings that plague Hive tables on object storage?</summary>
+
+Iceberg tracks the exact set of files for each snapshot in its manifests, so the engine reads a known file list from metadata instead of doing slow, eventually-consistent `LIST` calls against object storage to discover files. On S3/MinIO with millions of objects, this is a major performance and correctness win. The metadata tree is effectively a precomputed, consistent file index.
+
+</details>
+
+<details><summary><b>78.</b> What is a "snapshot summary" and why is it useful operationally?</summary>
+
+The snapshot summary is a small set of key/value statistics Iceberg records per snapshot — the operation type plus counts like `added-data-files`, `deleted-data-files`, `added-records`, and total file/record counts. It lets you understand what each commit did without reading the data, straight from `$snapshots`. For audit and debugging, it answers "what changed in this commit" at a glance.
+
+</details>
+
+<details><summary><b>79.</b> How would you verify, after a partition-spec change, that a query still runs unchanged?</summary>
+
+Run the same `SELECT ... WHERE nav_date = '2026-01-31'` before and after the spec change and confirm identical results and successful execution; then check `$partitions` to see new data under the new spec and old data under the old spec coexisting. Because partitioning is hidden, no query edit is needed, which is precisely what you are confirming. This is the lesson's "evolve the partition spec; query still runs unchanged" step.
+
+</details>
+
+<details><summary><b>80.</b> Why does Iceberg keep historical partition specs in `metadata.json` rather than discarding them?</summary>
+
+Because existing data files were written under those older specs and their partition values must be interpreted with the matching spec at read time; discarding a spec would make older files unreadable in partition terms. Retaining every spec by `spec-id` is what allows partition evolution without rewriting data. The engine selects the right spec per file during planning.
+
+</details>
+
+<details><summary><b>81.</b> What is the practical meaning of "the Iceberg-vs-Delta decision is an ADR you will own"?</summary>
+
+It means choosing the table format is an architectural decision with long-lived consequences (lock-in, interoperability, tooling, team skills) that you must justify in writing, not a default you inherit. You document the context, the options, the forces, the decision, and the consequences so others can understand and revisit it. Owning it means defending concrete reasons specific to the estate, not citing generic feature parity.
+
+</details>
+
+<details><summary><b>82.</b> How does time travel support reproducible regulatory reporting in a fund-administration context?</summary>
+
+It lets you re-execute a report exactly as it was at the snapshot underlying a prior submission — for example reproducing a UCITS NAV report after a later correction — because that snapshot still references the original data files. This gives bit-for-bit reproducibility and a clear audit trail of what changed and when. Regulators value that the historical state is provable, not reconstructed by guesswork.
+
+</details>
+
+<details><summary><b>83.</b> If `expire_snapshots` deleted a snapshot you needed for an audit, what is the recovery reality?</summary>
+
+There is generally no recovery: expiry physically deletes the data and metadata files reachable only from expired snapshots, so unless those exact files survive elsewhere (a backup or a still-referencing snapshot), the historical state is gone. This is why retention must be governed by audit requirements before you ever run expiry. The lesson here is that snapshot retention policy is a compliance control, not an ops afterthought.
+
+</details>
+
+<details><summary><b>84.</b> What does it mean that Iceberg supports "row-level operations" and why was that historically hard on data lakes?</summary>
+
+Row-level operations (UPDATE/DELETE/MERGE on individual rows) were hard on classic data lakes because Parquet files are immutable and there was no transactional layer to track which rows changed. Iceberg makes them possible via COW (rewrite affected files) or MOR (delete files), all committed atomically as snapshots. This brings warehouse-style mutation to open files on object storage.
+
+</details>
+
+<details><summary><b>85.</b> Why might you choose merge-on-read for a transfer-agency upsert stream but copy-on-write for a published NAV table?</summary>
+
+The transfer-agency stream has frequent, small, late-arriving record changes, so MOR's cheap appends avoid rewriting large files on every upsert. The published NAV table is read far more than written and must be fast and clean for reporting, so COW keeps reads free of delete-file merging. Matching the mode to the read/write ratio per table is the architect's call, set via the `write.*.mode` properties.
+
+</details>
+
+<details><summary><b>86.</b> What does the `$refs` metadata table expose and how does it relate to branches and tags?</summary>
+
+The `$refs` table lists the named references on the table — branches and tags — each pointing to a snapshot ID. A tag pins a specific snapshot (for example an end-of-month NAV close) so it survives normal expiry, and a branch supports independent commit lines. Trino can time-travel by tag/branch name via `FOR VERSION AS OF 'tag-name'`.
+
+</details>
+
+<details><summary><b>87.</b> How could an Iceberg tag help guarantee a month-end NAV snapshot remains reproducible?</summary>
+
+You create a tag pointing at the snapshot that represents the official month-end close; tags can have their own retention so the underlying snapshot's files are protected from `expire_snapshots`. You then time-travel to that named tag at any future date to reproduce the close exactly. This turns a transient snapshot into a durable, named regulatory checkpoint.
+
+</details>
+
+<details><summary><b>88.</b> Why is partition evolution preferable to dropping and recreating a table with a new layout?</summary>
+
+Dropping and recreating forces a full rewrite of all data and breaks every existing query and downstream reference, plus it discards history. Partition evolution changes only the spec going forward, leaving existing files and queries intact and preserving snapshots/time travel. It is the low-risk, in-place way to refine layout as data grows.
+
+</details>
+
+<details><summary><b>89.</b> What metadata change happens when you run `ADD COLUMN` versus `RENAME COLUMN` on Iceberg?</summary>
+
+`ADD COLUMN` allocates a new field ID and records a new schema where that ID maps to the new column (null for old data). `RENAME COLUMN` keeps the existing field ID and only changes the name string in the schema, so all existing data files still resolve correctly by ID. Both are metadata-only `metadata.json` updates with no data rewrite.
+
+</details>
+
+<details><summary><b>90.</b> Why does Iceberg disallow narrowing type changes like `long` to `int`?</summary>
+
+Because existing data files may contain values that don't fit the narrower type (a `long` value too big for `int`), so reinterpreting them by field ID would lose or corrupt data. Iceberg only allows promotions that are always safe (widening), keeping evolution lossless without rewriting files. To narrow a type you must rewrite the data through an explicit transformation.
+
+</details>
+
+<details><summary><b>91.</b> How do you confirm a NAV correction produced a new snapshot and identify the snapshot just before it?</summary>
+
+Query `"table_name$snapshots" ORDER BY committed_at`, find the row whose `operation` and summary correspond to the correction (for example `overwrite` with the expected changed-record counts), and take the `snapshot_id` of the immediately preceding row as the pre-correction state. You then time-travel to that prior snapshot to reproduce the old NAV. The summary counts help you confirm you picked the right commit.
+
+</details>
+
+<details><summary><b>92.</b> What is the difference between Iceberg's `optimize` and `expire_snapshots` in terms of what they reclaim?</summary>
+
+`optimize` reclaims read performance by rewriting small/fragmented data files into larger ones (and applying MOR deletes), but it can temporarily increase storage because old files persist until expiry. `expire_snapshots` reclaims storage by dropping old snapshots and deleting files reachable only from them. They are complementary: compact for speed, expire for space.
+
+</details>
+
+<details><summary><b>93.</b> Why is it dangerous to run `optimize` without a later `expire_snapshots` on a high-churn table?</summary>
+
+Each `optimize` creates a new snapshot referencing the new compacted files while the old files remain referenced by the prior snapshot for time travel, so storage keeps both copies until you expire. On a high-churn table run frequently, retained pre-compaction files can multiply storage several-fold. Pairing compaction with governed expiry is what prevents the "silently tripled in size" failure.
+
+</details>
+
+<details><summary><b>94.</b> In Iceberg v2, what made merge-on-read possible at the spec level?</summary>
+
+The v2 spec introduced delete files as first-class entries in manifests — position deletes and equality deletes — so a snapshot can reference rows-to-ignore separately from the data files. v1 had no delete files, so all mutation was effectively copy-on-write. MOR is therefore a v2-and-later capability, and you confirm your table format version before relying on it.
+
+</details>
+
+<details><summary><b>95.</b> What is the relationship between an Iceberg snapshot and the manifest list it points to?</summary>
+
+A snapshot has exactly one `manifest_list` field that points to a single Avro manifest list file, and that manifest list enumerates every manifest (and thus, transitively, every data/delete file) belonging to that snapshot. So "the files of a snapshot" is computed by reading its manifest list, then its manifests. Change a single file and the new commit gets a brand-new manifest list (reusing unchanged manifests where possible).
+
+</details>
+
+<details><summary><b>96.</b> Why can Iceberg reuse unchanged manifests across snapshots, and what does that save?</summary>
+
+Because manifests are immutable Avro files describing a fixed set of files, a new commit that only touches some partitions can keep referencing the older manifests for untouched partitions and write new manifests only for the changed ones. This saves metadata write cost and storage — you don't rewrite the whole file index per commit. The new manifest list simply mixes reused and new manifests.
+
+</details>
+
+<details><summary><b>97.</b> What would you inspect first if a Trino query against an Iceberg table returns stale results after a write from another engine?</summary>
+
+Check whether your engine/session has refreshed the catalog pointer — a query bound to an older `metadata.json` won't see the newer snapshot until the metadata is reloaded. Confirm the catalog (e.g. the metastore/REST catalog) actually points at the new `metadata.json`, and verify via `$snapshots` that the expected commit landed. Snapshot isolation means each query sees a fixed snapshot; "staleness" is usually a not-yet-refreshed pointer, not lost data.
+
+</details>
+
+<details><summary><b>98.</b> How do Iceberg, Delta, and Hudi compare in one sentence each for an awareness-level summary?</summary>
+
+Iceberg is the engine-neutral, spec-driven format with a metadata tree and catalog pointer, strongest for open multi-engine estates; Delta is the log-structured format strongest in the Databricks ecosystem, reaching others via UniForm; Hudi is the upsert/streaming-optimised format with record-level indexing from the Uber lineage. All three offer ACID, schema evolution, and time travel, differing mainly in metadata design, ecosystem, and ideal workloads. The ADR turns these one-liners into estate-specific reasons.
+
+</details>
+
+<details><summary><b>99.</b> What does the `clean_expired_metadata` option add when running `expire_snapshots` in Trino?</summary>
+
+Passing `clean_expired_metadata => true` to `ALTER TABLE table_name EXECUTE expire_snapshots(...)` also removes metadata — such as partition specs and schemas — that are no longer referenced by any retained snapshot, not just the data and manifest files. This keeps the `metadata.json` from accumulating dead historical specs and schemas over a long-lived table's life. It is a useful hygiene flag on tables that have undergone many schema or partition evolutions.
+
+</details>
+
+<details><summary><b>100.</b> Putting it together: outline the end-to-end lifecycle of a single NAV-correction commit on an Iceberg COW table.</summary>
+
+The engine reads the current snapshot, identifies the data files containing the rows to correct, rewrites those files with the corrected NAV values, writes new manifests plus a new manifest list, and writes a new `metadata.json` adding the new snapshot as current; it then atomically swaps the catalog pointer. The prior snapshot and its files stay intact, so you can time-travel to reproduce the pre-correction NAV, and you confirm the change via the new snapshot's summary counts in `$snapshots`. Later maintenance (`optimize`, `expire_snapshots`, `remove_orphan_files`) keeps the table fast and appropriately sized.
+
+</details>
+
+
+## Phase 2 · 3.4.3 Table-format catalogs — 100 self-test questions
+
+<details><summary><b>1.</b> In the lakehouse, what is a "catalog" and what core job does it do?</summary>
+
+A table-format catalog is the metadata service that maps human-friendly table names to the physical metadata that defines each table, so engines can find and open tables without knowing file paths. Concretely it tracks namespaces, a pointer per table to that table's current metadata file, and through it the current snapshot. It is the entry point an engine like Trino, Spark, or DuckDB hits first to resolve a table before reading any data file.
+
+</details>
+
+<details><summary><b>2.</b> What three things does an Iceberg catalog fundamentally track?</summary>
+
+Namespaces (the logical grouping or "database" level), table pointers (the mapping from a table identifier to its current metadata location), and, via that pointer, the current snapshot per table. The snapshot is what makes a query see a consistent, atomic view of the table at a point in time. Everything else — schema history, partition specs, manifest lists — lives inside the metadata files the catalog points to, not in the catalog itself.
+
+</details>
+
+<details><summary><b>3.</b> What is a namespace in an Iceberg catalog?</summary>
+
+A namespace is a logical container that groups tables, roughly analogous to a database or schema in a traditional RDBMS. In the REST spec namespaces can be multi-level (dot-separated), so you can model hierarchies like `funds.nav` or `funds.reference`. Namespaces are the unit at which much access control and storage configuration is often applied, which matters when one tenant's regulated fund data must be isolated from another's.
+
+</details>
+
+<details><summary><b>4.</b> What exactly is the "table pointer" the catalog stores, and why is keeping it small important?</summary>
+
+For each table the catalog stores a single pointer to that table's current metadata file (the `metadata.json`), not the data itself. Keeping the catalog's job down to "swap one pointer atomically" is what makes commits cheap and concurrency-safe: a commit is essentially an atomic compare-and-swap of that pointer. All the heavy lifting — manifests, data files, schemas — sits in object storage, so the catalog stays a small, fast, transactional service.
+
+</details>
+
+<details><summary><b>5.</b> How does a "current snapshot per table" relate to time travel?</summary>
+
+The catalog points to the current metadata file, and that metadata file lists all retained snapshots plus which one is current. Time travel works because old snapshots remain referenced in the metadata until expired, so an engine can ask for an earlier snapshot id or timestamp and read that historical state. The catalog's job is only to track which snapshot is current; the full snapshot history lives in the table metadata.
+
+</details>
+
+<details><summary><b>6.</b> Why is an atomic commit so central to what a catalog must guarantee?</summary>
+
+Because multiple writers may try to advance the same table at once, the catalog must ensure only one commit wins and others see a conflict and retry. It does this by atomically swapping the table pointer from the expected old metadata location to the new one, rejecting the swap if the current pointer no longer matches. Without this single-point atomic compare-and-swap you would get lost updates and corrupt, half-committed tables.
+
+</details>
+
+<details><summary><b>7.</b> What is the Iceberg REST catalog specification, in one sentence?</summary>
+
+It is an open, OpenAPI-defined HTTP protocol that standardises how any engine talks to any catalog for operations like listing namespaces, loading table metadata, committing snapshots, and vending credentials. Its purpose is decoupling: an engine speaks one REST API and does not need a bespoke client per catalog backend. The canonical reference is the REST catalog spec at `https://iceberg.apache.org/rest-catalog-spec/`.
+
+</details>
+
+<details><summary><b>8.</b> Why is the REST catalog spec described as "the decoupling standard"?</summary>
+
+Before it, each catalog (Hive Metastore, Glue, JDBC, Nessie) needed its own client implementation baked into every engine, coupling engines to specific catalog backends. The REST spec replaces that with one HTTP API: any compliant engine talks to any compliant catalog over the same endpoints. This separates the engine from the catalog implementation, which is the whole point of an open lakehouse — you can swap either side without rewriting the other.
+
+</details>
+
+<details><summary><b>9.</b> What does "engines talk one API" actually buy a data architect?</summary>
+
+It means you can put Trino, Spark, Flink, DuckDB, and a vendor engine in front of the same catalog, and swap the catalog implementation later, all without per-engine custom integration code. The architect gains negotiating leverage and an exit path: the REST API is the stable contract. The practical payoff is that catalog selection becomes a reversible decision instead of a permanent coupling.
+
+</details>
+
+<details><summary><b>10.</b> What does the `GET /v1/config` endpoint do in the REST catalog spec?</summary>
+
+It is the bootstrap call a client makes first to fetch catalog configuration before any table operations. It returns `defaults` (server-suggested properties the client may override) and `overrides` (properties the server forces and the client cannot override), letting the catalog enforce policy centrally. Clients merge these layers — server defaults first, then client config, then server overrides last — to build their effective configuration.
+
+</details>
+
+<details><summary><b>11.</b> In the `/v1/config` response, what is the difference between `defaults` and `overrides`?</summary>
+
+`defaults` are starting values the server suggests but the client is allowed to override with its own settings, while `overrides` are values the server applies last and the client cannot change. The precedence order is server defaults, then client-supplied config, then server overrides on top. This lets the catalog enforce non-negotiable policy (for example a fixed warehouse prefix) while still letting clients tune the rest.
+
+</details>
+
+<details><summary><b>12.</b> Roughly what endpoint shape lists tables in a namespace under the REST spec?</summary>
+
+Table listing uses a path like `GET /v1/{prefix}/namespaces/{namespace}/tables`, where `{prefix}` is an optional catalog/warehouse routing segment and `{namespace}` is the (possibly multi-level) namespace. Loading a single table is `GET /v1/{prefix}/namespaces/{namespace}/tables/{table}`. The point to remember is that everything is a standard REST resource path, which is what makes the protocol uniform across implementations.
+
+</details>
+
+<details><summary><b>13.</b> What is returned by `loadTable` and why does it matter for credential vending?</summary>
+
+`loadTable` (the table-load endpoint) returns the table's current metadata and a `config` map of properties the client should use, and that `config` is exactly where vended storage credentials are delivered. So the same call that tells an engine where the data is can also hand it short-lived credentials to read that data. This co-location is why credential vending is "free" architecturally — it rides on the load call the engine already makes.
+
+</details>
+
+<details><summary><b>14.</b> What is the role of the `{prefix}` segment in REST catalog URLs?</summary>
+
+The optional `{prefix}` path segment lets a single REST endpoint route to multiple catalogs or warehouses, for example `/v1/my_warehouse/namespaces/...`. The server can return the prefix to use in the `/v1/config` response, so the client learns its routing prefix at bootstrap. It is how one deployed REST service can serve several logical catalogs behind one base URL.
+
+</details>
+
+<details><summary><b>15.</b> Define credential vending in the catalog context.</summary>
+
+Credential vending is the catalog brokering short-lived, scoped storage credentials to an engine on demand, instead of the engine holding long-lived object-storage keys. When the engine loads a table, the catalog returns temporary credentials (or a remote-signing capability) scoped to just that table's storage path. The engine uses them to read or write the data files directly, and they expire quickly, so no durable secret is ever distributed.
+
+</details>
+
+<details><summary><b>16.</b> Why is credential vending the catalog's job rather than the engine's?</summary>
+
+Because the catalog is the single place that already knows the mapping from a table to its storage location and the governance rules for who may access it, so it is the natural policy-enforcement point. Centralising credential issuance there means access decisions are made once, consistently, for every engine, and can be revoked instantly. If each engine held its own keys, governance would be scattered and revocation would be impossible to guarantee.
+
+</details>
+
+<details><summary><b>17.</b> How does credential vending improve security over giving engines static keys?</summary>
+
+Vended credentials are short-lived and scoped to a single table's storage path, so a leaked token expires fast and grants minimal blast radius, whereas a static key is long-lived and usually broad. The engine never sees the catalog's own service credentials, only the narrow tokens it is handed. Revocation is also immediate: the catalog simply stops vending, and the next request fails — you do not have to rotate keys across many engines.
+
+</details>
+
+<details><summary><b>18.</b> In Apache Polaris, what kind of token is vended and for how long is it typically valid?</summary>
+
+Polaris vends short-lived, scoped cloud credentials — for example OAuth2 bearer tokens valid for around 15 minutes and scoped to the table's container path — rather than long-lived static keys. The exact lifetime is configurable and provider-dependent, but the principle is "short and narrow." Because the token is ephemeral and path-scoped, a compromise is self-limiting and revocation is instant.
+
+</details>
+
+<details><summary><b>19.</b> What is the `X-Iceberg-Access-Delegation` request header for?</summary>
+
+A client sends this header on table-load requests to signal which access-delegation modes it can accept, so the catalog knows how to respond. Recognised values include `vended-credentials` and `remote-signing` (and clients can indicate `client-managed` when they want neither). The catalog then returns credentials or signing info in the load response according to what the client supports and what the storage profile allows.
+
+</details>
+
+<details><summary><b>20.</b> What two access-delegation patterns does the Iceberg REST spec support, and how do they differ?</summary>
+
+Vended credentials, where the catalog hands the engine short-lived scoped storage tokens it uses directly, and remote signing, where the engine asks the catalog to sign each storage request (for example each S3 request) without ever receiving credentials. Vended credentials are simpler and let the engine talk straight to storage; remote signing keeps the engine fully credential-free at the cost of a signer round-trip. The client advertises which it supports via `X-Iceberg-Access-Delegation`.
+
+</details>
+
+<details><summary><b>21.</b> In the `loadTable` response, where do vended credentials actually appear?</summary>
+
+They are returned inside the `config` map of the `LoadTableResponse` (commonly via the `X-Iceberg-Access-Delegation: vended-credentials` flow), as storage configuration properties the client applies to its file IO. So from the engine's view, opening the table and receiving the credentials to read it are one response. The credentials are scoped and short-lived, so the engine must re-load (or refresh) when they expire.
+
+</details>
+
+<details><summary><b>22.</b> What dedicated endpoint can retrieve vended credentials for a specific table?</summary>
+
+The spec defines a path like `/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials` to fetch vended credentials for that one table. This lets a client refresh credentials for a long-running read without re-loading the entire table metadata. It reinforces that credential issuance is a first-class, per-table catalog operation, not a side effect.
+
+</details>
+
+<details><summary><b>23.</b> How does Lakekeeper decide between vended credentials and remote signing?</summary>
+
+It inspects the `X-Iceberg-Access-Delegation` header and the storage profile: if the header is `client-managed` it returns neither; if it asks for `vended-credentials` or `remote-signing` it uses that method when enabled in the profile; if both or neither is specified it tries vended credentials first and falls back to remote signing. This negotiation lets one catalog serve clients with different capabilities. The architect should know the storage profile must actually enable the chosen method or the request fails.
+
+</details>
+
+<details><summary><b>24.</b> What is "remote signing" and when would you prefer it over vended credentials?</summary>
+
+Remote signing means the engine sends each storage request to the catalog to be cryptographically signed (typically AWS SigV4 for S3), so the engine never holds any storage credential at all. You prefer it when policy forbids any credential ever reaching the engine, or when the storage backend's tokens are too coarse to scope tightly. The trade-off is an extra round-trip per request, which can add latency on chatty workloads.
+
+</details>
+
+<details><summary><b>25.</b> Name the four catalog products the syllabus highlights for product positioning.</summary>
+
+Apache Polaris, Unity Catalog OSS, Lakekeeper, and Project Nessie. All four implement (or expose) the Iceberg REST catalog API so engines can talk to them with one client, but they differ in language, governance model, and extra features like versioning. Knowing their positioning is what lets an architect lead the vendor-selection conversation rather than accept whatever an engine bundles.
+
+</details>
+
+<details><summary><b>26.</b> What is Apache Polaris and what is its lineage?</summary>
+
+Apache Polaris is an open-source Iceberg REST catalog implementation (originally open-sourced by Snowflake and donated to the Apache Software Foundation) that emphasises credential vending and catalog-level role-based access control. It is the reference implementation the syllabus uses for credential vending. Snowflake's managed "Open Catalog" offering is the same Polaris technology, which is worth remembering when comparing FOSS versus corporate options.
+
+</details>
+
+<details><summary><b>27.</b> What is Snowflake Open Catalog and how does it relate to Polaris?</summary>
+
+Snowflake Open Catalog is Snowflake's managed service built on Apache Polaris, exposing the same Iceberg REST API. So choosing it gives you a managed Polaris without running the service yourself, while remaining REST-spec compatible for other engines. This is a good example of the FOSS-versus-managed axis: same open protocol, different operational ownership.
+
+</details>
+
+<details><summary><b>28.</b> What is Unity Catalog OSS and who released it?</summary>
+
+Unity Catalog OSS is the open-source catalog released by Databricks, which exposes catalog functionality and supports the Iceberg REST API alongside its own interfaces, and notably governs more than just tables (it can also catalog functions, volumes, and AI/ML assets). Its draw is breadth of governance and deep Databricks-platform integration. The caution is that "OSS" and the richer managed Unity Catalog inside Databricks are not identical, so verify which capabilities are actually in the open version.
+
+</details>
+
+<details><summary><b>29.</b> What distinguishes Lakekeeper from the JVM-based catalogs?</summary>
+
+Lakekeeper is an Apache-licensed Iceberg REST catalog written in Rust, shipping as a single all-in-one binary with no JVM or Python runtime required, which makes it lightweight and easy to run in Docker Compose. It uses OpenFGA for fine-grained authorization (with an OPA bridge for engines like Trino) and supports vended credentials and remote signing across AWS, Azure, GCP, and on-prem. Its selling point is being small, fast, and Kubernetes-native.
+
+</details>
+
+<details><summary><b>30.</b> What authorization technology does Lakekeeper use, and why does it matter?</summary>
+
+Lakekeeper's default permission model is built on the CNCF project OpenFGA, which supports relationship-based access control with inheritance down hierarchical namespaces to individual tables and views. It also offers an OPA (Open Policy Agent) bridge so query engines such as Trino can consult Lakekeeper's permissions. For a regulated fund administrator this matters because fine-grained, inheritable authorization is exactly what governance audits require.
+
+</details>
+
+<details><summary><b>31.</b> What is Project Nessie's distinguishing feature?</summary>
+
+Nessie brings Git-like semantics to the catalog: branches, tags, and a commit history over the catalog state, enabling multi-table transactions, isolated experimentation on a branch, and rollbacks. So you can stage changes to several tables on a branch and merge them atomically, which plain pointer-swap catalogs do not natively offer. It also speaks the Iceberg REST API, so engines can use it like any REST catalog.
+
+</details>
+
+<details><summary><b>32.</b> Why would a fund administrator find Nessie's branching valuable?</summary>
+
+Because a NAV rerun or a corrected reference-data load often touches several tables that must change together and be reviewable before going live, and a Nessie branch lets you assemble those changes in isolation, validate them, then merge atomically. If something is wrong you discard the branch instead of unwinding partial writes across tables. It turns "did we corrupt production while reprocessing?" into a controlled, reversible workflow.
+
+</details>
+
+<details><summary><b>33.</b> How do Polaris and Nessie differ in their core value proposition?</summary>
+
+Polaris centres on credential vending and catalog-level RBAC for secure multi-engine access, while Nessie centres on Git-like versioning — branches, tags, and multi-table transactions. They are not mutually exclusive in spirit (Nessie-style versioning capabilities have been moving into the Polaris project), but as products you pick based on whether your priority is governed credential brokering or versioned, branchable catalog state. Both expose the REST API, so the engine side is unchanged either way.
+
+</details>
+
+<details><summary><b>34.</b> What does "engine-bundled catalog" mean and give an example.</summary>
+
+It means a catalog that ships tightly coupled to one engine or vendor platform, where the catalog is the default and is most fully featured only with that engine — for example AWS Glue with Athena, or a vendor's proprietary catalog inside its own engine. The data files may be open Iceberg, but the catalog is the vendor's. Recognising this pattern is the core skill of the lesson.
+
+</details>
+
+<details><summary><b>35.</b> Why do engine-bundled catalogs recreate lock-in even when the table format is open?</summary>
+
+Because openness lives in the catalog, not the format: if only one vendor's engine can fully read, write, and govern through their catalog, you cannot freely move to another engine even though your data files are open Iceberg. The catalog controls table resolution, commits, and credential vending, so whoever owns it owns the lakehouse. You have swapped file-format lock-in for catalog lock-in, which the open formats were supposed to remove.
+
+</details>
+
+<details><summary><b>36.</b> The syllabus says "the catalog, not the format, decides openness." Defend that claim.</summary>
+
+Open file formats only matter if some engine can discover and transact on the tables, and that discovery and transaction layer is the catalog. If the catalog speaks a proprietary protocol or vends credentials only to one engine, your open Parquet and Iceberg files are practically reachable by just that engine. The catalog is the control point for access, commits, and governance, so its openness — not the format's — determines whether you are truly portable.
+
+</details>
+
+<details><summary><b>37.</b> Why is the catalog called "the new lock-in battleground"?</summary>
+
+Because once open table formats commoditised the data files, vendors moved the differentiation and stickiness up to the catalog — the service that controls table resolution, transactions, governance, and credential vending. Whoever owns the catalog owns the lakehouse, so capturing the catalog is the new way to capture the customer. That is why catalog selection is a strategic, architect-led decision rather than a delegated technical detail.
+
+</details>
+
+<details><summary><b>38.</b> How does picking a REST-spec catalog reduce lock-in compared with an engine-bundled one?</summary>
+
+A REST-spec catalog exposes the open Iceberg REST API, so any compliant engine can use it and you can replace the catalog implementation later without rewriting engines. An engine-bundled catalog ties resolution, commits, and credential vending to one vendor's stack, so leaving means re-cataloguing and re-integrating everything. The REST spec is the contract that keeps the decision reversible.
+
+</details>
+
+<details><summary><b>39.</b> A vendor says "your data is in open Iceberg format, so you're not locked in." How do you respond as an architect?</summary>
+
+I would point out that file-format openness is necessary but not sufficient: if their catalog is the only thing that can govern, transact on, and vend credentials to those files, the catalog is the lock-in, not the files. I would ask whether their catalog speaks the open Iceberg REST API and whether another engine can fully read and write through it. Openness is decided at the catalog, so that is the question that actually determines portability.
+
+</details>
+
+<details><summary><b>40.</b> In the capstone "Do" step, what are you swapping and what stays the same?</summary>
+
+You swap the catalog from Trino's Hive-style catalog to a Lakekeeper or Polaris REST catalog, then re-point Trino at the REST endpoint and confirm the existing Iceberg tables resolve unchanged. What changes is the catalog endpoint and its config; what does not change is the data files and the table format. The whole exercise proves the catalog is replaceable without touching a single data file.
+
+</details>
+
+<details><summary><b>41.</b> In a Trino catalog properties file, which property selects a REST catalog?</summary>
+
+You set `iceberg.catalog.type=rest` in the Iceberg connector's properties file. That tells Trino to use the Iceberg REST catalog protocol rather than `hive_metastore`, `glue`, `jdbc`, or `nessie`. It is the single line that switches the catalog backend Trino talks to.
+
+</details>
+
+<details><summary><b>42.</b> Which Trino property gives the REST catalog's URL, and what does a value look like?</summary>
+
+`iceberg.rest-catalog.uri` provides the base URL of the REST catalog endpoint, for example `iceberg.rest-catalog.uri=http://lakekeeper:8181/catalog`. Trino then performs the `/v1/config` bootstrap and subsequent table operations against that URL. Getting this URL and any required prefix right is the most common first thing to check when tables fail to resolve.
+
+</details>
+
+<details><summary><b>43.</b> What does `iceberg.rest-catalog.warehouse` configure in Trino?</summary>
+
+It tells the REST catalog which warehouse (logical catalog/storage root) Trino should operate against, for example `iceberg.rest-catalog.warehouse=s3://demo-iceberg/` or a named warehouse the catalog defines. Some REST catalogs require this to route to the correct prefix; others derive it from `/v1/config`. If the warehouse value is wrong or missing, table listing can come back empty even though the catalog is reachable.
+
+</details>
+
+<details><summary><b>44.</b> What Trino property family configures S3-native file access for an Iceberg REST catalog?</summary>
+
+The `fs.native-s3.enabled=true` setting (with related `s3.*` properties) enables Trino's native S3 file system so it can read and write the data files once the catalog resolves them. The catalog tells Trino where the files are; this file-system config tells Trino how to reach object storage. If credential vending is in use, the catalog supplies the scoped credentials and you configure less here.
+
+</details>
+
+<details><summary><b>45.</b> Why does swapping the catalog NOT require rewriting any data files?</summary>
+
+Because the data files and the table metadata (`metadata.json`, manifests, Parquet) live in object storage and are referenced by the new catalog's pointers — the catalog only stores the mapping to the current metadata, it does not own the bytes. Re-pointing a catalog at the existing storage location lets it adopt the same tables as-is. This separation is the structural reason a catalog swap is cheap.
+
+</details>
+
+<details><summary><b>46.</b> When migrating tables to a new REST catalog, what mechanism "adopts" an existing table?</summary>
+
+A register-table operation, where you tell the new catalog the identifier and the location of the table's current `metadata.json`, so it records a pointer to that existing metadata without rewriting anything. After registration the table resolves through the new catalog exactly as before. This is the concrete operation behind "swap the catalog without rewriting a single data file."
+
+</details>
+
+<details><summary><b>47.</b> How would you confirm tables "resolve unchanged" after re-pointing Trino?</summary>
+
+Run `SHOW SCHEMAS`, `SHOW TABLES`, then `SELECT count(*)` and a few `SELECT` queries on the same tables, and verify schemas, row counts, and snapshot history match what you saw on the old catalog. If counts and time-travel snapshots line up, the data is the same and only the resolution path changed. Comparing a known snapshot id before and after is a strong check.
+
+</details>
+
+<details><summary><b>48.</b> After swapping catalogs, you document "what changed and what did not." What goes in each bucket?</summary>
+
+Changed: the catalog endpoint URI, the connector's `iceberg.catalog.type` and REST properties, and how credentials are now vended. Unchanged: the physical data files, the Iceberg metadata files, the table format, the schemas, and the snapshot history. The whole point of the writeup is to make visible that only the resolution/governance layer moved, proving the catalog is a swappable component.
+
+</details>
+
+<details><summary><b>49.</b> A NAV history table is stored as Iceberg. Where does the catalog fit when Trino queries it?</summary>
+
+When Trino runs the query it first asks the catalog to resolve the table name to its current metadata pointer and (if vending) obtain scoped credentials, then reads the manifests and Parquet data files directly from object storage. The catalog is consulted once at planning time for metadata and credentials, not for every row. So the catalog is on the control path, not the data path, which is why it stays small.
+
+</details>
+
+<details><summary><b>50.</b> An ISIN-keyed reference table lives in namespace `funds.reference`. What does the multi-level namespace buy you?</summary>
+
+Multi-level namespaces let you organise tables hierarchically (`funds.reference`, `funds.nav`, `funds.audit`) and often apply access control or storage configuration at a namespace level. For a fund administrator that means you can grant or restrict whole domains of regulated data at the namespace boundary rather than table by table. It mirrors database/schema organisation while keeping the catalog single and uniform.
+
+</details>
+
+<details><summary><b>51.</b> For a Luxembourg fund administrator, why is catalog choice "a governance question, not just technical"?</summary>
+
+Because the catalog decides who can vend credentials to regulated data and enforces who may resolve and transact on which tables, it is effectively the access-control boundary for sensitive fund information. Regulators (and frameworks like DORA) care about how data access is brokered, logged, and revoked, all of which the catalog controls. So selecting and configuring the catalog is a control-design decision with compliance implications, not just a plumbing choice.
+
+</details>
+
+<details><summary><b>52.</b> How does credential vending help satisfy least-privilege requirements for regulated fund data?</summary>
+
+Vending issues short-lived credentials scoped to exactly the table (and operation) an engine needs at the moment it loads that table, so no engine holds standing broad access to the storage bucket. That is least privilege enforced at request time by a central policy point. It also gives auditors a single place where access grants and revocations are decided and can be evidenced.
+
+</details>
+
+<details><summary><b>53.</b> Why does instant revocation matter in a regulated context, and how does vending provide it?</summary>
+
+Regulators and incident-response procedures may require that a compromised or offboarded principal lose data access immediately, with proof. With vending, the catalog simply stops issuing credentials to that principal and their next request fails — there is no long-lived key still floating around to rotate across many engines. Revocation is therefore central, fast, and auditable rather than distributed and slow.
+
+</details>
+
+<details><summary><b>54.</b> Your Trino query returns "table not found" right after switching to a REST catalog. First thing to check?</summary>
+
+Check the catalog connectivity and routing first: confirm `iceberg.rest-catalog.uri` is correct and reachable from the Trino container, and that the `warehouse`/prefix matches what the catalog expects, because a wrong URI or warehouse makes namespaces come back empty. Verify with the catalog's own API (the `/v1/config` and namespaces endpoints) that the table actually exists where you think. Only after the catalog resolves the name should you suspect storage or credentials.
+
+</details>
+
+<details><summary><b>55.</b> Trino lists the table but a `SELECT` fails with an access-denied error from S3. Likely cause?</summary>
+
+The catalog resolved the metadata but the engine could not read the data files, which usually means credential vending or storage config is wrong — the storage profile may not enable the requested delegation mode, or `fs.native-s3.enabled` and S3 endpoint settings are misconfigured. Check whether the `X-Iceberg-Access-Delegation` negotiation succeeded and whether the vended credentials are scoped to the right path. Resolution working but reads failing almost always points at the credential/storage layer, not the catalog mapping.
+
+</details>
+
+<details><summary><b>56.</b> A commit to an Iceberg table fails with a conflict under the REST catalog. What does that indicate?</summary>
+
+It means another writer advanced the table's current pointer between when your engine read the base metadata and when it tried to commit, so the catalog's atomic compare-and-swap rejected your stale update. This is normal optimistic-concurrency behaviour; the engine should refresh to the new current metadata and retry the commit. It is a sign the catalog is correctly preventing a lost update, not a bug.
+
+</details>
+
+<details><summary><b>57.</b> Why is it risky to let your query engine determine your catalog choice by default?</summary>
+
+Because each engine tends to bundle and favour its own catalog, accepting the default quietly couples you to that engine and reproduces lock-in even with open formats. The architect should choose the catalog deliberately against criteria like REST-spec compliance, credential vending, governance, and operability, then point engines at it. Letting the engine decide hands the strategic control point to a vendor.
+
+</details>
+
+<details><summary><b>58.</b> What is the practical difference between a Hive-style catalog and a REST catalog for Trino?</summary>
+
+A Hive-style catalog (Hive Metastore) uses a Thrift/JDBC-backed metastore with engine-specific clients, whereas a REST catalog exposes the open Iceberg REST HTTP API that any compliant engine speaks uniformly. The REST catalog also natively supports modern features like credential vending and a clean config-negotiation bootstrap. Migrating from Hive-style to REST is exactly the capstone swap, chosen to demonstrate decoupling.
+
+</details>
+
+<details><summary><b>59.</b> How does an engine "discover" the credentials and storage settings it should use at runtime?</summary>
+
+Through the layered config it gets from the catalog: `/v1/config` returns defaults and overrides at bootstrap, and `loadTable` returns per-table `config` including any vended credentials. The engine merges these to build its effective file-IO configuration for that table. This is how a catalog can centrally push storage policy and short-lived credentials without the engine hardcoding anything.
+
+</details>
+
+<details><summary><b>60.</b> What is the difference between a catalog enforcing access and the storage system enforcing access?</summary>
+
+The catalog enforces access at the metadata/governance layer (who may resolve, read, or write a table, and what credentials they are vended), while the storage system (S3, GCS, ADLS) enforces whatever the presented credentials actually allow. With vending, the catalog narrows the storage credential to least privilege before the engine ever touches storage. Both layers exist, but the catalog is where governance policy is expressed and the storage layer merely honours the resulting scoped token.
+
+</details>
+
+<details><summary><b>61.</b> Why does the spec separate "load metadata" from "read data files"?</summary>
+
+Because the catalog's job is only to hand back the current metadata pointer (and optionally credentials), while the engine reads the manifests and Parquet directly from object storage — keeping the catalog off the high-throughput data path. This separation lets the catalog stay a small transactional service and lets storage scale independently. It is also why catalog calls are infrequent (per table, per plan) rather than per row.
+
+</details>
+
+<details><summary><b>62.</b> What does it mean that the REST spec is defined with OpenAPI, practically?</summary>
+
+It means the API surface is described in a machine-readable OpenAPI document (`rest-catalog-open-api.yaml`), so clients and servers can be generated or validated against a single contract. New engines can implement a compliant client without reverse-engineering a vendor's behaviour. The shared, versioned contract is part of what makes the standard genuinely interoperable.
+
+</details>
+
+<details><summary><b>63.</b> If two different REST catalogs both pass the spec, can you swap one for the other freely?</summary>
+
+In principle yes for the standardised operations — namespaces, table load, commits, config, and the defined credential-vending flows are interoperable — which is the whole value of the spec. In practice you must check that the features you rely on (specific authorization models, versioning, supported storage profiles, optional endpoints) exist on both, because catalogs differ above the common core. So the REST surface is portable; the vendor-specific extensions may not be.
+
+</details>
+
+<details><summary><b>64.</b> Why might an architect still prefer a managed catalog despite lock-in concerns?</summary>
+
+Managed catalogs (Snowflake Open Catalog, AWS Glue, Databricks Unity) remove operational burden — high availability, upgrades, scaling, and integrated governance — which can outweigh portability for some teams. The key is to pick managed catalogs that still speak the open REST API so you retain an exit path, rather than ones with a proprietary protocol. The architect's job is to trade operability against openness consciously, not by accident.
+
+</details>
+
+<details><summary><b>65.</b> What is the risk of a catalog that does NOT support the Iceberg REST API?</summary>
+
+If a catalog only speaks a proprietary protocol, every engine needs a bespoke integration and you cannot swap engines or catalogs without rework — that is classic lock-in regardless of file-format openness. You also lose the standardised credential-vending and config negotiation. The architect should treat REST-spec compliance as a near-mandatory selection criterion for an open lakehouse.
+
+</details>
+
+<details><summary><b>66.</b> How does AWS Glue relate to the open-lakehouse openness discussion?</summary>
+
+Glue is a managed catalog tightly integrated with AWS engines like Athena; it can hold Iceberg tables, and AWS has added Iceberg REST endpoints, but historically it is the canonical example of an engine/cloud-bundled catalog. The caution is that "Iceberg files in S3 with Glue" can still couple you to the AWS stack for full functionality. Evaluate exactly what is open (the REST surface) versus what is AWS-specific.
+
+</details>
+
+<details><summary><b>67.</b> What governance capability should you check a candidate catalog provides beyond vending?</summary>
+
+Check for fine-grained, inheritable authorization (role- or relationship-based access control down to table and column/namespace level), plus audit logging of access decisions and credential issuance. Lakekeeper uses OpenFGA/OPA for this; Polaris uses catalog-level RBAC with principal roles. For regulated fund data these governance features are as important as vending, because auditors need both least privilege and evidence.
+
+</details>
+
+<details><summary><b>68.</b> What are Polaris "principal roles" and why do they matter?</summary>
+
+In Polaris, principals (identities) are assigned roles that determine which catalogs, namespaces, and tables they can access and what operations they may perform, implementing catalog-level RBAC. When a principal loads a table, vending issues credentials consistent with that role's permissions. This couples identity and credential scope so that access control is enforced uniformly at the catalog, the right place for governance.
+
+</details>
+
+<details><summary><b>69.</b> Why is "the client never sees the catalog's service credentials" an important property?</summary>
+
+Because the catalog uses its own privileged credentials to mint or sign access, but only ever hands the engine narrow, short-lived tokens (or signatures), the powerful service identity is never exposed to many distributed engines. If an engine is compromised, the attacker gets at most a scoped, expiring token, not the keys to the whole bucket. This containment is a core security benefit of vending and remote signing.
+
+</details>
+
+<details><summary><b>70.</b> How does remote signing keep an engine completely credential-free?</summary>
+
+With remote signing the engine constructs each storage request but sends it to the catalog to be signed (for example SigV4 for S3), then dispatches the signed request itself — it never receives any access key or token. The catalog therefore mediates every individual storage call rather than handing over reusable credentials. This is the strictest delegation mode, at the cost of a signing round-trip per request.
+
+</details>
+
+<details><summary><b>71.</b> When comparing Polaris, Unity Catalog OSS, Lakekeeper, and Nessie, what axes should you score them on?</summary>
+
+REST-spec compliance, credential vending and remote-signing support, authorization granularity and model, versioning features (branches/tags/multi-table transactions), runtime footprint and operability, supported storage backends, and governance/audit capabilities. You weigh those against your context — for a regulated administrator, governance, vending, and auditability rank high. Scoring on explicit axes is how the architect leads the selection rather than reacting to marketing.
+
+</details>
+
+<details><summary><b>72.</b> Which of the four highlighted catalogs is the lightest to run for a Docker Compose lab and why?</summary>
+
+Lakekeeper, because it is a single Apache-licensed Rust binary with no JVM or Python runtime, so it starts fast and has a small footprint, which is ideal for a compose-based capstone. Polaris is also runnable in compose but is JVM-based and heavier. The syllabus suggests Lakekeeper or Polaris specifically because both expose the REST API you can point Trino at.
+
+</details>
+
+<details><summary><b>73.</b> Why does owning the catalog mean "owning the lakehouse"?</summary>
+
+Because the catalog is the mandatory entry point for table resolution, transactions, governance, and credential vending, whoever controls it controls who can use the data and how — even though the files are open. Engines and storage are replaceable around a catalog, but the catalog is the chokepoint of access and trust. Control of that chokepoint is effectively control of the platform.
+
+</details>
+
+<details><summary><b>74.</b> What is the relationship between "snapshots" the catalog tracks and atomic visibility?</summary>
+
+The catalog points to the current metadata, which names the current snapshot, and a commit advances that pointer atomically to a metadata that names a new snapshot — so readers always see one consistent snapshot, never a partial write. There is no moment where some files of a commit are visible and others are not. This snapshot-based, pointer-swap design is what gives lakehouse tables serializable-style visibility.
+
+</details>
+
+<details><summary><b>75.</b> A junior says "we use Iceberg, so we can use any engine." What nuance do you add?</summary>
+
+That Iceberg the format is engine-neutral, but engine choice is really gated by the catalog: any engine can read the files only if it can talk to the catalog that owns the tables. If the catalog speaks the open REST API, the claim mostly holds; if it is a proprietary engine-bundled catalog, it does not. So the right test is "does our catalog speak the Iceberg REST API," not just "are our files Iceberg."
+
+</details>
+
+<details><summary><b>76.</b> How would you demonstrate, in a lab, that the catalog and not the format decides openness?</summary>
+
+Keep the same Iceberg data files in object storage, then point two different engines (say Trino and DuckDB) at the same REST catalog and show both resolve the tables; next, swap the catalog implementation and show the engines still work with no file changes. Conversely, show that without a compliant catalog the engines cannot resolve the tables at all. The data never moves; only the catalog determines reachability.
+
+</details>
+
+<details><summary><b>77.</b> What is the bootstrap sequence an engine follows against a REST catalog on first use?</summary>
+
+It calls `GET /v1/config` to fetch defaults, overrides, and any prefix, merges those with its own configuration, then uses the namespace and table endpoints to list and load tables, sending `X-Iceberg-Access-Delegation` if it wants vended credentials. On `loadTable` it receives metadata and (optionally) scoped credentials in the response `config`. This handshake is what lets the catalog centrally control routing, policy, and credentials.
+
+</details>
+
+<details><summary><b>78.</b> Why does the spec push storage configuration via the catalog rather than baking it into each engine?</summary>
+
+Centralising storage config (and credentials) in the catalog means policy is defined once and pushed to every engine through `/v1/config` overrides and `loadTable` config, so engines do not hardcode bucket paths or keys. This keeps configuration consistent and changeable from one place, and enables short-lived credential delivery. It is the same "control point" philosophy that makes vending and governance work.
+
+</details>
+
+<details><summary><b>79.</b> If a catalog returns `overrides` you did not expect, what is happening and how do you react?</summary>
+
+The server is enforcing properties that take precedence over your client settings — perhaps pinning a warehouse prefix, an endpoint, or a credential mode — so your local config for those keys is being ignored by design. You react by understanding the catalog's intended policy rather than fighting it, and by configuring only the keys the catalog leaves to defaults. Treat overrides as the catalog asserting non-negotiable platform policy.
+
+</details>
+
+<details><summary><b>80.</b> What does it mean operationally that the catalog is "on the control path, not the data path"?</summary>
+
+It means catalog calls happen at planning time (resolve table, get metadata, get credentials), perhaps a handful per query, while the bulk data scanning goes engine-to-storage directly. So the catalog need not scale to data throughput, only to metadata/transaction rates, which keeps it small and cheap. It also means catalog latency affects query startup, not per-row scan speed.
+
+</details>
+
+<details><summary><b>81.</b> How can a single deployed REST catalog serve multiple warehouses or tenants?</summary>
+
+Through the `{prefix}`/warehouse routing in the URL and config, one endpoint can expose several logical catalogs, each with its own namespaces, storage profile, and access policy. The `/v1/config` response can tell each client its prefix and defaults. This lets a fund administrator isolate, say, different clients' regulated data behind one catalog service with distinct policies.
+
+</details>
+
+<details><summary><b>82.</b> Why might "free" file-format portability give a false sense of security to a buyer?</summary>
+
+Because a buyer sees open Parquet/Iceberg and assumes portability, while the real lock-in has shifted to the catalog that governs and vends access to those files. If the catalog is proprietary or engine-bundled, the open files are practically usable only through that vendor. The architect's job is to direct the buyer's attention from format openness to catalog openness, where the actual leverage lies.
+
+</details>
+
+<details><summary><b>83.</b> Why might an engine send `X-Iceberg-Access-Delegation: vended-credentials` yet still receive no credentials?</summary>
+
+The negotiation only succeeds if the catalog's storage profile actually enables that delegation mode; if vending is disabled (or only remote signing is configured) the catalog will not return credentials for that method. Lakekeeper, for instance, returns neither if the header is `client-managed`, and falls back between modes based on what the profile permits. So the header advertises client capability, but the storage profile on the catalog side decides what is granted — check that configuration first.
+
+</details>
+
+<details><summary><b>84.</b> What happens to in-flight reads when vended credentials expire mid-scan?</summary>
+
+The engine's scoped credentials are time-limited, so a long-running scan must refresh them — via re-loading the table or the per-table credentials endpoint — before they expire, or storage requests will start failing with auth errors. Mature engines handle this refresh transparently. The gotcha for an architect is sizing credential lifetimes and refresh behaviour so long queries do not fail at the boundary.
+
+</details>
+
+<details><summary><b>85.</b> How does the catalog enable multi-engine concurrency safely on the same table?</summary>
+
+Every writing engine must commit through the catalog's atomic pointer swap with optimistic concurrency, so concurrent commits from different engines are serialised: one wins, the others see a conflict and retry on the refreshed metadata. The catalog is the single arbiter of the current pointer, which is what makes cross-engine writes safe. Without that central arbiter, two engines could both advance the table and lose data.
+
+</details>
+
+<details><summary><b>86.</b> Compare Nessie's branching to simply taking Iceberg snapshots. What does branching add?</summary>
+
+Iceberg snapshots give per-table time travel, but Nessie branches give catalog-level versioning across many tables at once, with named branches, tags, and the ability to merge or discard a whole set of changes atomically. Snapshots cannot express "stage these five tables together, review, then publish as one transaction." So branching adds multi-table, Git-like coordination on top of single-table snapshot history.
+
+</details>
+
+<details><summary><b>87.</b> A regulator asks "who could read fund X's NAV data last quarter, and how was that access granted?" How does a vending catalog help you answer?</summary>
+
+Because access is brokered centrally — the catalog decides which principals/roles can load the table and vends scoped, short-lived credentials per request — the catalog (with audit logging) is the one place that records who was granted access and when. You can point to role assignments and credential-issuance/revocation logs rather than hunting for scattered static keys. Centralised brokering is what makes such audit questions answerable.
+
+</details>
+
+<details><summary><b>88.</b> Why is it important that vended credentials are scoped to a path, not just short-lived?</summary>
+
+Short lifetime limits how long a leaked token is useful, but path scoping limits what it can reach, so even a live token cannot touch other tables or buckets. Together they minimise blast radius in both time and space. For regulated data, path-scoping is what lets you prove an engine could only ever access the specific table it was authorised for.
+
+</details>
+
+<details><summary><b>89.</b> What is the danger of mixing an open table format with a closed governance layer?</summary>
+
+You get a system that looks portable (open files) but is operationally captive (closed catalog controls access, transactions, and credentials), which can mislead stakeholders and complicate exit or audit. Governance decisions become tied to one vendor's tooling. The remedy is to insist the governance layer — the catalog — be REST-spec compliant and inspectable, so openness extends to where decisions are actually made.
+
+</details>
+
+<details><summary><b>90.</b> How do you verify, with the catalog's own API, that a table exists before blaming Trino?</summary>
+
+Call the catalog directly — `GET /v1/config` to confirm reachability and prefix, then `GET /v1/{prefix}/namespaces` and the tables-list endpoint for the namespace — to see whether the table is actually registered. If the catalog itself does not list it, the problem is registration/routing, not Trino. This isolates whether the fault is in the catalog state or the engine configuration.
+
+</details>
+
+<details><summary><b>91.</b> Why does the syllabus frame catalog selection as "a conversation you must lead, not delegate"?</summary>
+
+Because the catalog is the strategic lock-in and governance control point, choosing it shapes vendor leverage, exit options, and regulatory posture for years — decisions too consequential to leave to whichever engine a team happened to adopt. The architect has the cross-cutting view of portability and compliance that a single engine team lacks. Leading the conversation is how you avoid accidentally re-creating lock-in.
+
+</details>
+
+<details><summary><b>92.</b> What is the minimal set of Trino properties to point its Iceberg connector at a REST catalog?</summary>
+
+At minimum `connector.name=iceberg`, `iceberg.catalog.type=rest`, and `iceberg.rest-catalog.uri=<url>`, typically plus `iceberg.rest-catalog.warehouse=<warehouse>` and the file-system settings (for example `fs.native-s3.enabled=true` with S3 endpoint/credentials or reliance on vending). Those few lines replace the prior Hive-style config. Getting `uri` and `warehouse` right is the crux of the swap.
+
+</details>
+
+<details><summary><b>93.</b> One Trino limitation to remember about the Iceberg REST catalog connector?</summary>
+
+The Iceberg REST catalog in Trino does not support view or materialized-view management, so if your workload relies on catalog-managed views you must account for that gap. Tables, snapshots, and time travel work; views are the notable exclusion. Knowing such concrete limits prevents a surprise late in the capstone swap.
+
+</details>
+
+<details><summary><b>94.</b> How does credential vending interact with object-storage IAM under the hood?</summary>
+
+The catalog holds a privileged identity (or trust relationship) with the object store and uses it to mint scoped temporary credentials (for example via STS-style assume-role/session tokens or signed URLs) limited to the table's path and operation. The engine then presents those to storage, which enforces them via normal IAM. So vending is the catalog mediating IAM on the engine's behalf, narrowing broad service access to per-request least privilege.
+
+</details>
+
+<details><summary><b>95.</b> Why is "easy to run in Docker Compose" a meaningful selection criterion for a learning capstone?</summary>
+
+Because being able to stand the catalog up quickly in compose lets you actually perform the swap, point Trino at it, and observe credential vending end-to-end without managing heavy infrastructure — which is the hands-on "Done when" of the lesson. Lakekeeper's single Rust binary and Polaris's compose images are chosen for exactly this. Operability in a lab also hints at operability in production at small scale.
+
+</details>
+
+<details><summary><b>96.</b> What evidence in a query plan or logs confirms the catalog (not storage) resolved a table?</summary>
+
+Successful namespace/table listing and a `loadTable` response with valid metadata indicate the catalog resolved the table; the subsequent step is the engine fetching data files from storage. If listing and load succeed but scans fail, the catalog did its job and the issue is downstream in credentials/storage. Separating "resolution succeeded" from "data read succeeded" is the key diagnostic split.
+
+</details>
+
+<details><summary><b>97.</b> How would you argue that REST-spec compliance future-proofs a catalog choice?</summary>
+
+Because the REST API is a stable, versioned, multi-vendor contract, a compliant catalog can be replaced by another compliant catalog and continues to work with whatever engines you adopt later, preserving optionality. Non-compliant catalogs make every future engine or catalog change a migration project. Compliance turns the catalog from a permanent commitment into a swappable component.
+
+</details>
+
+<details><summary><b>98.</b> Summarise why "the catalog decides who can vend credentials" is a governance, not technical, statement.</summary>
+
+Deciding who may be vended credentials is deciding who may access regulated data, under what conditions, and how that access is revoked and audited — those are governance policies, and the catalog is merely the mechanism that enforces them. So selecting and configuring the catalog is choosing where and how access policy is expressed for sensitive fund data. The technical implementation serves a governance decision the architect owns.
+
+</details>
+
+<details><summary><b>99.</b> After completing the capstone swap, how do you demonstrate the third "Done when" — swapping without rewriting a data file?</summary>
+
+Show before/after file listings of the object-storage location proving the data and metadata files are byte-identical, alongside the changed catalog config and a successful query through the new catalog. The only diffs are in the engine's catalog properties and the catalog's registration records. That side-by-side is the concrete proof that the catalog is replaceable while the data stays put.
+
+</details>
+
+<details><summary><b>100.</b> Pulling it together: why is the catalog the single most strategic component of an open lakehouse?</summary>
+
+Because it is simultaneously the table-resolution entry point, the transaction arbiter, the governance and access-control boundary, and the credential broker — it sits on the control path for everything while the open formats merely store bytes. Whoever owns it owns reachability, transactions, and security of the data, which is why openness, lock-in, and compliance all hinge on the catalog. That is why an architect leads catalog selection and treats it as the decisive lakehouse decision.
+
+</details>
+
+
+## Phase 2 · 4.3.1 MPP/federated SQL engines (Trino) — 100 self-test questions
+
+<details><summary><b>1.</b> What is Trino, in one sentence, and what category of engine does it belong to?</summary>
+
+Trino is a distributed, open-source MPP (massively parallel processing) SQL query engine designed to run interactive analytic queries across one or many heterogeneous data sources. It is a query engine only — it has no storage of its own and ships no built-in catalog of data, so it federates over external systems like object stores, Iceberg tables, and relational databases. This decoupling of compute from storage is exactly the "decoupled compute" pattern the lakehouse relies on.
+
+</details>
+
+<details><summary><b>2.</b> What does "MPP" stand for and what does it imply about how Trino runs a query?</summary>
+
+MPP stands for massively parallel processing, meaning the work of a single query is split into many parallel units that run simultaneously across many worker nodes. Trino divides a query into stages, each stage into tasks, and each task processes splits of data in parallel using multiple drivers. The implication is that adding workers can increase throughput for a query, in contrast to a single-process engine that runs everything in one address space.
+
+</details>
+
+<details><summary><b>3.</b> What two roles do nodes play in a Trino cluster, and what does each do?</summary>
+
+A Trino cluster has exactly one coordinator and one or more workers. The coordinator is the brain: it parses SQL, plans and optimizes the query, schedules work, and aggregates results to return to the client. Workers fetch data from connectors, execute the assigned tasks on splits, and exchange intermediate data with each other.
+
+</details>
+
+<details><summary><b>4.</b> Can a single Trino node act as both coordinator and worker, and when would you do that?</summary>
+
+Yes — for development or a tiny deployment you can set `node-scheduler.include-coordinator=true` so the coordinator also processes splits as a worker. This is convenient for a local Docker Compose lab but is discouraged in production because heavy worker work on the coordinator competes with its scheduling and result-gathering duties. For the capstone single-node Trino, running it as combined coordinator/worker is the normal setup.
+
+</details>
+
+<details><summary><b>5.</b> What is the discovery service in Trino and where does it live?</summary>
+
+The discovery service is the registry workers use to announce themselves and through which the coordinator finds available workers. By default it runs embedded inside the coordinator process, so you do not deploy it separately. When a worker process starts, it advertises itself to the discovery server in the coordinator, which is how the coordinator builds its picture of the cluster.
+
+</details>
+
+<details><summary><b>6.</b> A worker is running but the coordinator never schedules work on it. What is the first thing to check?</summary>
+
+Check that the worker successfully registered with the discovery service — confirm the worker's `discovery.uri` points at the coordinator and that the coordinator shows the node as active (the Web UI lists active workers, or you can query `system.runtime.nodes`). A common cause is a wrong or unreachable `discovery.uri`, a network/firewall block on the HTTP port, or a `node.environment` mismatch between coordinator and worker. If the node never appears, it is a registration problem, not a query problem.
+
+</details>
+
+<details><summary><b>7.</b> What does the client submit to, and how does it get results?</summary>
+
+The client (CLI, JDBC/ODBC driver, or a BI tool) submits SQL statements to the coordinator over HTTP and then polls the coordinator for results. The coordinator returns results incrementally as they become available, so the client does not block on the entire query finishing before any rows arrive. The client never talks directly to workers.
+
+</details>
+
+<details><summary><b>8.</b> Distinguish a "statement" from a "query" in Trino's terminology.</summary>
+
+A statement is just the SQL text you send, like `SELECT * FROM nav`. A query is the live, instantiated execution of that statement — the configuration, query plan, stages, tasks, splits, and runtime state Trino creates to run it. One statement produces one query when executed; the distinction matters when you read documentation about query lifecycle and the Web UI's per-query metrics.
+
+</details>
+
+<details><summary><b>9.</b> Name the execution hierarchy from query down to the smallest unit of work.</summary>
+
+A query is broken into stages, stages are translated into tasks, tasks operate on splits, and within a task work runs through drivers made of operators. Splits are sections of the underlying data; drivers are the parallel execution units inside a task; operators (scan, filter, join, aggregate, etc.) consume and transform pages of data. Understanding this hierarchy is what lets you read the Web UI and a query plan intelligently.
+
+</details>
+
+<details><summary><b>10.</b> What is a "split" in Trino and where does it come from?</summary>
+
+A split is an addressable chunk of a data source that a task can process independently — for example a portion of a Parquet file or a range of an Iceberg data file. The connector for each source is responsible for enumerating splits, which is how Trino achieves parallelism: many splits are processed concurrently across tasks and workers. The number and size of splits a connector produces strongly affects parallelism and performance.
+
+</details>
+
+<details><summary><b>11.</b> What is a "stage" and why don't stages run directly on workers?</summary>
+
+A stage is a node in the coordinator's tree-shaped distributed query plan, representing one logical phase such as "scan and filter" or "final aggregate." Stages are an abstraction the coordinator uses for planning; they are translated into tasks, and it is the tasks that actually run on workers. So a stage describes work; tasks are the concrete instances of that work distributed across the cluster.
+
+</details>
+
+<details><summary><b>12.</b> What is an "exchange" in Trino's execution model?</summary>
+
+An exchange moves intermediate data between tasks, typically across stage boundaries and often across worker nodes — for example shuffling rows by join key so matching keys land on the same worker. Exchanges are where network traffic and redistribution happen, so a plan with large exchanges signals a lot of data movement. Reading exchange types in `EXPLAIN` (e.g. a hash-partitioned exchange before a join) tells you how data is repartitioned.
+
+</details>
+
+<details><summary><b>13.</b> What is a "page" in Trino and why does it matter?</summary>
+
+A page is Trino's unit of columnar in-memory data passed between operators — a collection of blocks, each block holding the values for one column for a batch of rows. Operators consume and produce pages, which is what makes Trino's execution columnar and vectorized rather than row-at-a-time. You rarely set pages directly, but the concept explains why Trino is memory- and CPU-efficient on analytic scans.
+
+</details>
+
+<details><summary><b>14.</b> What is a "driver" versus a "task" in Trino?</summary>
+
+A task is the unit of work assigned to a worker for one stage on that worker; a driver is one of potentially many parallel pipelines of operators inside that task. A task can run many drivers concurrently to exploit a worker's CPU cores, each driver pushing pages through its operator chain. So tasks give you cross-node parallelism and drivers give you within-node parallelism.
+
+</details>
+
+<details><summary><b>15.</b> What is a connector in Trino, and how many does a catalog use?</summary>
+
+A connector is the plugin that adapts Trino to a specific kind of data source — it knows how to list schemas and tables, enumerate splits, read data, and report what pushdown it supports. Each catalog is configured with exactly one connector; for example an `iceberg` connector or a `postgresql` connector. To query two different systems you configure two catalogs, each with its own connector.
+
+</details>
+
+<details><summary><b>16.</b> Explain the catalog → schema → table naming hierarchy in Trino.</summary>
+
+Trino addresses every table with a three-part name `catalog.schema.table`. The catalog identifies a configured data source (and its connector), the schema is a logical grouping within that source, and the table is the relation itself. For example `iceberg.funds.nav_history` and `postgres.public.fund_ref` are two tables in two different catalogs that you can join in one statement.
+
+</details>
+
+<details><summary><b>17.</b> How do you create a catalog in Trino, and what does the file look like?</summary>
+
+You add a properties file under the `etc/catalog/` directory, named after the catalog (e.g. `iceberg.properties`), containing at minimum `connector.name=iceberg` plus connector-specific settings. The filename (minus `.properties`) becomes the catalog name you reference in SQL. In recent Trino versions catalogs can also be created dynamically via the SQL `CREATE CATALOG` command if the feature is enabled, but file-based config is the standard, restart-required approach.
+
+</details>
+
+<details><summary><b>18.</b> For the capstone, which two catalogs do you configure and why?</summary>
+
+You configure an `iceberg` catalog (pointing at MinIO storage plus a metastore/REST catalog) for historical NAV and holdings facts, and a `postgresql` catalog pointing at the Phase-1 Postgres for live transfer-agency reference data. With both configured, a single Trino statement can join the live Postgres dimension to the historical Iceberg facts — the practical demonstration of federation. This is exactly the "no ETL hop" benefit the lesson highlights.
+
+</details>
+
+<details><summary><b>19.</b> What is "pushdown" in Trino, in general terms?</summary>
+
+Pushdown is when Trino delegates part of the query work — predicates (filters), projections (column selection), aggregations, limits, or even joins — down to the underlying data source instead of doing it itself after fetching everything. The benefit is that the source returns far less data, cutting network transfer and Trino-side compute. Which pushdowns are possible depends entirely on the connector and the source's capabilities.
+
+</details>
+
+<details><summary><b>20.</b> What is predicate pushdown and why is it the single biggest performance lever in federation?</summary>
+
+Predicate pushdown sends `WHERE` conditions to the source so it filters rows before returning them — e.g. pushing `fund_id = 42 AND dt >= DATE '2026-01-01'` into Postgres or into an Iceberg scan. Without it, Trino would pull every row across the network and filter locally, which for a large table is catastrophically slow and expensive. It is the biggest lever because it directly determines how many rows cross the wire.
+
+</details>
+
+<details><summary><b>21.</b> What is projection pushdown?</summary>
+
+Projection pushdown sends the list of needed columns to the source so only those columns are read and transferred, rather than `SELECT *`. For columnar sources like Parquet/Iceberg this means only the requested column chunks are read; for Postgres it means a narrower `SELECT` column list. In the Iceberg connector this is controlled by `iceberg.projection-pushdown-enabled`, which defaults to `true`.
+
+</details>
+
+<details><summary><b>22.</b> What is aggregation pushdown and which connectors typically support it?</summary>
+
+Aggregation pushdown delegates computations like `COUNT`, `SUM`, `MIN`, `MAX`, or `GROUP BY` to the source so it returns pre-aggregated results. JDBC connectors such as PostgreSQL support a range of aggregate pushdowns, letting the database do the grouping; the Iceberg connector can answer some aggregates directly from file/partition statistics. When it fires, Trino transfers a handful of aggregated rows instead of millions of raw rows.
+
+</details>
+
+<details><summary><b>23.</b> How do you confirm what actually pushed down to a source?</summary>
+
+Run `EXPLAIN` (or `EXPLAIN ANALYZE`) on the query and read the plan: pushed-down filters appear inside the `TableScan`/connector node (look for a constraint or `filterPredicate` summary on the scan), while work Trino does itself appears as separate `Filter`, `Aggregate`, or `Project` operators above the scan. If a predicate shows up as a standalone `ScanFilter` or `Filter` node rather than being folded into the scan, it did not push down. This is the concrete skill the lesson's "Done when" requires.
+
+</details>
+
+<details><summary><b>24.</b> Why might a `WHERE` predicate fail to push down to Postgres even though the column exists?</summary>
+
+Common reasons: the predicate uses a function or expression the connector cannot translate (e.g. a Trino-specific cast or a function with no SQL equivalent), the column types do not map cleanly, or the predicate involves a value computed from another catalog so it is not known at scan time. The connector only pushes predicates it can faithfully express in the source's dialect; anything else stays in Trino. Rewriting the predicate to a directly translatable form (a plain comparison on the raw column) often restores pushdown.
+
+</details>
+
+<details><summary><b>25.</b> In a join between Postgres reference data and Iceberg NAV facts, which side's predicates can push down?</summary>
+
+Predicates on columns of each table push down to that table's own source independently — filters on the Postgres dimension push to Postgres, filters on the Iceberg facts push to the Iceberg scan. The join condition itself is generally executed in Trino (the cross-store join cannot be pushed to either source), so the goal is to push the per-table filters hard enough that each source returns only the rows the join needs. A `dt` range on the Iceberg side and a `domicile = 'LU'` filter on the Postgres side both shrinking their inputs is the ideal shape.
+
+</details>
+
+<details><summary><b>26.</b> What is a "chatty cross-store join" and why is it an anti-pattern?</summary>
+
+A chatty cross-store join is a federated join where Trino repeatedly issues many small queries to one source for each batch of rows from the other (or pulls a huge unfiltered table across the network), producing high latency and load on the remote system. It is an anti-pattern because the per-round-trip and per-row transfer costs dominate; the work is bounded by network chatter, not by useful computation. The architect's job is to recognize this in a plan and either push filters harder or copy the dimension local.
+
+</details>
+
+<details><summary><b>27.</b> How do you spot a chatty cross-store join in a Trino query plan?</summary>
+
+Look for a `TableScan` on a remote source that has no pushed-down filter and returns a very large estimated/actual row count, feeding a join, plus large `Exchange` nodes moving those rows. In `EXPLAIN ANALYZE` the telltale sign is millions of rows read from a remote catalog with little selectivity, or a dynamic-filter-less scan on the large side. The remedy is more selective pushdown, a dynamic filter, or materializing the small dimension into the same store as the facts.
+
+</details>
+
+<details><summary><b>28.</b> What is a dynamic filter in Trino and how does it help federated joins?</summary>
+
+A dynamic filter is a runtime-generated predicate: Trino first reads the small (build) side of a join, collects the set or range of join-key values, then pushes that as a filter into the scan of the large (probe) side. This can dramatically prune the large Iceberg scan — e.g. only reading NAV rows for the handful of `fund_id`s present in the filtered Postgres dimension. Dynamic filtering is a key reason a well-shaped federated join can beat a naive one without copying data.
+
+</details>
+
+<details><summary><b>29.</b> When does federating beat copying the dimension, and when does copying win?</summary>
+
+Federating wins when the remote dimension is small, changes frequently (you want live values), and your filters/dynamic filters keep transfer tiny — you avoid an ETL hop and always read current data. Copying wins when the join is run often, the remote side is large or slow, predicates do not push down well, or the remote system cannot tolerate the query load — materializing the dimension into Iceberg makes the join local and fast. The lesson's exercise of timing both versions is how you find the crossover for a given workload.
+
+</details>
+
+<details><summary><b>30.</b> A federated join is slow; you suspect the Postgres side. What metrics confirm it?</summary>
+
+In `EXPLAIN ANALYZE`, check the rows and wall time on the Postgres `TableScan` node and whether a filter is folded into it; also watch Postgres-side load (its own `pg_stat_activity`/slow-query log). If Trino is pulling the whole table because the predicate did not push down, you will see a high input-row count and most query time spent in that scan plus its exchange. Fixing pushdown, adding an index on the filtered/join column in Postgres, or copying the dimension are the levers.
+
+</details>
+
+<details><summary><b>31.</b> Why can hammering a transactional Postgres with federated analytic queries be operationally dangerous?</summary>
+
+Trino can issue large, long-running scans that compete with the OLTP workload Postgres exists to serve, causing lock contention, buffer-cache pollution, and latency spikes for the application. In a fund admin context, a month-end analytic burst hitting the live transfer-agency database could degrade the system processing subscriptions and redemptions. Mitigations include reading from a replica, limiting concurrency, and pushing filters so scans stay small.
+
+</details>
+
+<details><summary><b>32.</b> What is Trino's memory model — what are the relevant per-query memory limits?</summary>
+
+Trino tracks memory used by query operators and enforces limits so one query cannot exhaust the cluster. Key settings include `query.max-memory-per-node` (user memory a single query may use on one worker) and `query.max-memory` (total user memory a query may use across all workers). When a query exceeds these limits it fails rather than crashing the JVM, which is how Trino stays stable under memory pressure.
+
+</details>
+
+<details><summary><b>33.</b> Why do big joins and aggregations fail with memory errors in Trino, even on a healthy cluster?</summary>
+
+Joins and `GROUP BY`/`DISTINCT` operations build in-memory hash tables that must hold the build side (or all groups) in RAM, and if that exceeds the per-node or per-query memory limit the query is killed. This is intrinsic to in-memory MPP execution: a join over two huge tables can require more memory than configured. The fix is to enable spill, add memory/workers, increase selectivity so inputs shrink, or restructure the query.
+
+</details>
+
+<details><summary><b>34.</b> What is "spill to disk" in Trino and which operators support it?</summary>
+
+Spilling lets memory-intensive operators write intermediate state to local disk when they exceed their memory budget, then read it back, trading speed for the ability to complete instead of failing. It applies to operators like hash joins, aggregations, order-by/sort, and window functions. You enable it with `spill-enabled=true` and configure `spiller-spill-path` to point at fast local disks (ideally not the OS root volume).
+
+</details>
+
+<details><summary><b>35.</b> A large `GROUP BY` keeps failing with an "exceeded memory limit" error. What are your options in order?</summary>
+
+First confirm what limit was hit from the error message (per-node vs per-query, user vs total). Then: enable spill so the aggregation can overflow to disk; reduce the input via more selective predicates or pre-aggregation; raise `query.max-memory-per-node`/`query.max-memory` if the cluster genuinely has headroom; or add workers to spread the hash table. Spill is the least invasive first move when you cannot shrink the data.
+
+</details>
+
+<details><summary><b>36.</b> What is the cost/limit of relying on spill instead of more memory?</summary>
+
+Spilling writes and re-reads gigabytes from local disk, so it is far slower than in-memory execution and is gated by disk throughput and free space; if the spill volume fills up the query still fails. It keeps queries from dying on memory limits but does not make them fast, so it is a safety valve, not a performance strategy. For repeated heavy workloads the better answer is more memory, more workers, or reshaping the data.
+
+</details>
+
+<details><summary><b>37.</b> What does "decoupled compute" mean concretely with Trino, and why is it valuable?</summary>
+
+Decoupled compute means the query engine (Trino) is entirely separate from where data lives (object storage, Iceberg, Postgres) and from the catalog, so you can scale, restart, or replace the compute layer without touching the data. You can spin Trino up only when month-end reporting runs and shut it down after, paying for compute only when used. It also means the same Iceberg tables can be read by Trino, Spark, or DuckDB — no engine owns the data.
+
+</details>
+
+<details><summary><b>38.</b> What is the relationship between Trino, Starburst, and AWS Athena?</summary>
+
+Trino is the open-source engine; Starburst is a commercial distribution and managed platform built on Trino (Starburst Galaxy/Enterprise) adding connectors, security, and support; AWS Athena (v3) is a serverless managed query service whose engine is based on Trino. So the architecture and SQL you learn on open Trino transfer directly to those managed offerings — they are the "managed Trino-style" options the lesson lists.
+
+</details>
+
+<details><summary><b>39.</b> How does Athena's pricing model differ from running your own Trino cluster, and why does it matter?</summary>
+
+Athena's standard model charges per terabyte of data scanned by each query (with a serverless, no-cluster-to-manage experience), whereas self-hosted Trino charges you for the compute infrastructure you run regardless of bytes scanned. This means Athena rewards aggressive partition pruning and projection (scan-less columns cost nothing) and can be cheaper for sporadic use, while a busy, always-on Trino cluster may be cheaper at high constant utilization. The architect must match the pricing shape to the workload's duty cycle.
+
+</details>
+
+<details><summary><b>40.</b> What does the Trino Iceberg connector let you do that a raw Parquet-on-S3 setup does not?</summary>
+
+The Iceberg connector reads the Iceberg metadata tree, so it gives you ACID snapshots, time travel, schema and partition evolution, hidden partitioning, and transactional `UPDATE`/`DELETE`/`MERGE` — all things plain Parquet files lack. It also exposes Iceberg metadata tables and maintenance procedures for inspection and housekeeping. In short, it turns a pile of files into a versioned, mutable, governed table.
+
+</details>
+
+<details><summary><b>41.</b> How do you time-travel to a specific snapshot ID in Trino's Iceberg connector?</summary>
+
+Use `SELECT ... FROM table FOR VERSION AS OF <snapshot_id>`, for example `SELECT * FROM nav FOR VERSION AS OF 8954597067493422955`. This reads the table exactly as it existed at that committed snapshot, ignoring any later writes. It is how you pin a query to a known-good state, such as the snapshot just before a NAV correction landed.
+
+</details>
+
+<details><summary><b>42.</b> How do you time-travel to a point in time (a timestamp) in Trino's Iceberg connector?</summary>
+
+Use `SELECT ... FROM table FOR TIMESTAMP AS OF TIMESTAMP '2026-06-12 17:00:00.000 Europe/Luxembourg'`. Trino resolves this to the most recent snapshot at or before that timestamp and queries it. This is ideal when you know "as of end of business yesterday" but not the exact snapshot ID.
+
+</details>
+
+<details><summary><b>43.</b> How would you reproduce yesterday's NAV report after a correction landed today, using Trino?</summary>
+
+Identify the snapshot that was current at yesterday's cutoff — either by its ID from the `$snapshots`/`$history` metadata table or by timestamp — then run the report query with `FOR TIMESTAMP AS OF` or `FOR VERSION AS OF` pinned to that snapshot. Because each Iceberg commit is an immutable snapshot, the correction made today does not alter the historical snapshot, so the prior figures reproduce exactly. This auditable reproducibility is a core reason Iceberg fits regulated fund data.
+
+</details>
+
+<details><summary><b>44.</b> Which Iceberg metadata table in Trino lists the table's snapshots, and what does it tell you?</summary>
+
+Querying `"table$snapshots"` returns one row per snapshot with its committed timestamp, snapshot ID, parent snapshot ID, operation type (append/overwrite/delete), and a summary of changed files/rows. You use it to find the snapshot ID or timestamp to time-travel to, and to see the commit history of the table. It is the starting point for "what changed and when."
+
+</details>
+
+<details><summary><b>45.</b> What does the `"table$files"` metadata table expose in Trino's Iceberg connector?</summary>
+
+It lists the data files in the current snapshot with details like file path, format, record count, file size, and per-column value counts and bounds (min/max). Reading it lets you diagnose file-count and file-size problems — for example discovering thousands of tiny files that need compaction. This is the "debug why is this table slow/huge from the manifests alone" skill applied through Trino.
+
+</details>
+
+<details><summary><b>46.</b> What does `"table$manifests"` show and why might you read it?</summary>
+
+It describes the manifest files referenced by the current snapshot, including each manifest's path, length, partition summaries, and added/existing/deleted data-file counts. You read it to understand how the metadata is organized and to spot manifest bloat — too many manifests slows planning. It is a layer above `$files` in the metadata tree.
+
+</details>
+
+<details><summary><b>47.</b> What does `"table$partitions"` give you?</summary>
+
+It summarizes the table per partition: record counts, file counts, and size per partition value, plus column bounds. For a NAV table partitioned by date, it tells you how rows and files are distributed across `dt`, which is invaluable for spotting skew or partitions with too many small files. It is the quickest way to sanity-check that partitioning is doing what you intended.
+
+</details>
+
+<details><summary><b>48.</b> What does the `optimize` procedure do in Trino's Iceberg connector and when do you run it?</summary>
+
+`ALTER TABLE ... EXECUTE optimize` rewrites small data files into larger ones (by default merging files under roughly 100 MB) per partition, improving read performance by reducing file count and metadata overhead. You run it after many small incremental writes — for example frequent NAV corrections or streaming-style appends that produce a small-file problem. You can target specific partitions with a `WHERE` clause to limit the rewrite scope.
+
+</details>
+
+<details><summary><b>49.</b> What does `expire_snapshots` do, and what is the safety implication?</summary>
+
+`ALTER TABLE ... EXECUTE expire_snapshots` removes old snapshots and the data/metadata files they exclusively reference, reclaiming storage. The safety implication is that once a snapshot is expired you can no longer time-travel to it, so you must keep enough retention for your audit and reproducibility requirements — the default minimum retention is 7 days. In a regulated fund context, set retention to satisfy the longest "reproduce the report" obligation before expiring.
+
+</details>
+
+<details><summary><b>50.</b> What does `remove_orphan_files` do and why is it separate from `expire_snapshots`?</summary>
+
+`remove_orphan_files` deletes files in the table's storage location that are no longer referenced by any table metadata — for example leftovers from failed writes — older than a retention threshold. It is separate because orphans are not tracked by snapshots at all, so expiring snapshots cannot find them; this procedure scans the storage directory directly. Run it cautiously, since an aggressively short retention could delete files from an in-flight write.
+
+</details>
+
+<details><summary><b>51.</b> How do you evolve an Iceberg table's schema from Trino, and what stays unchanged for readers?</summary>
+
+You run standard DDL like `ALTER TABLE nav ADD COLUMN currency varchar`, and Iceberg records the change as metadata without rewriting existing data files. Existing queries keep working because Iceberg tracks columns by stable field IDs, so old files simply return null for the new column. This is why "add a column" does not break downstream consumers — a key Iceberg guarantee surfaced through Trino.
+
+</details>
+
+<details><summary><b>52.</b> What is hidden partitioning and how does it change how you write Iceberg queries in Trino?</summary>
+
+Hidden partitioning means Iceberg derives partition values from a transform on a column (e.g. `day(nav_date)`) and stores them in metadata, so you query on the natural column and Iceberg prunes partitions automatically. You write `WHERE nav_date = DATE '2026-06-12'` rather than filtering on a separate physical partition column. This avoids the classic mistake of forgetting to filter the partition column and accidentally scanning everything.
+
+</details>
+
+<details><summary><b>53.</b> What is partition evolution and why does it matter operationally?</summary>
+
+Partition evolution lets you change a table's partitioning scheme (e.g. from monthly to daily) going forward without rewriting historical data, because Iceberg records which spec each data file was written under. Old files keep their old partitioning, new files use the new one, and queries still work across both. Operationally it means you can fix a poor partition choice without a massive rewrite — though you may still optimize old data later.
+
+</details>
+
+<details><summary><b>54.</b> Which Iceberg catalog types does the Trino connector support, set via which property?</summary>
+
+The connector supports Hive Metastore (default), AWS Glue, JDBC, REST, Nessie, and Snowflake catalogs, selected with `iceberg.catalog.type`. For the capstone you move from a Hive-style metastore to a REST catalog (Lakekeeper or Polaris) by setting `iceberg.catalog.type=rest` plus the REST endpoint URI. The data files and Parquet format do not change — only the catalog pointer does.
+
+</details>
+
+<details><summary><b>55.</b> After swapping Trino's Iceberg catalog from Hive to REST, the same tables must resolve. What changed and what didn't?</summary>
+
+What changed is the catalog configuration — `iceberg.catalog.type` and the catalog endpoint/URI Trino consults to find table pointers and current snapshots. What did not change is the actual data: the Parquet data files, the Iceberg metadata/manifest files in MinIO, and the table format itself. That clean separation — engine and catalog swappable, data untouched — is precisely why open formats plus an open catalog de-risk lock-in.
+
+</details>
+
+<details><summary><b>56.</b> What is credential vending and how does it relate to Trino reading Iceberg via a REST catalog?</summary>
+
+Credential vending is the catalog brokering short-lived, scoped storage credentials to the engine so Trino can read/write only the specific table's files in object storage, rather than holding broad static keys. With a REST catalog like Polaris, Trino asks the catalog for a table and receives both the metadata pointer and temporary credentials to access its files. This centralizes governance — the catalog decides who can touch which regulated data, which is a control a fund administrator needs.
+
+</details>
+
+<details><summary><b>57.</b> What is the cost-based optimizer (CBO) in Trino and what does it use to make decisions?</summary>
+
+The CBO chooses an efficient query plan — particularly join order and join distribution type — using table and column statistics such as row counts, distinct-value counts, null fractions, and min/max ranges. With good stats it can put the smaller table on the build side of a join and pick broadcast vs partitioned joins wisely. Without stats it falls back to heuristics and can pick a poor plan that, for example, broadcasts a huge table.
+
+</details>
+
+<details><summary><b>58.</b> Why are missing or stale statistics a common cause of a bad Trino plan?</summary>
+
+The CBO relies on stats to estimate intermediate sizes; if they are missing or stale, it may misjudge which side of a join is smaller and choose the wrong join distribution or order, leading to giant broadcasts or shuffles. For Iceberg you can collect stats with `ANALYZE`, and for JDBC sources the connector may read the database's own statistics. When a plan looks wrong, checking and refreshing statistics is an early diagnostic step.
+
+</details>
+
+<details><summary><b>59.</b> What is the difference between a broadcast join and a partitioned (hash) join in Trino?</summary>
+
+In a broadcast join the small (build) table is replicated in full to every worker, so each worker can join its slice of the large table locally with no shuffle of the large side — great when one side is genuinely small. In a partitioned join both sides are hash-redistributed by join key across workers via exchanges, which is necessary when both sides are large. Choosing wrongly — broadcasting a big table — blows up memory and network, which is why the CBO's size estimates matter.
+
+</details>
+
+<details><summary><b>60.</b> How do you read a Trino `EXPLAIN` plan to find the most expensive operation?</summary>
+
+Read the plan as a tree from the leaves (TableScans) upward, noting estimated rows and CPU/memory at each operator; the operators with the largest row counts and the big exchanges are usually the hotspots. With `EXPLAIN ANALYZE` you also get actual rows, wall time, and CPU per operator, so you can see where real time was spent. Watch especially for unfiltered remote scans, large hash joins, and big partitioned exchanges.
+
+</details>
+
+<details><summary><b>61.</b> What is the difference between `EXPLAIN` and `EXPLAIN ANALYZE`?</summary>
+
+`EXPLAIN` shows the planned query — the operator tree and the optimizer's estimates — without running the query. `EXPLAIN ANALYZE` actually executes the query and annotates the plan with real runtime metrics (actual rows, time, CPU, memory per stage/operator). Use `EXPLAIN` to check pushdown and join strategy cheaply; use `EXPLAIN ANALYZE` when you need to know where real time went, accepting that it runs the query.
+
+</details>
+
+<details><summary><b>62.</b> You run `EXPLAIN` and see a filter as a separate `ScanFilterProject`/`Filter` node above a Postgres scan. What does that tell you?</summary>
+
+It tells you the predicate did not push down into Postgres — Trino is fetching rows and filtering them itself, which for a large table means heavy network transfer. The fix is to make the predicate translatable (plain column comparison, matching types) or to add the filter in a form the connector accepts, and re-check `EXPLAIN` for the predicate folded into the scan. This is the exact diagnostic the lesson's "confirm it with EXPLAIN" outcome asks for.
+
+</details>
+
+<details><summary><b>63.</b> How does Trino's `EXPLAIN (TYPE DISTRIBUTED)` help compared with the default logical plan?</summary>
+
+`EXPLAIN (TYPE DISTRIBUTED)` shows the plan split into stages and fragments with the exchange types between them, revealing how work is distributed and where data is shuffled or broadcast across the cluster. The default `EXPLAIN` (logical) shows operators but not the stage/exchange boundaries. For diagnosing a chatty or shuffle-heavy federated query, the distributed plan makes the data-movement structure explicit.
+
+</details>
+
+<details><summary><b>64.</b> A federated query works in dev but times out at month-end with concurrency. What cluster-level cause should you suspect?</summary>
+
+Suspect resource contention: many concurrent queries competing for worker memory and CPU, possibly hitting the concurrent-query limit or the cluster memory pool, so queries queue or fail. Trino's resource groups let you cap concurrency and memory per workload class so an analytics burst does not starve everything. Also check whether each query is well-pushed-down — chatty queries amplify the problem under concurrency.
+
+</details>
+
+<details><summary><b>65.</b> What are resource groups in Trino and why would a fund admin use them?</summary>
+
+Resource groups partition cluster capacity into named pools with limits on concurrent queries, queued queries, and memory, optionally with scheduling weights and selectors that route queries by user/source. A fund admin would use them to isolate, say, scheduled regulatory-reporting jobs from ad-hoc analyst queries so neither can monopolize the cluster at month-end. They turn "everyone shares one cluster" into a governed, prioritized arrangement.
+
+</details>
+
+<details><summary><b>66.</b> Why is Trino described as the "practical face of decoupled compute" for a lakehouse?</summary>
+
+Because it sits as an interchangeable compute layer over open storage (object store), an open table format (Iceberg), and an open catalog, querying them with standard SQL — and it can be added or removed without migrating data. You prove the decoupling concretely: the same Iceberg tables that Trino reads can also be read by DuckDB or Spark, and you can swap the catalog underneath without touching files. It makes the abstract lakehouse promise tangible in one stack.
+
+</details>
+
+<details><summary><b>67.</b> In a single Trino statement, how do you join Postgres reference data to Iceberg NAV history?</summary>
+
+Reference each table by its fully qualified `catalog.schema.table` name and write an ordinary join, e.g. `SELECT r.fund_name, n.nav FROM postgres.public.fund_ref r JOIN iceberg.funds.nav_history n ON r.isin = n.isin WHERE n.dt = DATE '2026-06-12'`. Trino's coordinator plans a federated query that scans each source through its connector and performs the join in the engine. The filter on `n.dt` should push into the Iceberg scan, and `r.isin` becomes a dynamic filter into the NAV scan if the optimizer chooses it.
+
+</details>
+
+<details><summary><b>68.</b> Why is "no ETL hop" a meaningful advantage for joining live transfer-agency data to historical NAV?</summary>
+
+Because you read the transfer-agency reference data live from Postgres at query time rather than running a nightly batch to copy it into the lake, so the join always reflects the current account/holder/share-class state. This removes a pipeline to build, schedule, monitor, and reconcile, and eliminates the staleness window between the source change and the copy. The tradeoff is the live-query load on Postgres, which you manage with pushdown, replicas, and concurrency limits.
+
+</details>
+
+<details><summary><b>69.</b> What is an ISIN, and how is it typically used as a join key across Trino catalogs?</summary>
+
+An ISIN (ISO 6166) is a 12-character International Securities Identification Number that uniquely identifies a security/share class, structured as a 2-letter country code, a 9-character national security identifier, and a final check digit. In a federated query it is the natural join key linking instrument-level reference data in Postgres to NAV facts in Iceberg. The gotcha is treating it as eternally stable — corporate actions can change an ISIN, so a robust security master also carries an internal surrogate key.
+
+</details>
+
+<details><summary><b>70.</b> What is NAV and why is reproducibility of NAV history a driver for using Iceberg under Trino?</summary>
+
+NAV (Net Asset Value) is the per-share value of a fund, the central figure a fund administrator computes and publishes daily. Reproducibility matters because corrections happen, and auditors ask "what NAV did we publish yesterday and can you reproduce it?" — Iceberg snapshots plus Trino time travel answer that precisely. You pin the report to the snapshot that was current at publication, immune to later corrections.
+
+</details>
+
+<details><summary><b>71.</b> How would Trino help validate or assemble an EMT (European MiFID Template) output?</summary>
+
+Trino can federate live target-market and costs reference data in Postgres against historical fund facts in Iceberg to assemble the EMT-shaped columns in one query, and you can `EXPLAIN` it to ensure the joins are efficient. It is a read/transform engine, so it is well suited to producing the EMT data product and to spot-checking which upstream attributes are populated. Missing upstream attributes (e.g. a half-populated costs block) surface as nulls in the federated result before distribution.
+
+</details>
+
+<details><summary><b>72.</b> A federated query that builds an EMT extract returns nulls in the costs block. Is that a Trino bug? How do you check?</summary>
+
+Almost certainly not a Trino bug — nulls usually mean the upstream attributes are genuinely missing or the join did not match. Check by querying the source tables directly through their catalogs to confirm whether the costs data exists and whether the join keys (e.g. ISIN, share class) line up, and verify no predicate is silently filtering rows. Trino is faithfully reporting the data; the gap is in the upstream completeness the EMT requires.
+
+</details>
+
+<details><summary><b>73.</b> What is an LEI and could you federate GLEIF LEI data with fund facts in Trino?</summary>
+
+An LEI (Legal Entity Identifier, ISO 17442) is a 20-character code identifying a legal entity such as a fund's management company, maintained in the GLEIF registry. Yes — you can load the GLEIF golden copy into Iceberg bronze and federate it, or keep it in Postgres, then join it by LEI to fund/entity records in another catalog. Trino lets you enrich fund facts with entity reference data across stores in one statement.
+
+</details>
+
+<details><summary><b>74.</b> Why might you prefer copying a slowly changing reference dimension (e.g. a country code list) into Iceberg rather than federating it every query?</summary>
+
+A tiny, rarely changing lookup is cheap to materialize once into Iceberg, after which every join is local, fast, and immune to the remote source's availability or load. Federating it on every query adds a remote round-trip and a dependency on the source being up, for data that almost never changes. The crossover favors copying when the dimension is small and stable and the join is frequent.
+
+</details>
+
+<details><summary><b>75.</b> How do you add Trino to a Docker Compose stack alongside Postgres and Iceberg?</summary>
+
+Add a `trinodb/trino` service, mount catalog property files (e.g. `iceberg.properties`, `postgresql.properties`) into the container's `etc/catalog/` directory, expose port `8080`, and put it on the same Compose network as the Postgres and MinIO/metastore services. Each catalog file names its connector and connection details so Trino discovers both sources on startup. You then connect with the Trino CLI or a JDBC client to run federated queries.
+
+</details>
+
+<details><summary><b>76.</b> What port does Trino's coordinator and Web UI listen on by default?</summary>
+
+By default the Trino coordinator's HTTP server, which also serves the Web UI and the client API, listens on port `8080`, configurable via `http-server.http.port`. The CLI and JDBC clients connect to that same endpoint, e.g. `--server localhost:8080`. In Compose you publish `8080` to reach both the UI and the query API.
+
+</details>
+
+<details><summary><b>77.</b> What can you learn from the Trino Web UI when diagnosing a slow query?</summary>
+
+The Web UI lists running and completed queries with their state, elapsed time, and per-stage details including rows processed, CPU time, memory, and the operator breakdown. You use it to find which stage is the bottleneck, whether a query is blocked or spilling, and how splits are distributed across workers. It is the live counterpart to `EXPLAIN ANALYZE` for queries already in flight.
+
+</details>
+
+<details><summary><b>78.</b> How do you connect to Trino with the CLI and run a quick federation test?</summary>
+
+Use the Trino CLI: `trino --server localhost:8080 --catalog iceberg --schema funds`, then run a statement joining across catalogs, e.g. selecting from `iceberg.funds.nav_history` joined to `postgres.public.fund_ref`. The default catalog/schema just set the unqualified-name context; you can always fully qualify names to reach any catalog. This is the fastest way to confirm both connectors resolve their tables.
+
+</details>
+
+<details><summary><b>79.</b> What does it mean that Trino "has no storage of its own," and how does that shape architecture decisions?</summary>
+
+It means Trino persists no user data — all tables live in external systems reached through connectors — so it is purely a compute/query tier you can stop and start freely. Architecturally this pushes durability, format, and catalog decisions out to MinIO/Iceberg/Postgres, and makes Trino a swappable component rather than a lock-in point. You design storage and catalog for permanence and treat the engine as ephemeral capacity.
+
+</details>
+
+<details><summary><b>80.</b> How does Trino achieve parallelism within a single query?</summary>
+
+It splits each source's data into many splits, runs multiple tasks (one stage's work per worker) across all workers, and within each task runs multiple drivers across CPU cores. So parallelism comes from three nested levels: tasks across nodes, drivers across cores, and splits as the divisible unit of input. More workers and well-sized splits increase the achievable parallelism.
+
+</details>
+
+<details><summary><b>81.</b> A query is slow and the Web UI shows almost all time in one stage with very few splits. What is the likely cause?</summary>
+
+Low parallelism — the connector produced too few splits, so only a handful of tasks/drivers do the work while other workers sit idle. This often happens with a small number of large files or a source that does not split well; the fix is to write more, appropriately sized files (or compact tiny ones into right-sized ones), or use a connector/format that splits better. Adding workers will not help if there are not enough splits to keep them busy.
+
+</details>
+
+<details><summary><b>82.</b> Why can a single huge Parquet/Iceberg data file hurt Trino parallelism?</summary>
+
+If a file cannot be split into multiple ranges, the whole file may be read by one task, so one worker does all that work while others idle, capping parallelism for that portion of the scan. Iceberg/Parquet readers can often split within a file by row group, but very large files with few row groups still limit concurrency. This is why right-sizing files (via `optimize`) matters for read performance, not just storage.
+
+</details>
+
+<details><summary><b>83.</b> How is Trino different from a traditional MPP data warehouse like Teradata or Vertica?</summary>
+
+Traditional MPP warehouses tightly couple their proprietary storage and compute and ingest data into their own format, optimizing within that closed system. Trino separates compute entirely from storage, querying open formats and external databases in place without owning the data, and federates across heterogeneous sources. The tradeoff: warehouses often win on tightly integrated concurrency and indexing, while Trino wins on openness, federation, and storage/compute decoupling.
+
+</details>
+
+<details><summary><b>84.</b> What does the warehouse "still do better" than a federated engine like Trino, per the lakehouse argument?</summary>
+
+A mature warehouse typically offers higher sustained concurrency, finer-grained security (row/column-level controls), richer indexing/clustering, and smoother ergonomics for many simultaneous BI users. Trino is excellent for federation and ad-hoc analytics over open data but can lag a tuned warehouse on these dimensions. The architect blends them — lakehouse with Trino for the open core, a warehouse where concurrency and fine-grained security demand it.
+
+</details>
+
+<details><summary><b>85.</b> When is federation simply the wrong tool, and what do you do instead?</summary>
+
+Federation is wrong when the join is run constantly, both sides are large, predicates do not push down, or the remote OLTP system cannot bear the load — the chatty cross-store pattern. In those cases you materialize the data into the lake (ingest the dimension into Iceberg via a batch ELT or Airbyte sync) so the join becomes a single-store, well-optimized query. Federation shines for occasional, well-filtered joins against live data, not for hot, heavy, repeated joins.
+
+</details>
+
+<details><summary><b>86.</b> What is the role of `ANALYZE` in Trino and when should you run it?</summary>
+
+`ANALYZE table` collects table and column statistics (row counts, distinct values, null fractions, ranges) that the CBO uses to plan joins and distributions well. You run it after significant data changes to an Iceberg table, or when `EXPLAIN` shows wildly wrong row estimates leading to poor join choices. Up-to-date stats are what let the optimizer pick the right build side and avoid broadcasting large tables.
+
+</details>
+
+<details><summary><b>87.</b> How do you target a single partition when running `optimize` to avoid rewriting the whole table?</summary>
+
+Add a `WHERE` clause that constrains the partition column, e.g. `ALTER TABLE nav EXECUTE optimize WHERE dt = DATE '2026-06-12'`, so only that partition's small files are rewritten. This limits I/O and runtime, which matters on a large historical NAV table where rewriting everything would be expensive. Scoping maintenance to recently written partitions is the usual operational pattern.
+
+</details>
+
+<details><summary><b>88.</b> A daily NAV-correction job produces thousands of tiny Iceberg files. What is the symptom in Trino and the fix?</summary>
+
+The symptom is slow scans and slow query planning because Trino must open and read metadata for thousands of files (high per-file overhead and bloated manifests). The fix is to run `ALTER TABLE ... EXECUTE optimize` to compact the small files into right-sized ones, optionally scoped to recent partitions, and periodically rewrite manifests. You can confirm the small-file problem first by querying `"table$files"` or `"table$partitions"`.
+
+</details>
+
+<details><summary><b>89.</b> Why does Trino fail a query rather than swap or thrash when it runs out of memory?</summary>
+
+Trino enforces explicit memory limits and proactively kills a query that exceeds them, choosing predictable failure of one query over an unpredictable, cluster-wide degradation or OOM crash. This protects other concurrent queries and overall cluster stability. The tradeoff for the user is an "exceeded memory limit" error, which you then address with spill, more memory/workers, or a more selective query.
+
+</details>
+
+<details><summary><b>90.</b> What is the practical difference between user memory and system/total memory limits in Trino?</summary>
+
+User memory is the memory consumed by operators directly attributable to query logic (hash tables, aggregation state), bounded by limits like `query.max-memory-per-node`; total memory additionally includes system overhead such as buffers used by exchanges and readers. A query can be killed for exceeding either, and the error message indicates which limit was hit. Knowing which one tripped tells you whether to shrink your join/aggregation (user) or reduce concurrency/buffering pressure (system).
+
+</details>
+
+<details><summary><b>91.</b> How do you decide between adding workers and adding memory per worker for a memory-bound Trino workload?</summary>
+
+Adding workers spreads partitioned joins/aggregations across more nodes, lowering per-node memory pressure and increasing parallelism — best when work partitions well. Adding memory per worker helps when a single operator's state (e.g. a broadcast build side) must fit on one node regardless of parallelism. Diagnose from the plan: if one node holds a broadcast table, more memory; if partitioned exchanges are saturating nodes, more workers.
+
+</details>
+
+<details><summary><b>92.</b> Why might `EXPLAIN ANALYZE` itself be undesirable in production for a heavy query?</summary>
+
+Because `EXPLAIN ANALYZE` actually executes the query to gather real metrics, so running it on an already-slow or resource-heavy query incurs that full cost and load, potentially affecting other users. For planning checks that do not require runtime numbers, plain `EXPLAIN` is free of execution cost. Reserve `EXPLAIN ANALYZE` for when you genuinely need actual rows/time and can afford the run.
+
+</details>
+
+<details><summary><b>93.</b> What is the danger of running federated analytic queries against the production transfer-agency Postgres at month-end specifically?</summary>
+
+Month-end is exactly when the transfer-agency system is busiest processing subscriptions, redemptions, and reconciliations, so heavy Trino scans then compound contention and can slow or stall operational processing. The architect mitigates by reading from a read replica, scheduling heavy federation off-peak, or materializing the needed reference data into the lake beforehand. The lesson is that federation's "live data" benefit carries an operational-load cost that peaks at the worst time.
+
+</details>
+
+<details><summary><b>94.</b> How do branches and tags in Iceberg interact with Trino time travel?</summary>
+
+Iceberg supports named references — branches and tags pointing at specific snapshots — and Trino can query them, for example `FOR VERSION AS OF 'eom-2026-05'` against a tag. Tags give you stable, human-meaningful pointers to important snapshots (like a month-end close) so you do not need to remember raw snapshot IDs. This is convenient for reproducing regulatory reports tied to known business cut-offs.
+
+</details>
+
+<details><summary><b>95.</b> What does it mean that Trino executes queries "in memory" and streams between stages, and what is the consequence?</summary>
+
+Trino is a pipelined, in-memory engine: operators stream pages to downstream operators and across stages via exchanges rather than materializing full intermediate results to disk by default. The consequence is low latency for interactive queries, but it also means very large intermediates must fit in memory unless spill is enabled — hence memory-limit failures on big joins. Spill is the opt-in escape hatch when an intermediate genuinely cannot fit.
+
+</details>
+
+<details><summary><b>96.</b> How do you simulate a late-arriving holding in an Iceberg NAV/holdings table from Trino, and what command fits best?</summary>
+
+Use `MERGE INTO holdings AS t USING staged AS s ON t.isin = s.isin AND t.dt = s.dt WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...`, which upserts the late row in one transactional statement. Trino's Iceberg connector supports `MERGE`, `UPDATE`, and `DELETE` because Iceberg provides the ACID metadata layer underneath. Each such write creates a new snapshot, so the late arrival is fully auditable and you can still time-travel to the state before it landed.
+
+</details>
+
+<details><summary><b>97.</b> What is the difference between copy-on-write and merge-on-read for an Iceberg table, and why does it matter when Trino reads it?</summary>
+
+Copy-on-write (COW) rewrites whole data files on `UPDATE`/`DELETE`, making writes more expensive but reads fast because there are no delete files to reconcile. Merge-on-read (MOR) writes lightweight delete files instead, making writes cheap but reads slower because Trino must apply the delete files at scan time. For a NAV table with frequent corrections you trade write cost against read latency; if MOR reads feel slow, running `optimize` compacts away the delete files and restores read speed.
+
+</details>
+
+<details><summary><b>98.</b> When configuring the Trino Iceberg connector against a Nessie catalog, what makes Nessie distinctive?</summary>
+
+Nessie is a Git-like catalog that adds branching, tagging, and commits across tables, so you can isolate changes on a branch and merge them, not just time-travel within one table. You select it with `iceberg.catalog.type=nessie` plus the Nessie endpoint, and Trino then resolves tables through Nessie's versioned references. It is useful for staging a multi-table change (e.g. a coordinated reference-data update) before exposing it to consumers.
+
+</details>
+
+<details><summary><b>99.</b> A SWIFT MT535 holdings statement feeds a transfer-agency table you want to join to Iceberg NAV in Trino. What identifier and pushdown concerns arise?</summary>
+
+MT535 statements carry instrument identifiers (typically ISIN) and account/safekeeping references that become the join keys to the NAV facts, so the join key quality and consistency drive whether rows match. For performance, ensure the date and ISIN predicates push into the Iceberg scan and the transfer-agency Postgres side respectively, so neither store ships unfiltered rows. The architect must also watch for lossy mapping — an MT535 may carry coarser data than your richer model, producing nulls that are a source-format limitation, not a Trino fault.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the architect's checklist for keeping a federated Trino join healthy.</summary>
+
+Confirm predicates push down to each source with `EXPLAIN`; ensure the small side is filtered and used as the build/dynamic-filter side; keep statistics fresh so the CBO picks the right join strategy; watch for chatty unfiltered remote scans and either fix pushdown or materialize the dimension; and protect the cluster and source systems with resource groups, replicas, and off-peak scheduling. Above all, know when federation is the wrong tool and copy the data instead. These map directly to the lesson's three "Done when" outcomes.
+
+</details>
+
+
+## Phase 2 · 4.3.3 Embedded analytical engines (DuckDB) — 100 self-test questions
+
+<details><summary><b>1.</b> What does it mean that DuckDB is an "in-process" (embedded) database engine?</summary>
+
+It means DuckDB runs as a library linked directly into your application's process rather than as a separate server you connect to over a socket. There is no DBMS server software to install, start, or maintain, and queries execute inside your process so data moves to and from the engine without inter-process serialization. The classic analogy is "SQLite for analytics" — you `import duckdb` (or link the C/C++ library) and a full columnar OLAP engine is running inside your program.
+
+</details>
+
+<details><summary><b>2.</b> Name two practical consequences of DuckDB being embedded rather than client/server.</summary>
+
+First, there is no network round-trip or server to provision, so query results land directly in your process memory — for example a DuckDB query can return straight into a pandas or Polars DataFrame with zero copy via Arrow. Second, the database file's read-write access is owned by exactly one process at a time, because there is no central server to arbitrate concurrent connections from many clients.
+
+</details>
+
+<details><summary><b>3.</b> How do you start an in-memory DuckDB database in Python, and what happens to the data on exit?</summary>
+
+You call `duckdb.connect()` with no path, or `duckdb.connect(':memory:')`, which creates a transient database that lives only in RAM. All tables and data are discarded when the connection closes or the process exits — nothing is persisted to disk. To persist, you instead pass a file path like `duckdb.connect('fund.duckdb')`, which creates or opens a single-file on-disk database.
+
+</details>
+
+<details><summary><b>4.</b> What is the "single-file database" storage model in DuckDB?</summary>
+
+A persistent DuckDB database is stored as one self-contained file (commonly `.duckdb` or `.db`) that holds all tables, indexes, and metadata in DuckDB's own columnar storage format. This makes a database trivial to copy, back up, or ship — you move one file. It contrasts with a directory-of-files lake format; the single file is DuckDB's native managed storage.
+
+</details>
+
+<details><summary><b>5.</b> Why is DuckDB often described as "the architect's pocket warehouse"?</summary>
+
+Because it gives you a real analytical (OLAP) engine — columnar storage, vectorized execution, full SQL — with zero infrastructure, so it fits local development, fast testing, and genuinely useful mid-size production marts that run on a single node. Knowing where that envelope holds sharpens every "do we actually need a cluster?" decision. For a fund administrator whose marts fit comfortably on one machine, "no cluster" can be the cheapest, most maintainable architecture.
+
+</details>
+
+<details><summary><b>6.</b> What is a "columnar-vectorized" query execution engine?</summary>
+
+Columnar means data is stored and processed one column at a time rather than row by row, which is ideal for analytics that scan a few columns across many rows. Vectorized means the engine processes a batch (a "vector") of values per operation instead of one value at a time, amortizing interpreter overhead and using CPU caches and SIMD efficiently. Together they make aggregations and scans over large tables far faster than a row-store like a traditional OLTP database.
+
+</details>
+
+<details><summary><b>7.</b> Why does columnar storage help a query like `SELECT avg(nav) FROM holdings`?</summary>
+
+Because only the `nav` column needs to be read from storage; a columnar engine skips every other column entirely, reducing I/O dramatically. In a row store the whole row (ISIN, currency, quantity, etc.) is read even though you only want one field. This column pruning is a core reason DuckDB is fast for analytical scans over wide fund tables.
+
+</details>
+
+<details><summary><b>8.</b> What transactional guarantees does DuckDB provide?</summary>
+
+DuckDB provides full ACID guarantees (Atomicity, Consistency, Isolation, Durability) through a custom, bulk-optimized Multi-Version Concurrency Control (MVCC) implementation. This means a failed bulk load rolls back cleanly and concurrent readers see a consistent snapshot. ACID compliance is what makes it safe to use as a real warehouse rather than just a query tool over files.
+
+</details>
+
+<details><summary><b>9.</b> What is "out-of-core" execution and why does it matter for DuckDB?</summary>
+
+Out-of-core execution is the ability to run a query whose working set is larger than available RAM by spilling intermediate data to disk instead of failing with an out-of-memory error. It matters because it lets DuckDB process datasets bigger than the machine's memory on a single node, extending the "no cluster" envelope. For example, sorting or hash-aggregating a holdings table larger than RAM still completes, just more slowly.
+
+</details>
+
+<details><summary><b>10.</b> Which DuckDB operators can spill to disk to support larger-than-RAM queries?</summary>
+
+The memory-intensive blocking operators can spill: large hash-table aggregations (group-by with many distinct groups), hash joins on large tables, sorts (ORDER BY) on larger-than-memory data, and window functions over large datasets. These operators build big intermediate structures, so when memory runs short they write partitions to the temp directory and stream them back. Simple streaming scans and filters rarely need to spill.
+
+</details>
+
+<details><summary><b>11.</b> What is the `memory_limit` setting and what is its default?</summary>
+
+`memory_limit` caps how much memory DuckDB's buffer manager will use before it starts spilling to disk. By default it is set to 80% of the machine's physical RAM (for example, on a 16 GB machine it defaults to about 12.8 GB). You change it with a statement like `SET memory_limit = '4GB';`, which is useful to leave headroom for other processes on a shared box.
+
+</details>
+
+<details><summary><b>12.</b> What does the `temp_directory` setting control, and where does it default?</summary>
+
+`temp_directory` is the on-disk location where DuckDB writes spill files when intermediate data exceeds `memory_limit`. For a persistent database it defaults to a directory alongside the database file (a `.tmp` path derived from the database name), and for an in-memory database it defaults to a `.tmp` directory in the working directory. Pointing it at a fast local SSD with plenty of free space is what makes out-of-core queries practical.
+
+</details>
+
+<details><summary><b>13.</b> What is `max_temp_directory_size` and why might you tune it?</summary>
+
+`max_temp_directory_size` caps how much data DuckDB may write to the spill (temp) directory; it defaults to 90% of the remaining free disk space on that volume. You tune it down to protect a shared disk from being filled by a runaway spilling query, or up (with caution) on a dedicated scratch disk. If a query needs more spill than this limit allows, it fails rather than filling the disk.
+
+</details>
+
+<details><summary><b>14.</b> When does DuckDB report an out-of-memory error despite supporting spilling?</summary>
+
+It reports an out-of-memory error and cancels the query when the memory limit is breached and spilling cannot save it — for example the `temp_directory` is disabled/unwritable, the `max_temp_directory_size` is exceeded, or the operator in question cannot spill. So an OOM in DuckDB usually means "spilling was blocked," which is why the first troubleshooting step is to check that a writable temp directory with free space is configured.
+
+</details>
+
+<details><summary><b>15.</b> A larger-than-RAM aggregation fails with an out-of-memory error on a fresh DuckDB. What is the first thing to check?</summary>
+
+Check that `temp_directory` is set to a writable location with enough free disk space, because without a usable spill directory the spilling operators have nowhere to offload and will OOM. Run `SET temp_directory = '/data/duckdb_tmp';` pointing at a fast SSD volume, and confirm `max_temp_directory_size` is not throttling it. Then re-run — the query should now spill and complete instead of failing.
+
+</details>
+
+<details><summary><b>16.</b> How can you read a Parquet file in DuckDB without first loading it into a table?</summary>
+
+You query it directly as if it were a table using `read_parquet('file.parquet')`, for example `SELECT * FROM read_parquet('holdings.parquet');`. DuckDB also lets you skip the function when the path ends in `.parquet`, so `SELECT * FROM 'holdings.parquet'` works too. No import/copy step is needed — DuckDB scans the file in place.
+
+</details>
+
+<details><summary><b>17.</b> What is `parquet_scan` and how does it relate to `read_parquet`?</summary>
+
+`parquet_scan` is simply an alias for `read_parquet`; both are the table-producing functions that scan one or more Parquet files. You can use either name interchangeably, e.g. `SELECT * FROM parquet_scan('nav.parquet')`. The `read_parquet` form is the more commonly documented spelling.
+
+</details>
+
+<details><summary><b>18.</b> How do you read many Parquet files at once in DuckDB?</summary>
+
+You can pass a glob pattern, e.g. `SELECT * FROM read_parquet('nav/*.parquet')`, or pass an explicit list, e.g. `read_parquet(['2026-01.parquet','2026-02.parquet'])`. DuckDB reads all matching files as a single logical table. This is ideal for date-partitioned NAV exports landed as many files in object storage.
+
+</details>
+
+<details><summary><b>19.</b> What does the `hive_partitioning` option do when reading Parquet?</summary>
+
+It tells DuckDB to interpret directory names of the form `key=value` (Hive-style partitioning) as additional columns, e.g. a path `…/fund=LU1234567890/date=2026-06-13/part.parquet` yields `fund` and `date` columns. This lets you filter on partition columns in SQL and have DuckDB prune unneeded directories. You enable it with `read_parquet('path/**/*.parquet', hive_partitioning = true)`.
+
+</details>
+
+<details><summary><b>20.</b> What problem does the `union_by_name` option solve when scanning multiple Parquet files?</summary>
+
+`union_by_name = true` matches columns across files by name rather than by position, so files with slightly different schemas (extra or reordered columns) are unioned correctly, filling missing columns with NULL. Without it, DuckDB assumes all files share the same column order and a schema drift causes wrong alignment or an error. It is invaluable when EMT/EPT-style exports evolve their column set over time.
+
+</details>
+
+<details><summary><b>21.</b> How do you inspect a Parquet file's schema and metadata from DuckDB?</summary>
+
+Use the metadata functions: `parquet_schema('file.parquet')` returns the column types and structure, `parquet_metadata('file.parquet')` returns row-group and column statistics, `parquet_file_metadata('file.parquet')` returns file-level metadata, and `parquet_kv_metadata('file.parquet')` returns custom key-value pairs. For example `SELECT * FROM parquet_schema('holdings.parquet');` shows the logical and physical types without reading the data.
+
+</details>
+
+<details><summary><b>22.</b> Which DuckDB extension is required to read files over HTTP/S3, and is it bundled?</summary>
+
+The `httpfs` extension provides HTTP(S) and S3 (and other S3-compatible) access. It is autoloadable and bundled with the standard binaries, so reading `https://…/file.parquet` typically works with no manual install. For S3 you additionally configure credentials, after which `read_parquet('s3://bucket/key.parquet')` streams the file directly.
+
+</details>
+
+<details><summary><b>23.</b> How do you configure S3 credentials for DuckDB in the modern API?</summary>
+
+You create a secret with the `CREATE SECRET` statement, for example `CREATE SECRET (TYPE s3, KEY_ID '…', SECRET '…', REGION 'eu-central-1');`. DuckDB then uses that secret automatically for `s3://` paths via `httpfs`. The secrets manager replaced the older approach of `SET s3_access_key_id` global settings and supports provider chains like `CREDENTIAL_CHAIN` for IAM roles.
+
+</details>
+
+<details><summary><b>24.</b> Can DuckDB read only the needed columns and row groups from a remote Parquet file?</summary>
+
+Yes — DuckDB pushes down projection (column pruning) and predicate filters into the Parquet reader, and with `httpfs` it issues HTTP range requests to fetch only the relevant byte ranges. This means `SELECT isin, nav FROM read_parquet('s3://…/holdings.parquet') WHERE date = '2026-06-13'` can avoid downloading columns and row groups that statistics rule out. It is what makes querying lake data over object storage practical rather than wasteful.
+
+</details>
+
+<details><summary><b>25.</b> What is the DuckDB Iceberg extension and what does it provide?</summary>
+
+The `iceberg` extension lets DuckDB read Apache Iceberg tables; you load it with `INSTALL iceberg; LOAD iceberg;`. It provides functions such as `iceberg_scan('…')` to query a table's current snapshot, plus `iceberg_metadata(...)` and `iceberg_snapshots(...)` to inspect manifest/snapshot history. This lets DuckDB act as a lightweight query engine over an Iceberg lakehouse without Spark.
+
+</details>
+
+<details><summary><b>26.</b> How does DuckDB read Delta Lake tables, and what is the key function?</summary>
+
+Through the `delta` extension (`INSTALL delta; LOAD delta;`), which exposes `delta_scan('path')` to read a Delta table including its transaction-log-driven current state. For example `SELECT * FROM delta_scan('s3://bucket/holdings_delta');`. It uses the delta-kernel library so DuckDB respects Delta's protocol for which files are live.
+
+</details>
+
+<details><summary><b>27.</b> Reading Parquet directly from object storage vs reading Iceberg/Delta — what is the difference?</summary>
+
+Reading raw Parquet treats files as a flat dataset with no transactional layer: you see whatever files match the glob, including partial or stale writes. Iceberg and Delta add a metadata/transaction log that defines a consistent table snapshot, schema evolution, and time travel, so `iceberg_scan`/`delta_scan` give you exactly the committed state. For regulated, auditable fund data the table-format guarantees usually matter more than raw-file convenience.
+
+</details>
+
+<details><summary><b>28.</b> What is the extension ecosystem in DuckDB and why is it central to the design?</summary>
+
+DuckDB keeps a small core and pushes capabilities into a flexible extension mechanism that can add data types, functions, file formats, and even SQL syntax. Features like Parquet, JSON, full-text search, spatial, `httpfs`/S3, Iceberg, and Delta are implemented as extensions rather than baked into the core. This keeps the engine lean while letting you opt into exactly what a workload needs.
+
+</details>
+
+<details><summary><b>29.</b> How do you install and load a DuckDB extension, and what is the difference between the two steps?</summary>
+
+`INSTALL name;` downloads the extension binary to local storage (once), and `LOAD name;` makes it active in the current session. For example `INSTALL httpfs; LOAD httpfs;`. Install is persistent across sessions; load must happen per session unless autoloading kicks in for known extensions.
+
+</details>
+
+<details><summary><b>30.</b> What are "core" versus "community" extensions in DuckDB?</summary>
+
+Core extensions are maintained by the DuckDB team and signed/distributed through the official repository (e.g. `httpfs`, `json`, `parquet`, `iceberg`). Community extensions are third-party contributions distributed through a separate community repository and may require allowing unsigned extensions. Knowing the distinction matters for governance: a regulated shop may restrict installs to signed core extensions only.
+
+</details>
+
+<details><summary><b>31.</b> What is the single-writer constraint in DuckDB and what does it rule out?</summary>
+
+Only one process can hold a read-write connection to a given database file at a time, so DuckDB cannot serve as a shared multi-writer database that many independent processes or services write to concurrently. It rules out patterns like several application instances or a load-balanced API tier all writing to the same `.duckdb` file. The fix is to funnel writes through a single owning process, or use a different store for concurrent writes.
+
+</details>
+
+<details><summary><b>32.</b> Within a single DuckDB process, can multiple threads write concurrently?</summary>
+
+Yes — within one process DuckDB supports multiple writer threads using MVCC plus optimistic concurrency control. Appends never conflict, and updates to separate tables or to disjoint sets of rows proceed in parallel. The constraint is across processes (one read-write process per file), not across threads inside that process.
+
+</details>
+
+<details><summary><b>33.</b> What happens when two threads in the same DuckDB process try to update the same row?</summary>
+
+Optimistic concurrency control detects the write-write conflict at commit time, and the second transaction to attempt the edit fails with a transaction conflict error rather than silently losing an update. The documented remedy is simply to rerun the conflicting transaction. Appends and edits to different rows do not conflict, so this only affects genuine overlapping updates.
+
+</details>
+
+<details><summary><b>34.</b> Several processes need to read the same DuckDB file at once — how do you allow it?</summary>
+
+Open each connection in read-only mode, e.g. with `access_mode = 'READ_ONLY'` (or `read_only=True` in the Python API). With every process read-only, multiple processes can read the same file simultaneously, since none holds the exclusive read-write lock. The trade-off is that no process can write while these read-only readers are attached.
+
+</details>
+
+<details><summary><b>35.</b> You get `IO Error: Could not set lock on file` opening a DuckDB database. What does it mean?</summary>
+
+It means another process already holds a read-write lock on that database file, and DuckDB enforces a single owning read-write process per file. Common causes are a leftover process (e.g. a notebook kernel, a still-running script, or an auto-reloading web server like Uvicorn with `reload=True`) holding the file open. Resolve it by closing the other connection/process, or open in read-only mode if you only need to read.
+
+</details>
+
+<details><summary><b>36.</b> A FastAPI/Uvicorn app with `reload=True` intermittently throws a DuckDB lock error. Why?</summary>
+
+The auto-reloader runs a watcher process plus a worker process, and if both try to open the same `.duckdb` file read-write you get two read-write attempts on one file, which DuckDB rejects with `Could not set lock on file`. The single-writer constraint is doing exactly what it should. Fixes include disabling reload in that context, ensuring only one process opens the DB, or using read-only connections where appropriate.
+
+</details>
+
+<details><summary><b>37.</b> What is MotherDuck and how does it relate to DuckDB?</summary>
+
+MotherDuck is a managed, cloud service built around DuckDB that extends the embedded engine with cloud storage, sharing, and hybrid local/cloud query execution. It is meant to address exactly the gaps of pure embedded DuckDB — shared multi-user access, durable cloud-hosted databases, and collaboration — while keeping the DuckDB SQL experience. In the syllabus it sits at awareness level: know it exists as the managed path when "single process on one laptop" stops being enough.
+
+</details>
+
+<details><summary><b>38.</b> What is "hybrid execution" in the MotherDuck context?</summary>
+
+Hybrid execution means a query can run partly on your local DuckDB and partly in MotherDuck's cloud, with the planner deciding where each piece runs based on where the data lives. Local files stay local while cloud-hosted tables are processed server-side, and results are combined. This lets you join a small local CSV against a large cloud table without uploading everything.
+
+</details>
+
+<details><summary><b>39.</b> What is ClickHouse and when is it relevant versus DuckDB?</summary>
+
+ClickHouse is a server-based columnar OLAP database known for very high single-node (and clustered) query speed and high-concurrency serving. It is relevant when you need a long-running server that many clients query concurrently, or sustained ingestion with low-latency dashboards — workloads beyond what an embedded single-writer engine serves well. DuckDB stays the choice for in-process analytics, local/ephemeral compute, and querying lake files; the syllabus keeps ClickHouse at awareness level as the server-side single-node speed option.
+
+</details>
+
+<details><summary><b>40.</b> Give the headline difference between DuckDB and ClickHouse in deployment terms.</summary>
+
+DuckDB is embedded — it runs inside your application process with no server — whereas ClickHouse is a standalone server that clients connect to over the network. That single distinction drives most of the others: ClickHouse naturally handles many concurrent client connections and continuous writes, while DuckDB excels at single-process, in-process analytics with no operational footprint.
+
+</details>
+
+<details><summary><b>41.</b> For a mart that fits on one node and is rebuilt nightly, why might DuckDB beat a Spark cluster?</summary>
+
+Because a single-node columnar engine with no cluster to provision, schedule, or pay for is dramatically simpler and cheaper, and for data that fits comfortably (with out-of-core covering occasional overflow) the distributed coordination of Spark adds latency and cost without payback. The architect's job is to recognize the size/concurrency envelope: nightly batch rebuild of a one-node mart is squarely in DuckDB's sweet spot. You only reach for a cluster when data or concurrency genuinely exceeds one machine.
+
+</details>
+
+<details><summary><b>42.</b> What is the data-size/concurrency "envelope" where "no cluster" is the right architecture?</summary>
+
+It is roughly: data that fits on one node's disk (with RAM-sized hot working sets, helped by out-of-core spilling for the rest), batch or low-concurrency analytical access rather than many simultaneous writers, and a single owning process for writes. Within that envelope a single-node engine like DuckDB or a beefy Postgres is cheaper and simpler than a distributed system. You leave the envelope when concurrent writers, multi-terabyte hot data, or high-QPS serving appear.
+
+</details>
+
+<details><summary><b>43.</b> Why does the single-writer constraint not disqualify DuckDB from production use?</summary>
+
+Because many production analytical workloads are single-writer by nature — a nightly or hourly batch job that one process owns, rebuilding marts read by many consumers afterward. The constraint only rules out concurrent multi-process writes to the same file, which batch analytics rarely needs. Consumers can read the resulting file (or read-only replicas/copies), so the pattern scales for reads.
+
+</details>
+
+<details><summary><b>44.</b> How would you serve many concurrent readers from a DuckDB-built mart despite the write lock?</summary>
+
+Have a single writer process build the database/Parquet output, then distribute read-only access — for example open read-only connections, or publish the result as Parquet files in object storage that any number of consumers query independently. Because the heavy write is isolated to one batch process, the read fan-out is unconstrained. MotherDuck or a copy-per-reader strategy are alternatives when shared concurrent reads of one managed DB are required.
+
+</details>
+
+<details><summary><b>45.</b> In the Phase-2 "Do," you benchmark the mart on DuckDB over Parquet vs Postgres. What outcome typically favours DuckDB?</summary>
+
+Large analytical scans and aggregations over columnar Parquet typically favour DuckDB, because its columnar-vectorized engine reads only needed columns and processes them in batches, often beating a row-oriented Postgres on full-table scans. Cold queries straight over Parquet with predicate/projection pushdown also avoid a load step. The win is most pronounced for wide tables where the query touches few columns.
+
+</details>
+
+<details><summary><b>46.</b> In that same benchmark, what typically favours Postgres over DuckDB?</summary>
+
+Workloads with many concurrent writers and readers, point lookups/selective indexed reads, and transactional OLTP-style access favour Postgres, because it is a multi-connection server with rich indexing and concurrency control. DuckDB's single-writer model and analytics focus are a poor fit there. So the honest five-bullet conclusion pairs DuckDB-wins (single-writer batch analytics, columnar scans, lake files) against Postgres-wins (concurrency, OLTP, point queries, shared service).
+
+</details>
+
+<details><summary><b>47.</b> What resource-use differences should you record when benchmarking DuckDB vs Postgres?</summary>
+
+Record wall-clock query time, peak memory used (and whether DuckDB spilled to the temp directory), CPU utilization/parallelism, and disk I/O, for each engine and query. You should also note setup cost — DuckDB needs no load step over Parquet, whereas Postgres needs the data ingested and indexed first. These numbers make the "when each wins" argument concrete rather than hand-wavy.
+
+</details>
+
+<details><summary><b>48.</b> How do you observe out-of-core behaviour with a larger-than-RAM holdings table in DuckDB?</summary>
+
+Lower `memory_limit` (e.g. `SET memory_limit='2GB'`) or use a genuinely larger-than-RAM table, set a `temp_directory` on a disk you can watch, then run a spilling query like a big sort or group-by. Monitor the temp directory growing during execution and observe the query still completing — that growth is DuckDB writing spill partitions. If you disable the temp directory, the same query OOMs, demonstrating the mechanism.
+
+</details>
+
+<details><summary><b>49.</b> Does querying Parquet over object storage with DuckDB require loading the data first?</summary>
+
+No — DuckDB scans Parquet in place via `read_parquet('s3://…')` using the `httpfs` extension, applying column pruning and predicate pushdown so it fetches only relevant byte ranges. There is no ingest/copy step as there would be loading into Postgres. This zero-ETL querying is a major part of DuckDB's lakehouse appeal.
+
+</details>
+
+<details><summary><b>50.</b> What does it mean that DuckDB queries can integrate "zero-copy" with DataFrames?</summary>
+
+Because DuckDB runs in-process and speaks Apache Arrow, it can read from and return to pandas/Polars/Arrow DataFrames without serializing data across a network or copying buffers unnecessarily. For example `duckdb.sql('SELECT * FROM my_df').df()` queries a Python DataFrame directly and returns one. This tight integration is a direct benefit of the embedded model.
+
+</details>
+
+<details><summary><b>51.</b> How does DuckDB execute queries in parallel on a single machine?</summary>
+
+It uses multi-threaded, morsel-driven parallelism: work is split into small chunks (morsels) of a column scan and distributed across CPU cores, with the vectorized operators running in parallel. This lets one node saturate all cores on a big aggregation without any cluster. You can cap it with `SET threads = N;` when you need to limit CPU use on a shared box.
+
+</details>
+
+<details><summary><b>52.</b> Why is DuckDB a good fit for fast, deterministic testing of a data pipeline?</summary>
+
+Because spinning up an in-memory DuckDB is instantaneous and needs no server, so each test gets a clean, isolated database in milliseconds, and it speaks standard SQL plus reads Parquet/CSV directly. This makes unit and integration tests for transformation logic fast and hermetic. Many teams use `dbt-duckdb` precisely so model logic can be tested locally without a warehouse.
+
+</details>
+
+<details><summary><b>53.</b> What is `pg_duckdb` and what problem does it solve?</summary>
+
+`pg_duckdb` is a Postgres extension that embeds DuckDB's execution engine inside Postgres, so you can run DuckDB-accelerated columnar/analytical queries — including reads of Parquet and lake data — within the same Postgres that serves OLTP. The benefit is analysts querying live operational data with no separate warehouse to load. It is the Postgres-native alternative when you want columnar analytics co-located with transactional data.
+
+</details>
+
+<details><summary><b>54.</b> When is `pg_duckdb`/Citus columnar a worse choice than DuckDB-on-a-lake or Trino/Spark?</summary>
+
+They are worse when you need true lakehouse scale, open table formats as the system of record, or independent scaling of storage and compute — that is Trino/Spark/warehouse territory, not "analytics bolted onto one Postgres." `pg_duckdb` shines for live-data analytics inside Postgres but does not give you elastic distributed compute. Recognizing that boundary is exactly the architect skill this lesson builds.
+
+</details>
+
+<details><summary><b>55.</b> How does Citus columnar differ from `pg_duckdb` as a Postgres analytics path?</summary>
+
+Citus provides columnar table storage (and optional distributed sharding) inside Postgres, compressing and column-organizing data so analytical scans over Postgres-managed tables are faster, whereas `pg_duckdb` brings DuckDB's whole vectorized engine and lake-file reading into Postgres. Citus is about distribution and columnar storage in Postgres; `pg_duckdb` is about embedding the DuckDB engine. Both keep analytics next to OLTP rather than in a separate warehouse.
+
+</details>
+
+<details><summary><b>56.</b> Why is "knowing DuckDB's limits" framed as sharpening the cluster conversation?</summary>
+
+Because the most expensive mistakes in data architecture come from reaching for a distributed cluster when a single node would do, or vice versa. Knowing precisely where DuckDB's single-writer, single-node, out-of-core envelope ends gives you the evidence to say "no cluster needed" confidently — or to justify one. That judgement, backed by benchmarks, is the deliverable of this lesson.
+
+</details>
+
+<details><summary><b>57.</b> How do you persist an in-memory DuckDB database's tables to a file?</summary>
+
+You can `ATTACH 'fund.duckdb' AS f;` and create/copy tables into the attached file, or simply open the connection on the file path from the start so writes are durable. To export query results you can also `COPY (SELECT …) TO 'out.parquet' (FORMAT parquet);`. The point is that in-memory data is volatile until written to an on-disk database or to files.
+
+</details>
+
+<details><summary><b>58.</b> How do you write query results to Parquet from DuckDB?</summary>
+
+Use the `COPY` statement, e.g. `COPY (SELECT * FROM holdings) TO 'holdings.parquet' (FORMAT parquet);`. You can add options like `COMPRESSION 'zstd'` and, for partitioned output, `PARTITION_BY (fund_id)` to write a Hive-partitioned directory tree. This is how a DuckDB batch job publishes a mart as lake files for downstream readers.
+
+</details>
+
+<details><summary><b>59.</b> What does `PARTITION_BY` do in a DuckDB `COPY ... TO` statement?</summary>
+
+It writes the output as a Hive-partitioned directory layout, creating subdirectories like `fund=LU1234567890/date=2026-06-13/` and splitting rows into files by the partition columns. Readers can then prune partitions when filtering on those columns. It mirrors the `hive_partitioning` read option, so write and read sides line up.
+
+</details>
+
+<details><summary><b>60.</b> Can DuckDB query CSV and JSON files directly like it does Parquet?</summary>
+
+Yes — `read_csv('file.csv')` (with auto-detection of types/headers) and `read_json('file.json')` let you query those formats in place, and the bare `SELECT * FROM 'file.csv'` shorthand works for known extensions. JSON support comes via the `json` extension, typically autoloaded. This makes DuckDB handy for ad-hoc analysis of raw fund extracts before they are formalized.
+
+</details>
+
+<details><summary><b>61.</b> What is the difference between DuckDB's native storage format and Parquet?</summary>
+
+The native `.duckdb` format is DuckDB's own managed, single-file storage optimized for its engine, supporting in-place updates, indexes, and ACID transactions. Parquet is an open, immutable columnar file format meant for interchange and lake storage that DuckDB reads/writes but does not update in place. You use native storage for a managed database and Parquet for portable, queryable data files.
+
+</details>
+
+<details><summary><b>62.</b> Why might you keep a fund mart as Parquet in object storage rather than in a native DuckDB file?</summary>
+
+Parquet in object storage is an open, durable, multi-reader format that any engine (DuckDB, Spark, Trino, pandas) can read, and it avoids the single-writer file-lock constraint for consumers. A native DuckDB file is great for a single owning process but is locked while that process writes. For a shared, regulated fund mart, open Parquet files give broad read access and tool independence.
+
+</details>
+
+<details><summary><b>63.</b> What is the role of predicate pushdown when DuckDB scans Parquet?</summary>
+
+Predicate pushdown means filters in your `WHERE` clause are evaluated against Parquet row-group statistics (min/max) so DuckDB skips entire row groups that cannot match, reading far less data. For example `WHERE date = '2026-06-13'` can skip every row group whose date range excludes that day. Combined with column projection, it minimizes I/O, which matters most when reading over object storage.
+
+</details>
+
+<details><summary><b>64.</b> What is projection pushdown in DuckDB's Parquet reader?</summary>
+
+Projection pushdown means DuckDB reads only the columns referenced by the query from the Parquet file, ignoring all others entirely. Because Parquet stores columns separately, the unneeded columns are never fetched or decoded. Selecting `isin, nav` from a 50-column holdings file therefore reads only two columns' worth of data.
+
+</details>
+
+<details><summary><b>65.</b> How do you limit the number of CPU threads DuckDB uses, and why would you?</summary>
+
+Set `SET threads = 4;` (or pass the config at connect time) to cap parallelism. You do this on a shared machine to leave cores for other workloads, or to make benchmarks reproducible, since DuckDB defaults to using all available cores. Reducing threads trades throughput for predictability and neighbour-friendliness.
+
+</details>
+
+<details><summary><b>66.</b> A DuckDB query over remote S3 Parquet is slow. What are the first things to check?</summary>
+
+Check that predicate and projection pushdown are actually reducing reads (avoid `SELECT *` and broad scans), that the data is in reasonably sized row groups, and that the network/region latency to the bucket is acceptable (querying eu-central-1 data from far away is slow). Also confirm `httpfs` is using range requests rather than downloading whole files. Caching or copying hot data locally is the fallback when object-storage latency dominates.
+
+</details>
+
+<details><summary><b>67.</b> Why is DuckDB suitable as a backend for `dbt-duckdb` in local development?</summary>
+
+Because it provides a real SQL warehouse with zero setup — an in-process engine that runs your dbt models against Parquet/CSV or a local file — so the whole transformation DAG can be built and tested on a laptop. There is no warehouse to provision or pay for during development. The same SQL largely transfers to a server warehouse later, making DuckDB a cheap, fast dev/CI target.
+
+</details>
+
+<details><summary><b>68.</b> What is the risk of treating a single-writer DuckDB file as a shared team database?</summary>
+
+The first person to open it read-write locks it; everyone else gets `Could not set lock on file` or must go read-only, so it does not behave like a shared multi-writer service. Teams that try this hit constant lock contention and stale reads. The correct pattern is a single batch writer plus read-only distribution, or a managed option like MotherDuck for shared access.
+
+</details>
+
+<details><summary><b>69.</b> How does DuckDB's storage handle updates and deletes given its columnar format?</summary>
+
+DuckDB supports in-place `UPDATE`/`DELETE` with MVCC, storing row versions so concurrent readers see a consistent snapshot while a writer modifies data. This is in its native managed storage; raw Parquet files are immutable and cannot be updated in place. So full SQL DML works on native DuckDB tables but not directly on Parquet you scan.
+
+</details>
+
+<details><summary><b>70.</b> How would DuckDB help validate a NAV calculation against a Parquet holdings export?</summary>
+
+You can point DuckDB straight at the export, e.g. `SELECT fund_id, sum(quantity*price) AS gross FROM read_parquet('holdings.parquet') GROUP BY fund_id;`, and compare to the reported NAV — no load step needed. Its fast aggregation over columnar data makes such reconciliation checks quick even on large files. This is a realistic local-analytics use in fund administration.
+
+</details>
+
+<details><summary><b>71.</b> Why is DuckDB convenient for ad-hoc querying of EMT/EPT files received as Parquet?</summary>
+
+Because you can query the received file in place with full SQL — filtering, joining against reference data, and aggregating — without standing up a database or running an import. For example you can immediately check `SELECT count(*), count(DISTINCT isin) FROM read_parquet('emt_2026-06.parquet');` to profile the delivery. The zero-setup, file-native model fits irregular, file-based regulatory feeds well.
+
+</details>
+
+<details><summary><b>72.</b> Can a single DuckDB process attach and query multiple databases at once?</summary>
+
+Yes — you can `ATTACH 'other.duckdb' AS o;` (and even attach Postgres, MySQL, or SQLite via the respective extensions) and then query across them with qualified names like `o.schema.table`. This lets one process join native DuckDB tables, Parquet files, and an external database in a single SQL statement. It is useful for combining a local mart with reference data living elsewhere.
+
+</details>
+
+<details><summary><b>73.</b> How can DuckDB read directly from a live Postgres database?</summary>
+
+Using the `postgres` extension (`INSTALL postgres; LOAD postgres;`) you can `ATTACH 'host=… dbname=…' AS pg (TYPE postgres);` and then query Postgres tables as `pg.schema.table`. DuckDB executes scans against Postgres and can push down some work. This is handy for pulling operational tables into a DuckDB-side analytical query without a separate ETL.
+
+</details>
+
+<details><summary><b>74.</b> What is the practical meaning of "DuckDB has no server to scale horizontally"?</summary>
+
+Because it runs in-process on one machine, you cannot add nodes to a DuckDB to handle more data or concurrency — you scale by using a bigger machine (vertical) or by moving to a distributed system. Its parallelism is across the cores of one node, not across a cluster. This is precisely the limit that defines when you must leave the "no cluster" envelope.
+
+</details>
+
+<details><summary><b>75.</b> How does out-of-core execution change DuckDB's effective data ceiling versus pure in-memory engines?</summary>
+
+It raises the ceiling from "must fit in RAM" to "must fit on disk (with enough temp space)," because spilling lets larger-than-RAM joins, sorts, and aggregations complete, just more slowly. A pure in-memory engine would OOM on the same query. So DuckDB can credibly handle datasets several times the size of RAM on a single node.
+
+</details>
+
+<details><summary><b>76.</b> Is DuckDB's out-of-core spilling free in performance terms?</summary>
+
+No — spilling writes intermediate data to disk and reads it back, so a spilling query is significantly slower than one that fits in memory, and the speed of the temp disk (SSD vs HDD) matters a lot. It prevents failure but is a graceful degradation, not a free lunch. The architecture lesson is that out-of-core extends the envelope but you pay in latency near its edges.
+
+</details>
+
+<details><summary><b>77.</b> What signals tell you a DuckDB workload has outgrown the single-node model?</summary>
+
+Persistent need for many concurrent writers, hot data far larger than one node's disk, high-QPS interactive serving to many users, or queries that spill so heavily they are unacceptably slow. Any of these signals you are leaving the embedded envelope toward MotherDuck (managed), ClickHouse (server-side speed/concurrency), or a Trino/Spark lakehouse. Catching these signals early is the architect's job.
+
+</details>
+
+<details><summary><b>78.</b> Why is "DuckDB is like SQLite for analytics" a useful but imperfect analogy?</summary>
+
+It is useful because both are embedded, single-file, zero-server libraries you link into a process. It is imperfect because SQLite is a row-store optimized for OLTP/transactional point access, whereas DuckDB is a columnar-vectorized OLAP engine optimized for analytical scans and aggregations. They share the embedding model but target opposite query workloads.
+
+</details>
+
+<details><summary><b>79.</b> How does DuckDB integrate with Polars or Arrow without copying data?</summary>
+
+DuckDB can scan an Arrow table or a Polars DataFrame directly because it shares the Arrow memory layout, so the data is referenced in place rather than serialized and re-copied. For example registering an Arrow table and querying it returns results that can flow back into Arrow/Polars zero-copy. This is a concrete payoff of the in-process design.
+
+</details>
+
+<details><summary><b>80.</b> What does `SET memory_limit='0'` or disabling it imply, and why is it risky?</summary>
+
+Removing the cap lets DuckDB use unbounded memory, which can starve the rest of the machine and trigger the OS OOM killer instead of DuckDB's controlled spilling. The safer pattern is to keep a sensible `memory_limit` and a writable `temp_directory` so heavy queries spill gracefully. Disabling the limit on a shared host is a common way to cause hard-to-diagnose crashes.
+
+</details>
+
+<details><summary><b>81.</b> How can you confirm DuckDB actually spilled during a query?</summary>
+
+Watch the `temp_directory` for files appearing/growing during execution, or inspect query profiling output (`PRAGMA enable_profiling; EXPLAIN ANALYZE …`) which reports operator memory and spilling behaviour. A growing temp directory plus a longer runtime than the in-memory case is the practical evidence. This is exactly the observation the Phase-2 "Do" asks you to make on a larger-than-RAM table.
+
+</details>
+
+<details><summary><b>82.</b> What is the difference in concurrency story between MotherDuck and embedded DuckDB?</summary>
+
+Embedded DuckDB enforces a single read-write process per file, so shared concurrent access is awkward. MotherDuck hosts the database in the cloud as a managed service, enabling multiple users and applications to share and concurrently access data, with hybrid local/cloud execution. So MotherDuck is the answer when the single-writer file model becomes the bottleneck.
+
+</details>
+
+<details><summary><b>83.</b> When evaluating ClickHouse vs DuckDB for a dashboard backend serving 200 concurrent users, which fits and why?</summary>
+
+ClickHouse fits better, because it is a server designed for high concurrency and continuous low-latency serving of many simultaneous client connections. Embedded DuckDB, with its single read-write process and in-process model, is not built to be a shared high-QPS service. DuckDB would instead be the tool that builds or pre-aggregates the data ClickHouse serves.
+
+</details>
+
+<details><summary><b>84.</b> Why does the lesson keep MotherDuck and ClickHouse at "awareness level"?</summary>
+
+Because the hands-on skill being built is mastering embedded DuckDB and its single-node envelope; MotherDuck and ClickHouse are the named escape hatches you must recognize, not tools you implement here. Knowing what each solves (managed sharing vs server-side concurrency/speed) is enough to make the architecture call. Deeper hands-on with them belongs to later, higher-tier work.
+
+</details>
+
+<details><summary><b>85.</b> How do row-group statistics in Parquet help DuckDB, and what can defeat them?</summary>
+
+Min/max statistics per row group let DuckDB skip groups that cannot satisfy a filter (predicate pushdown), so well-sorted data on the filter column gives big skips. They are defeated when data is unsorted (every row group spans the whole value range) or when row groups are huge, so almost nothing can be pruned. Writing Parquet sorted/partitioned by common filter columns therefore improves DuckDB read performance.
+
+</details>
+
+<details><summary><b>86.</b> What is a sensible architecture for a Luxembourg fund mart that fits on one node but is read by many downstream systems?</summary>
+
+A single DuckDB (or Postgres) batch process builds the mart nightly and writes it to open Parquet in object storage (optionally as an Iceberg/Delta table for transactional snapshots), and downstream systems read those files independently. This respects the single-writer constraint (one writer) while giving unlimited read fan-out and tool independence. It is the cheapest maintainable design when data genuinely fits on one node.
+
+</details>
+
+<details><summary><b>87.</b> Why might reading Iceberg/Delta be preferable to a glob of raw Parquet for an audited NAV history?</summary>
+
+Because Iceberg and Delta provide a transaction log and immutable snapshots, so you can time-travel to exactly the committed state as of a date and trust that you are not reading half-written or stale files. For regulated, auditable NAV history this consistency and reproducibility is essential. A raw Parquet glob has no such transactional boundary and can expose partial writes.
+
+</details>
+
+<details><summary><b>88.</b> How does DuckDB's vectorized engine interact with out-of-core spilling?</summary>
+
+Vectorized processing handles batches of values in memory for speed, while the buffer manager monitors total memory against `memory_limit` and, when a blocking operator's structures grow too large, partitions and spills them to the temp directory. The two are complementary: vectorization optimizes the in-memory fast path, spilling guarantees correctness past the memory ceiling. Together they give fast queries that still complete when data exceeds RAM.
+
+</details>
+
+<details><summary><b>89.</b> What does `EXPLAIN` (and `EXPLAIN ANALYZE`) give you in DuckDB?</summary>
+
+`EXPLAIN` shows the physical query plan (which scans, joins, aggregations, and pushdowns DuckDB chose), and `EXPLAIN ANALYZE` additionally runs the query and reports per-operator timing, rows, and resource use. You use them to confirm projection/predicate pushdown is happening and to find the operator that dominates time or spills. They are the primary tool for the benchmarking and tuning the Phase-2 "Do" requires.
+
+</details>
+
+<details><summary><b>90.</b> Why can DuckDB read a Parquet file that a row-oriented database would need to import first?</summary>
+
+Because DuckDB's scan operators understand the Parquet format natively and integrate it through the parquet extension, treating the file as a first-class table source with statistics-driven pushdown. A typical row store needs the data copied into its own storage and indexed before it can query efficiently. This in-place querying removes the load step entirely for read-only analytics.
+
+</details>
+
+<details><summary><b>91.</b> What is the operational risk of putting `temp_directory` on a small or full disk?</summary>
+
+If spilling needs more space than the disk (or `max_temp_directory_size`) allows, the query aborts with an out-of-memory/temp-space error even though logically it could have completed. So a too-small spill disk silently caps how large a query you can run. The fix is to point `temp_directory` at a roomy, fast SSD volume sized for your largest out-of-core query.
+
+</details>
+
+<details><summary><b>92.</b> How does the single-file format help with backups and reproducibility in a regulated context?</summary>
+
+Because the entire database is one file, a backup or point-in-time copy is just copying that file (when no writer is active), giving a self-contained, reproducible artifact you can archive for audit. There is no multi-file consistency problem to coordinate. For regulated fund data, a single immutable copy of the analytical store simplifies retention and evidence.
+
+</details>
+
+<details><summary><b>93.</b> Can DuckDB enforce schema and types when reading messy CSV fund extracts?</summary>
+
+Yes — `read_csv` auto-detects types but you can override with explicit `columns`/`types`, set `header`, `delimiter`, `nullstr`, and use `ignore_errors` or `store_rejects` to handle bad rows. This lets you impose a known schema on a messy extract rather than trusting auto-detection. Explicit typing is important when an ISIN or a date column must not be silently inferred wrong.
+
+</details>
+
+<details><summary><b>94.</b> Why is DuckDB a good "first thing to reach for" when profiling an unfamiliar data file?</summary>
+
+Because with one line it gives you full SQL over the file in place — counts, distinct values, min/max, null rates — without any ingestion, schema definition, or server. For example you can profile a delivery instantly with `read_parquet`/`read_csv` and `summarize`. That immediacy makes it the fastest path from "a file arrived" to "I understand its shape."
+
+</details>
+
+<details><summary><b>95.</b> What does the DuckDB `SUMMARIZE` statement do?</summary>
+
+`SUMMARIZE table_or_query` produces per-column descriptive statistics — type, min, max, approximate distinct count, null percentage, and quantiles — in a single command. For example `SUMMARIZE read_parquet('holdings.parquet');` profiles a delivery instantly. It is a fast data-quality reconnaissance tool for incoming fund files.
+
+</details>
+
+<details><summary><b>96.</b> How does out-of-core behaviour relate to the claim that DuckDB can handle "petabyte-scale lakehouse" data?</summary>
+
+DuckDB can query very large lake datasets (Parquet/Iceberg/Delta) because it reads them in place with pushdown and only materializes the working set, spilling when needed — so total stored data can vastly exceed RAM and even disk, as long as each query's working set fits the out-of-core budget. It is querying, not loading, that scales. The single node still bounds per-query working-set size and concurrency, which is the real limit.
+
+</details>
+
+<details><summary><b>97.</b> A nightly DuckDB job and an analyst's notebook both need the same `.duckdb` file. How do you avoid lock conflicts?</summary>
+
+Give the writer (the nightly job) exclusive read-write access during its window, and have the analyst open the file read-only (or query an exported Parquet copy) outside that window. Two read-write opens on one file always collide with `Could not set lock on file`. Scheduling plus read-only/copy access is the standard way to reconcile a batch writer with ad-hoc readers.
+
+</details>
+
+<details><summary><b>98.</b> Why does DuckDB favour large, set-based SQL over many small row-by-row operations?</summary>
+
+Because its columnar-vectorized engine is optimized for processing large batches of values per operation, so a single set-based statement runs far faster than thousands of single-row statements that fight the vectorized model. Bulk inserts/updates and big analytical queries are its strength. Row-at-a-time OLTP-style chatter is exactly the workload it is not designed for — that is Postgres territory.
+
+</details>
+
+<details><summary><b>99.</b> How would you decide between `pg_duckdb` inside Postgres and a standalone DuckDB-over-lake setup for a fund analytics use case?</summary>
+
+Choose `pg_duckdb` when the priority is querying live operational Postgres data with columnar acceleration and no second system to maintain, keeping analytics next to OLTP. Choose standalone DuckDB-over-lake when the source of truth is open table-format files in object storage and you want tool-independent, multi-reader access. The deciding factors are where the authoritative data lives and whether you need lake openness or co-location with OLTP.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the single most important architectural lesson from "embedded analytical engines (DuckDB)."</summary>
+
+That a single-node, in-process columnar engine with out-of-core spilling covers a large and useful envelope of analytical workloads cheaply and simply, and the architect's value is knowing precisely where that envelope ends — single-writer per file, one node's disk, low write concurrency — so you can say "no cluster" with evidence or escalate to MotherDuck, ClickHouse, or a lakehouse when the data size or concurrency genuinely demands it. Benchmarks against Postgres, a demonstrated larger-than-RAM query, and naming the single-writer constraint are how you prove you understand that boundary.
+
+</details>
+
+
+## Phase 2 · 5.2.1 + 5.3.1 dbt & the SQL transformation layer — 100 self-test questions
+
+<details><summary><b>1.</b> What is dbt at its core, and what does it deliberately NOT do?</summary>
+
+dbt (data build tool) is a transformation framework that lets you define models as `SELECT` statements and manages their dependency graph, materialization, testing, and documentation. It deliberately does NOT extract or load data — it is the "T" in ELT, running transformations inside a warehouse you already loaded. This separation is why dbt pairs with an ingestion tool (Fivetran, Airbyte) and an orchestrator (Airflow, Dagster) rather than replacing them.
+
+</details>
+
+<details><summary><b>2.</b> What is the difference between dbt Core and dbt Cloud?</summary>
+
+dbt Core is the open-source, command-line tool you install and run yourself (e.g. via `uv pip install dbt-core dbt-duckdb`), while dbt Cloud is the managed SaaS that adds an IDE, scheduler, hosted docs, CI, and column-level lineage on top of Core. For learning and for a sovereignty-constrained fund estate you run Core; dbt Cloud is the "evaluate" corporate option whose scheduler and lineage features SQLMesh notably offers for free.
+
+</details>
+
+<details><summary><b>3.</b> Why does the lesson insist on "mastery, not mere usage" of dbt?</summary>
+
+Anyone can write a few models, but an architect must set transformation standards for a whole team — consistent layering, deliberate materialization choices, and tests as contracts. Mastery means you can justify every design decision and keep the warehouse reasoned-about rather than a pile of views. Without that discipline the DAG becomes unreadable and the warehouse rots into something nobody trusts.
+
+</details>
+
+<details><summary><b>4.</b> What are the three conventional layers of a dbt project and how do they map to the medallion architecture?</summary>
+
+The convention is `staging` → `intermediate` → `marts`, mirroring bronze/silver/gold of medallion. Staging does light, 1:1 cleanup of raw sources (renaming, casting, deduping), intermediate holds reusable joins and computations, and marts are the business-facing fact/dimension models. This layering keeps each model's responsibility narrow and makes the DAG legible to a stranger.
+
+</details>
+
+<details><summary><b>5.</b> What belongs in a dbt staging model and what does NOT?</summary>
+
+A staging model should be a thin, one-to-one wrapper over a single source: rename columns to a consistent style, cast types, apply trivial cleanup, and nothing more. It should NOT join multiple sources, aggregate, or contain business logic — that belongs in intermediate or marts. Keeping staging atomic means downstream models have a stable, predictable foundation and source changes are absorbed in one place.
+
+</details>
+
+<details><summary><b>6.</b> In dbt project structure, why are staging models usually materialized as views?</summary>
+
+Staging models are cheap, frequently-rebuilt, 1:1 transformations, so materializing them as views avoids storing duplicate data and always reflects the latest source without a rebuild. The cost is paid at query time, but because staging logic is light the overhead is small. The heavier, reused marts are where you switch to tables to amortize compute.
+
+</details>
+
+<details><summary><b>7.</b> What is the purpose of the `intermediate` layer, and why not put everything in marts?</summary>
+
+The intermediate layer holds the "verbs" — joins, unions, and reusable calculations — that more than one mart needs, so the logic is written once and `ref`-ed everywhere. Pushing it all into marts would duplicate logic across models and make them sprawling and hard to test. Intermediate models are typically not exposed to BI tools; they exist to keep marts thin and DRY.
+
+</details>
+
+<details><summary><b>8.</b> What does the `{{ ref('model_name') }}` function do, and why never hard-code a table name?</summary>
+
+`ref` resolves to the fully-qualified relation of another dbt model and, crucially, registers a dependency edge so dbt knows build order. Hard-coding a schema.table name breaks the DAG: dbt cannot infer ordering, cannot rebuild downstream models when an upstream changes, and you lose environment portability between dev and prod. Always use `ref` for models and `source` for raw tables.
+
+</details>
+
+<details><summary><b>9.</b> What is a dbt `source` and how does it differ from a `ref`?</summary>
+
+A `source` (declared in YAML and called as `{{ source('schema', 'table') }}`) points at raw tables that dbt did NOT build — the landing zone from your loader. `ref` points at models dbt itself builds. Sources give you a named, documented, freshness-checkable entry point so staging models depend on declared sources rather than raw string identifiers.
+
+</details>
+
+<details><summary><b>10.</b> How do you configure source freshness checks, and what command runs them?</summary>
+
+You add a `freshness` block to the source in YAML with `warn_after` and `error_after` thresholds plus a `loaded_at_field` (e.g. a `_loaded_at` timestamp), then run `dbt source freshness`. dbt computes the max of `loaded_at_field` and compares the lag to your thresholds, warning or erroring if the data is stale. For a fund feed this is how you catch a NAV file that failed to land before downstream models even run.
+
+</details>
+
+<details><summary><b>11.</b> What are the four core materializations in dbt?</summary>
+
+`view`, `table`, `incremental`, and `ephemeral`, with `snapshot` as a related but separately-defined construct. You set them with `config(materialized='...')` in the model or in `dbt_project.yml`. Each trades freshness, build cost, and query cost differently, and choosing the right one per model is exactly what "Done when" asks you to be able to explain.
+
+</details>
+
+<details><summary><b>12.</b> What does the `view` materialization do, and when is it the right default?</summary>
+
+A `view` rebuilds the model as a database view — no data is stored, the `SELECT` runs every time the view is queried. It is the right default for lightweight, infrequently-queried, or staging models because it costs nothing to build and is always current. The trade-off is repeated compute on every read, which becomes expensive for heavy or hot models.
+
+</details>
+
+<details><summary><b>13.</b> What does the `table` materialization do, and what is its main downside?</summary>
+
+A `table` materialization runs `create table as select`, fully rebuilding and persisting the result on every `dbt run`. It makes queries fast because the result is precomputed and stored, which suits heavy marts read by many dashboards. The downside is a full rebuild each time — expensive and slow for very large datasets — which is what `incremental` exists to fix.
+
+</details>
+
+<details><summary><b>14.</b> What is an `ephemeral` materialization and when would you use it?</summary>
+
+An `ephemeral` model is never built as its own object; instead dbt inlines its SQL as a CTE into any downstream model that `ref`s it. Use it for small, reusable logic you do not want cluttering the warehouse with extra objects. The trade-off is it cannot be queried or tested directly and, if reused widely, can bloat compiled SQL into deeply nested CTEs.
+
+</details>
+
+<details><summary><b>15.</b> How does the `incremental` materialization work at a high level?</summary>
+
+On the first run it builds the full table; on subsequent runs it processes only new or changed rows and inserts/merges them into the existing table rather than rebuilding everything. You gate the new rows with an `is_incremental()` block (typically a `where` filter on a timestamp greater than `max()` already loaded) so reruns stay cheap. This is the standard pattern for append-heavy fact tables like daily NAV or transaction events.
+
+</details>
+
+<details><summary><b>16.</b> What does the `is_incremental()` macro return, and when is it false?</summary>
+
+`is_incremental()` returns true only when the model already exists as a table, the run is not a `--full-refresh`, and the materialization is `incremental`. On the very first build, after `dbt run --full-refresh`, or for non-incremental models it returns false, so the SQL inside the `{% if is_incremental() %}` block is skipped. This lets one model both build from scratch and do delta loads.
+
+</details>
+
+<details><summary><b>17.</b> What is the role of the `unique_key` config in an incremental model?</summary>
+
+`unique_key` tells dbt which column(s) identify a row so that, instead of blindly appending, it can `merge`/`delete+insert` to update existing rows when they reappear in the new batch. Without it, late-arriving updates to an already-loaded row would create duplicates. For a NAV table keyed by `(fund_id, nav_date)`, the `unique_key` ensures a corrected NAV overwrites the prior value rather than doubling it.
+
+</details>
+
+<details><summary><b>18.</b> Name two common incremental failure modes the syllabus flags.</summary>
+
+First, schema drift: if the source gains or changes a column, an incremental run can fail or silently skip the new column because the target table's shape no longer matches — often needing `on_schema_change` config or a `--full-refresh`. Second, a wrong or non-unique `unique_key`, or a flawed `is_incremental()` filter, which causes duplicates or silently dropped rows. Both fail quietly, so incrementals demand tests and occasional full-refresh validation.
+
+</details>
+
+<details><summary><b>19.</b> What does the `on_schema_change` config control for incremental models?</summary>
+
+`on_schema_change` decides how dbt reacts when the model's columns differ from the existing table: `ignore` (default-ish, leave the table as-is), `append_new_columns`, `sync_all_columns`, or `fail`. Setting it to `append_new_columns` or `sync_all_columns` lets a source gaining a column flow through without a manual full-refresh. Choosing `fail` makes drift loud, which can be the safer choice in a regulated pipeline.
+
+</details>
+
+<details><summary><b>20.</b> An incremental model is silently dropping rows after a backfill. What is the first thing to check?</summary>
+
+Check the `is_incremental()` filter and the `unique_key`: a `where event_time > (select max(event_time) from {{ this }})` filter will skip late-arriving rows whose timestamp is older than the current max. The fix is usually a lookback window (e.g. `> max - interval '3 days'`) plus a `unique_key` so re-seen rows update rather than duplicate, then a `--full-refresh` to repair. Confirm with a row-count or uniqueness test afterward.
+
+</details>
+
+<details><summary><b>21.</b> What does `{{ this }}` refer to inside an incremental model?</summary>
+
+`{{ this }}` is the relation (schema.table) of the model currently being built — the existing target table. It is used inside `is_incremental()` blocks to read the already-loaded data, e.g. `select max(loaded_at) from {{ this }}`, so you only pull newer source rows. It only makes sense once the table exists, which is why it lives inside the incremental branch.
+
+</details>
+
+<details><summary><b>22.</b> What does `dbt run --full-refresh` do to an incremental model and when is it needed?</summary>
+
+`--full-refresh` forces dbt to drop and rebuild the incremental table from scratch, ignoring the delta logic. You need it after a logic change to historical rows, a schema change the incremental strategy cannot absorb, or to repair a corrupted/duplicated table. It is the escape hatch that re-establishes correctness at the cost of a full, expensive rebuild.
+
+</details>
+
+<details><summary><b>23.</b> What incremental strategies does dbt offer and how do they differ?</summary>
+
+Common strategies (set via `incremental_strategy`) include `append` (just insert new rows, no dedup), `merge` (upsert on `unique_key`, default on warehouses that support it like Snowflake/BigQuery/DuckDB), `delete+insert`, and `insert_overwrite` (replace whole partitions). `append` is fastest but allows duplicates; `merge` handles updates; `insert_overwrite` suits partitioned date-based reloads. The right choice depends on whether rows mutate and on adapter support.
+
+</details>
+
+<details><summary><b>24.</b> Why are dbt tests described as "executable data-quality contracts"?</summary>
+
+A dbt test is a SQL assertion that runs in CI and on every build, so a quality rule (e.g. "`isin` is never null", "NAV per share is positive") is enforced automatically rather than living in a wiki. Because `dbt build` fails when a test fails, the contract is executable — a breach stops bad data from propagating. This turns DQ from documentation into an enforced gate.
+
+</details>
+
+<details><summary><b>25.</b> What is a generic (schema) test in dbt and what are the four built-in ones?</summary>
+
+A generic test is a reusable, parameterized assertion attached to a column or model in YAML; the four built-ins are `unique`, `not_null`, `accepted_values`, and `relationships` (referential integrity). For example `not_null` and `unique` on an `isin` column, or `relationships` from a holdings model to a fund dimension. They are the cheapest, highest-leverage tests and you typically apply several per key column.
+
+</details>
+
+<details><summary><b>26.</b> What does the `relationships` generic test assert?</summary>
+
+`relationships` checks referential integrity: every value in a column exists in a referenced column of another model (a foreign-key check). You configure it with `to: ref('dim_fund')` and `field: fund_id`. It catches orphaned facts — e.g. a holdings row whose `fund_id` has no matching fund — which in fund data signals a broken load or a missing dimension record.
+
+</details>
+
+<details><summary><b>27.</b> What is a singular test in dbt and where does it live?</summary>
+
+A singular test is a one-off SQL query saved as a `.sql` file in the `tests/` directory that returns the rows which VIOLATE your rule; if it returns zero rows the test passes. It is for bespoke logic that no generic test covers, e.g. "rows where `sum(share_class_nav * shares)` does not reconcile to fund total NAV". Singular tests encode complex invariants that are specific to one relationship.
+
+</details>
+
+<details><summary><b>28.</b> A singular test passes when it returns how many rows, and why?</summary>
+
+It passes when it returns ZERO rows, because a dbt data test is written to SELECT the failing/offending records — the assertion is "there should be no rows that break this rule". Any returned rows are violations and dbt reports their count as failures. This is the opposite intuition from many test frameworks, so it is a common beginner gotcha.
+
+</details>
+
+<details><summary><b>29.</b> What is a dbt unit test, which version introduced it, and how does it differ from a data test?</summary>
+
+A unit test (introduced in dbt Core v1.8) validates a model's SQL LOGIC against small, hand-crafted mock inputs and an expected output, rather than running against real warehouse data. Data tests assert properties of already-materialized real data; unit tests run before materialization on synthetic rows to prove the transformation is correct. They are ideal for testing edge cases in complex CASE logic or a NAV calculation without needing production data.
+
+</details>
+
+<details><summary><b>30.</b> What are the key YAML blocks of a dbt unit test?</summary>
+
+A unit test is defined under the top-level `unit_tests` key with `name`, `model` (the model under test), `given` (a list of mocked inputs, each an `input: ref(...)` with `rows`), and `expect` (the expected output rows). Each `given` input and the `expect` can set `format` to `dict`, `csv`, or `sql`. dbt feeds the mock rows through the model's compiled SQL and asserts the result equals `expect`.
+
+</details>
+
+<details><summary><b>31.</b> Write the idea of a unit test for a NAV-per-share calculation model.</summary>
+
+You would mock a `given` input with, say, `{net_assets: 1000000, shares_outstanding: 50000}` and assert `expect` rows of `{nav_per_share: 20.0}`. This proves the division and rounding logic is correct on a known case, including edge cases like zero shares (expecting a null or guarded value). It runs without touching the real fund tables, so you can test the math deterministically in CI.
+
+</details>
+
+<details><summary><b>32.</b> How do you run only tests in dbt, and how do tests fit into `dbt build`?</summary>
+
+`dbt test` runs all tests; `dbt build` runs models, snapshots, seeds, AND tests in DAG order, stopping downstream models if an upstream test fails. So `dbt build` is the gate that proves correctness end to end, which is exactly the "Done when" criterion. Running `dbt test` alone is useful for a quick assertion pass without rebuilding models.
+
+</details>
+
+<details><summary><b>33.</b> Why does `dbt build` stop building downstream models when a test fails, and why is that good?</summary>
+
+`dbt build` interleaves models and their tests by DAG position, so if a model fails its test, dbt skips the models that depend on it rather than propagating bad data. This "fail fast, contain the blast radius" behavior means a NAV invariant breach upstream never reaches the EMT-shaped mart. It is the practical reason `build` is preferred over running `run` and `test` separately.
+
+</details>
+
+<details><summary><b>34.</b> What is the difference between `severity: warn` and `severity: error` on a test?</summary>
+
+`severity: error` (default) makes a failing test fail the run, breaking `dbt build`; `severity: warn` logs the violation but lets the run succeed. You can also set `warn_if`/`error_if` thresholds (e.g. warn at >0 failures, error at >100). Warnings suit soft quality signals you want visibility on without blocking deployment, but core regulatory invariants should stay at `error`.
+
+</details>
+
+<details><summary><b>35.</b> What is a dbt snapshot and what modeling pattern does it implement?</summary>
+
+A snapshot captures the state of a mutable source table over time and implements Slowly Changing Dimension Type 2 (SCD2): when a tracked row changes, the old version is closed off and a new version is opened, preserving full history. dbt does this by adding validity columns and inserting new versions rather than overwriting. It is how you keep an auditable history of attributes that the source overwrites in place.
+
+</details>
+
+<details><summary><b>36.</b> Why are snapshots essential for auditable fund/share-class dimensions?</summary>
+
+Source systems usually overwrite an attribute (e.g. a share class's management fee or distribution policy) in place, destroying the prior value. A snapshot preserves every historical version with valid-from/valid-to ranges, so an auditor can ask "what was this share class's fee on a given NAV date" and get the answer. In a regulated fund-admin context that point-in-time reconstructability is often a hard requirement.
+
+</details>
+
+<details><summary><b>37.</b> What meta-columns does a dbt snapshot add to the output table?</summary>
+
+dbt adds `dbt_valid_from` (when this version became current), `dbt_valid_to` (when it was superseded, NULL/`dbt_valid_to_current` for the live row), `dbt_scd_id` (a surrogate key unique per version), and `dbt_updated_at`. With `hard_deletes='new_record'` it also adds `dbt_is_deleted`. These columns are what turn a flat extract into queryable SCD2 history.
+
+</details>
+
+<details><summary><b>38.</b> What are the two snapshot strategies and how do they detect change?</summary>
+
+The `timestamp` strategy uses an `updated_at` column — if the source row's timestamp is newer than the snapshot's, it records a new version; this is preferred when a reliable last-modified column exists. The `check` strategy compares a list of `check_cols` (or `'all'`) value-by-value and records a new version when any differ; use it when there is no trustworthy timestamp. Timestamp is cheaper and more reliable; check is the fallback.
+
+</details>
+
+<details><summary><b>39.</b> In a snapshot, what does the `unique_key` config identify and why must it be truly unique?</summary>
+
+`unique_key` identifies the business entity whose history you are tracking (e.g. `share_class_id`), so dbt can match a source row to its existing snapshot versions. If it is not actually unique per entity, dbt mismatches rows and corrupts the history — opening and closing the wrong versions. For composite keys you may concatenate or hash the parts into one deterministic key.
+
+</details>
+
+<details><summary><b>40.</b> How are dbt snapshots now defined in recent versions (v1.9+) versus older ones?</summary>
+
+In dbt Core v1.9+, snapshots are defined in YAML files under a `snapshots:` key with `name`, `relation: ref(...)`, and a `config` block (strategy, unique_key, updated_at/check_cols), replacing the older `.sql` file with a `{% snapshot %}` block. The YAML approach is the recommended modern form and makes configs consistent with the rest of the project. You run them with `dbt snapshot` or as part of `dbt build`.
+
+</details>
+
+<details><summary><b>41.</b> What does the `dbt_valid_to_current` config do, and why might you set it for downstream joins?</summary>
+
+By default a current (open) snapshot row has `dbt_valid_to = NULL`; setting `dbt_valid_to_current` (e.g. to `'9999-12-31'`) writes a sentinel high-date instead. This makes point-in-time `between dbt_valid_from and dbt_valid_to` joins simpler because you avoid special-casing NULL. It is a v1.9 convenience for cleaner SCD2 range queries.
+
+</details>
+
+<details><summary><b>42.</b> What does `hard_deletes='new_record'` change about snapshot behavior?</summary>
+
+By default snapshots do not detect rows deleted from the source. With `hard_deletes='new_record'` (v1.9+), when a previously-snapshotted row disappears, dbt inserts a final version marked with `dbt_is_deleted = true` and closes the prior version. This lets you audit "this share class existed until date X then was removed", which a plain snapshot would silently leave open forever.
+
+</details>
+
+<details><summary><b>43.</b> Why must a snapshot run reliably and on schedule rather than ad-hoc?</summary>
+
+A snapshot only records the states it actually observes; if it misses a run, an intermediate value that existed between runs is lost forever, leaving a gap in the SCD2 history. For audit-grade fund dimensions this means snapshots must run on a dependable cadence aligned to how often the source can change. Unlike a model, you cannot reconstruct missed history with a `--full-refresh`.
+
+</details>
+
+<details><summary><b>44.</b> What does `dbt docs generate` produce and what does `dbt docs serve` do?</summary>
+
+`dbt docs generate` compiles a documentation site (a `catalog.json` plus `manifest.json`) describing every model, column, test, source, description, and the lineage graph. `dbt docs serve` then hosts that as a local browsable website with an interactive DAG. Together they turn your project into self-documenting, navigable artifacts — part of the "Done when" docs criterion.
+
+</details>
+
+<details><summary><b>45.</b> How do you document a model and its columns in dbt?</summary>
+
+You add `description` keys in the model's YAML — at the model level and per column — and these flow into the generated docs and lineage site. You can embed reusable doc blocks with `{{ doc('block_name') }}` defined in `.md` files for longer descriptions. Good descriptions are what make the DAG "readable by a stranger", the explicit done-when condition.
+
+</details>
+
+<details><summary><b>46.</b> What is a dbt exposure and why would you add one for an EMT-shaped output?</summary>
+
+An exposure is a YAML-declared downstream consumer of your dbt models — a dashboard, a report, or in this case an EMT (European MiFID Template) file feed — that appears in the lineage graph and docs. Declaring it makes the dependency explicit so anyone can see which models feed the regulatory EMT output and what breaks if they change. It also lets you run `dbt build --select +exposure:emt_feed` to rebuild everything that exposure depends on.
+
+</details>
+
+<details><summary><b>47.</b> What keys does a dbt exposure require?</summary>
+
+An exposure needs `name`, `type` (e.g. `dashboard`, `application`, `analysis`, `ml`), `owner` (with `name`/`email`), and `depends_on` listing the `ref()`s it consumes; `url`, `description`, and `maturity` are optional. The `depends_on` is what wires it into the lineage graph. For the EMT feed you would list the mart model(s) that produce the template's rows.
+
+</details>
+
+<details><summary><b>48.</b> What is the dbt-utils package and name two macros it provides.</summary>
+
+dbt-utils is the most widely-used dbt package, providing reusable macros and generic tests; examples include `generate_surrogate_key` (deterministic hashing of business keys into a surrogate) and `equality`/`unique_combination_of_columns` tests, plus `star`, `union_relations`, and `date_spine`. You add it via `packages.yml` and `dbt deps`. It saves reinventing common SQL patterns and standardizes them across the team.
+
+</details>
+
+<details><summary><b>49.</b> What does the dbt-expectations package add, and what is it modeled on?</summary>
+
+dbt-expectations is a package of generic tests modeled on the Python Great Expectations library, giving you assertions like `expect_column_values_to_be_between`, `expect_column_values_to_match_regex`, and `expect_column_values_to_be_in_set`. It dramatically expands testable DQ rules beyond dbt's four built-ins — e.g. asserting an `isin` matches a 12-character regex or a NAV is within a plausible range. It is the go-to package for richer data-quality contracts.
+
+</details>
+
+<details><summary><b>50.</b> How do you declare and install dbt packages?</summary>
+
+You list them in a `packages.yml` file with each package's source and version (e.g. a `package:` name and `version:`, or a git/local source), then run `dbt deps` to download them into `dbt_packages/`. Pinning versions keeps builds reproducible. After installation their macros and tests are available throughout your project.
+
+</details>
+
+<details><summary><b>51.</b> Why pin package versions in `packages.yml` rather than tracking latest?</summary>
+
+Pinning (e.g. a specific `version:` range) makes builds reproducible and prevents a surprise upstream change from breaking your tests or macros between runs. In a regulated environment, reproducibility and a controlled upgrade path are themselves requirements. Tracking latest invites silent behavior changes that are hard to audit.
+
+</details>
+
+<details><summary><b>52.</b> How would you use dbt-expectations to assert ISIN format on a column?</summary>
+
+You attach the generic test `dbt_expectations.expect_column_values_to_match_regex` to the `isin` column with a regex for a 12-character alphanumeric code (two-letter country prefix, nine alphanumerics, one check digit). This enforces format at build time so a malformed ISIN fails `dbt build` before it reaches the EMT output. You could pair it with `not_null` and `unique` for a complete contract on the identifier.
+
+</details>
+
+<details><summary><b>53.</b> What is a surrogate key and why generate one with `dbt_utils.generate_surrogate_key`?</summary>
+
+A surrogate key is a single deterministic value derived (hashed) from one or more business-key columns, used as a stable join key independent of the source's natural keys. `dbt_utils.generate_surrogate_key(['fund_id','share_class_id'])` produces the same hash for the same inputs every run, so it is reproducible across environments. It standardizes composite-key handling and is heavily used in dimensional and Data-Vault-style modeling.
+
+</details>
+
+<details><summary><b>54.</b> What does `dbt compile` do versus `dbt run`?</summary>
+
+`dbt compile` renders your Jinja+SQL into the final executable SQL in the `target/` directory WITHOUT executing it against the warehouse, letting you inspect exactly what will run. `dbt run` compiles and then executes, building the models. `compile` is invaluable for debugging a macro or `is_incremental()` block before paying compute.
+
+</details>
+
+<details><summary><b>55.</b> What does `dbt parse` do and why is it useful in CI?</summary>
+
+`dbt parse` reads the project and builds the `manifest.json` (the graph and metadata) without running anything, validating that refs, configs, and YAML resolve. In CI it is a fast structural sanity check that catches a broken `ref`, a typo'd config, or a missing dependency before you spend compute. It is also how tools that consume the manifest (lineage, catalogs) get their input.
+
+</details>
+
+<details><summary><b>56.</b> What is the dbt manifest (`manifest.json`) and why does it matter?</summary>
+
+`manifest.json` is the compiled representation of your entire project — every node (model, test, source, snapshot, exposure), its config, dependencies, and compiled SQL. It is the source of truth for the DAG, docs, state comparison, and external integrations. Many advanced workflows (state-based selection, lineage tools, CI) read it.
+
+</details>
+
+<details><summary><b>57.</b> What does `dbt build --select state:modified+ --defer` enable?</summary>
+
+This is "slim CI": `state:modified+` selects only models changed since a stored manifest plus their downstream children, and `--defer` resolves unchanged upstream refs to the production relations instead of rebuilding them. The result is a CI run that builds only what your change affects, not the whole project. It dramatically cuts CI time and cost on large dbt projects.
+
+</details>
+
+<details><summary><b>58.</b> How do you select a model and everything downstream of it, versus everything upstream?</summary>
+
+dbt's graph selectors use `+` as a position operator: `model_name+` selects the model and all descendants (downstream), `+model_name` selects the model and all ancestors (upstream), and `+model_name+` selects both. You can also bound depth with a number, e.g. `2+model_name`. This is how you rebuild exactly the affected slice of the DAG, e.g. `+emt_mart` to rebuild everything feeding the EMT output.
+
+</details>
+
+<details><summary><b>59.</b> What is the difference between `dbt seed`, `dbt run`, and `dbt snapshot`?</summary>
+
+`dbt seed` loads small static CSV files from the `seeds/` directory into tables (e.g. a country-code or fund-type lookup); `dbt run` builds models from `SELECT` statements; `dbt snapshot` captures SCD2 history of mutable sources. `dbt build` runs all of these plus tests in dependency order. Seeds are for small reference data only, not bulk loading.
+
+</details>
+
+<details><summary><b>60.</b> Where do model configs come from and what is the precedence?</summary>
+
+Configs can be set in `dbt_project.yml` (broad, folder-level defaults), in a model's YAML properties file, or inline via `{{ config(...) }}` in the model SQL, with inline overriding YAML overriding project-level. This lets you set a default materialization for a whole folder (e.g. `staging` as views) and override individual models. Knowing the precedence prevents surprises about which materialization actually applies.
+
+</details>
+
+<details><summary><b>61.</b> How do you set all models in the `staging` folder to materialize as views by default?</summary>
+
+In `dbt_project.yml` under the `models:` key, nest your project name then the folder, e.g. `models: my_project: staging: +materialized: view`. The `+` prefix marks it as a config that cascades to everything in that path. Any individual staging model can still override with an inline `config(materialized='table')`.
+
+</details>
+
+<details><summary><b>62.</b> What is a dbt profile and where does `profiles.yml` live?</summary>
+
+`profiles.yml` holds the connection details (adapter type, host, database, schema, credentials, threads) for each target environment (dev, prod), and lives by default in `~/.dbt/` on your Ubuntu machine — outside the project so secrets are not committed. The project's `dbt_project.yml` names which `profile` to use. Keeping it out of the repo is the standard way to avoid leaking warehouse credentials.
+
+</details>
+
+<details><summary><b>63.</b> What does the `threads` setting in a dbt profile control?</summary>
+
+`threads` sets how many models dbt builds in parallel — dbt walks the DAG and runs independent nodes concurrently up to that limit. More threads speed up builds on a warehouse that can handle the concurrency, but too many can overwhelm a small engine like a single DuckDB process. For local DuckDB work a modest number (e.g. 4) is typical.
+
+</details>
+
+<details><summary><b>64.</b> Why is dbt-duckdb a good adapter for local hands-on learning?</summary>
+
+dbt-duckdb runs the warehouse in-process as an embedded DuckDB database — no server to stand up, fast, and it reads/writes Parquet and CSV directly, which suits a local medallion lake. It lets you rebuild the Phase-1 mart entirely on your laptop with zero infrastructure. The trade-off is it is single-process, so it is for development and small data, not a shared production warehouse.
+
+</details>
+
+<details><summary><b>65.</b> What is dbt-trino and when would you reach for it over dbt-duckdb?</summary>
+
+dbt-trino is the adapter that runs dbt transformations through a Trino (distributed query engine) cluster, federating across many sources and scaling to large data. You reach for it when DuckDB's single-process model is too small or when you must query a real lakehouse/multiple catalogs. For learning you prototype on DuckDB; for a production shared compute layer Trino is a realistic target.
+
+</details>
+
+<details><summary><b>66.</b> `dbt build` fails with "Compilation Error ... depends on a node named X which was not found". What does it mean?</summary>
+
+It means a `ref('X')` (or `source(...)`) points at a model/source that does not exist in the project — a typo, a deleted model, or a file not saved. dbt resolves the DAG at parse time and cannot find node X. Fix the name, confirm the model file exists, and re-run; `dbt parse` would have caught it early.
+
+</details>
+
+<details><summary><b>67.</b> A model builds but a `unique` test fails on its primary key. What does that tell you and how do you investigate?</summary>
+
+It tells you the model is producing duplicate key values — usually a fan-out join (a one-to-many you treated as one-to-one) or a missing dedup in staging. Investigate by querying the model grouped by the key with `having count(*) > 1` to find offending rows, then trace which join multiplied them. The fix is correcting the join grain or adding a dedup, not loosening the test.
+
+</details>
+
+<details><summary><b>68.</b> What is "fan-out" in a dbt model and why is it a frequent test-failure cause?</summary>
+
+Fan-out is when a join to a table with multiple matching rows multiplies the result set, inflating row counts and breaking `unique` tests and aggregations. It happens when you join on a key that is not unique on the joined side. The cure is to either aggregate the many-side to the correct grain first (often in an intermediate model) or join on the correct unique key.
+
+</details>
+
+<details><summary><b>69.</b> Why is "the DAG is readable by a stranger" an explicit done-when criterion?</summary>
+
+Because an analytics team inherits and extends each other's models; if the lineage is a tangle of cryptic names and skipped layers, onboarding and debugging cost explode. A medallion-layered DAG with clear staging/intermediate/marts naming and descriptions lets a newcomer trace any number back to its sources unaided. Readability is a maintainability property, not cosmetics.
+
+</details>
+
+<details><summary><b>70.</b> How do you decide a model should be `table` rather than `view`?</summary>
+
+Choose `table` when the model is queried often enough that recomputing it on every read is more expensive than periodically rebuilding and storing it, or when its logic is heavy (large joins/aggregations) and downstream consumers need fast reads. Views win when freshness matters more than read latency and the logic is cheap. The deciding question is read frequency × compute cost versus rebuild cost.
+
+</details>
+
+<details><summary><b>71.</b> When is `incremental` the right materialization over `table`?</summary>
+
+Choose `incremental` when the model is large and append-dominant — most rows never change once written (event logs, daily NAV, transactions) — so rebuilding the whole table each run is wasteful. Incremental processes only the delta, slashing build time and cost. If rows frequently mutate across their whole history or the table is small, a plain `table` is simpler and less error-prone.
+
+</details>
+
+<details><summary><b>72.</b> For an audited share-class attribute history, which dbt construct do you choose and why?</summary>
+
+A snapshot, because it implements SCD2 with validity ranges and preserves every prior value of attributes the source overwrites — exactly what auditors need to reconstruct point-in-time state. An incremental model only accumulates new rows; it does not version mutable attributes. The snapshot's `dbt_valid_from`/`dbt_valid_to` columns are the audit trail.
+
+</details>
+
+<details><summary><b>73.</b> What is a dbt macro and give a practical use.</summary>
+
+A macro is a reusable piece of Jinja-templated SQL (defined in `macros/`) callable from models, like a function. A practical use is a `cents_to_currency` formatter, a dynamic `pivot`, or a `limit_data_in_dev` macro that caps row counts in the dev environment to speed local builds. Macros keep SQL DRY and encode team conventions.
+
+</details>
+
+<details><summary><b>74.</b> What is the dbt `target` variable and a common use for it?</summary>
+
+`target` exposes the current run's profile context — `target.name` (e.g. `dev` or `prod`), `target.schema`, `target.database`. A common use is `{% if target.name == 'dev' %}` to limit data or change behavior only in development, e.g. filtering to recent NAV dates so local builds stay fast. It lets one codebase behave differently per environment.
+
+</details>
+
+<details><summary><b>75.</b> What is the difference between dbt's `vars` and `env_var`?</summary>
+
+`vars` are project variables defined in `dbt_project.yml` or passed with `--vars` on the CLI, read via `{{ var('name') }}`, for configurable build-time values. `env_var` reads operating-system environment variables via `{{ env_var('NAME') }}`, the standard way to inject secrets (like warehouse passwords) without committing them. Use `vars` for logic toggles, `env_var` for secrets and environment-specific config.
+
+</details>
+
+<details><summary><b>76.</b> How do dbt tags help and how do you run by tag?</summary>
+
+A `tags` config labels models/tests (e.g. `tags: ['nav','daily']`) so you can select a logical group regardless of folder, via `dbt build --select tag:daily`. This is handy for scheduling subsets — running only the daily-NAV slice in a morning job, say. Tags cut across the DAG where folder structure cannot.
+
+</details>
+
+<details><summary><b>77.</b> What is the difference between `dbt run --select` and `--exclude`?</summary>
+
+`--select` builds only the nodes matching the selector (and is the primary way to scope a run), while `--exclude` removes matching nodes from whatever `--select` chose (or from the full set). For example `dbt build --select marts --exclude tag:slow` builds the marts but skips the slow ones. They compose, with exclude applied after select.
+
+</details>
+
+<details><summary><b>78.</b> What does a freshness `error_after` breach mean operationally for a fund pipeline?</summary>
+
+It means the source's newest row is older than your tolerance — the upstream feed (e.g. the daily NAV or positions file) failed to land or arrived late. `dbt source freshness` errors, and your orchestrator should halt downstream transformation rather than compute NAV on stale data. Catching it at the source gate prevents publishing a stale figure to the EMT/EPT output.
+
+</details>
+
+<details><summary><b>79.</b> Why might you NOT test every column with `not_null`, and what is the discipline instead?</summary>
+
+Over-testing creates noise and slow builds, and some columns are legitimately nullable, so blanket `not_null` produces false failures or trains people to ignore tests. The discipline is to test invariants that actually matter: keys (`unique`, `not_null`), referential integrity, accepted value sets, and domain rules like positive NAV. Tests should encode contracts, not decorate every column.
+
+</details>
+
+<details><summary><b>80.</b> What is the medallion-to-dbt mapping for a NAV pipeline, concretely?</summary>
+
+Bronze/staging = lightly-cleaned raw feeds (`stg_nav_raw`, `stg_positions`), silver/intermediate = conformed joins and computed share-class figures (`int_share_class_nav`), gold/marts = business-facing facts and dimensions (`fct_nav`, `dim_share_class`) and the EMT-shaped output. Each layer adds exactly one kind of responsibility. This makes the lineage explain itself and isolates where any error entered.
+
+</details>
+
+<details><summary><b>81.</b> Why are dbt snapshots loaded insert-only / non-destructively, and how does that aid audit?</summary>
+
+Snapshots never update or delete historical versions; they only close a version (set `dbt_valid_to`) and insert the new one, so the table is an append-only history. This immutability means an auditor can trust that a past version was never silently rewritten. It mirrors the insert-only philosophy that makes patterns like Data Vault auditable.
+
+</details>
+
+<details><summary><b>82.</b> How would you encode a NAV invariant as a singular test?</summary>
+
+Write a `.sql` file in `tests/` selecting rows that violate the rule, e.g. `select * from {{ ref('fct_nav') }} where nav_per_share <= 0 or nav_per_share is null`. If any rows return, `dbt build` fails, flagging an impossible NAV. You could extend it to reconcile sum of share-class assets against total fund net assets within a tolerance.
+
+</details>
+
+<details><summary><b>83.</b> What is "column-level lineage" and why is it valuable for regulated data?</summary>
+
+Column-level lineage traces how each output column is derived from specific upstream columns, not just which tables feed which. For regulated outputs it lets you prove provenance — "this EMT field comes from these source columns through these transforms" — and assess the precise blast radius of a change. dbt Core gives model-level lineage; column-level is a dbt Cloud / SQLMesh capability.
+
+</details>
+
+<details><summary><b>84.</b> What is SQLMesh and why is it positioned as dbt's challenger in this lesson?</summary>
+
+SQLMesh is an open-source SQL transformation framework, backwards-compatible with dbt projects, that adds capabilities dbt charges for in Cloud — a built-in scheduler, automatic column-level lineage, and a Terraform-style plan/apply workflow with virtual environments. It is the "evaluate at eval level" alternate you compare against dbt to understand where dbt's model ends. The lesson wants you aware of it, not migrated to it.
+
+</details>
+
+<details><summary><b>85.</b> What are SQLMesh "virtual data environments" and what problem do they solve?</summary>
+
+Virtual data environments let developers test changes in an isolated environment WITHOUT physically copying production data — SQLMesh reuses already-built tables and only materializes the models that actually changed, swapping views to point at the right physical objects. This makes spinning up a dev environment near-instant and cheap, versus dbt typically rebuilding into a separate dev schema. It is SQLMesh's headline efficiency feature.
+
+</details>
+
+<details><summary><b>86.</b> How does SQLMesh's plan/apply workflow differ from `dbt run`?</summary>
+
+SQLMesh separates `plan` (compute and display the exact blast radius of a change — which models are breaking vs non-breaking, what will be backfilled) from `apply` (execute it), like Terraform. `dbt run` compiles and executes in one step with no pre-execution preview of impact. The plan step lets you see and approve changes before spending warehouse compute.
+
+</details>
+
+<details><summary><b>87.</b> How does SQLMesh derive column-level lineage automatically?</summary>
+
+SQLMesh parses your raw SQL with SQLGlot (a SQL parser/transpiler), giving it a real understanding of the query's structure, so it can compute column-level lineage and validate models at compile time without running them. dbt treats SQL more as opaque text it templates, so it does not get column-level lineage natively. The SQLGlot foundation is why SQLMesh can offer compile-time checks dbt cannot.
+
+</details>
+
+<details><summary><b>88.</b> SQLMesh claims it rebuilds only changed tables — how does it know what changed?</summary>
+
+SQLMesh fingerprints each model (a snapshot of its definition and dependencies) and tracks state, so on a `plan` it compares fingerprints and intervals to determine which models are new, modified, or unchanged, rebuilding only what differs. Combined with virtual environments, unchanged models are reused rather than recomputed. This is the mechanism behind its speed/cost advantage in benchmarks.
+
+</details>
+
+<details><summary><b>89.</b> Name one real trade-off of adopting SQLMesh over dbt today.</summary>
+
+SQLMesh introduces several new concepts — plan/apply, model kinds, interval/state tracking, virtual environments, snapshot fingerprinting — that carry a steeper learning curve and a smaller ecosystem/community than dbt's. The payoff (cost, speed, free lineage) is real, but the upfront investment and ecosystem maturity are genuine costs. That is why the lesson keeps it at evaluation level rather than mandating a switch.
+
+</details>
+
+<details><summary><b>90.</b> Why does the lesson combine 5.2.1 and 5.3.1 (dbt and the SQL transformation layer) into one block?</summary>
+
+Because dbt IS the SQL transformation layer in this stack — learning dbt's project structure, materializations, tests, and snapshots is learning how the transformation layer is built, modeled, and governed. Treating them separately would artificially split tool mechanics from the architectural role they serve. The combined block teaches dbt as the modeling-to-production bridge, not as an isolated CLI.
+
+</details>
+
+<details><summary><b>91.</b> How does dbt help "data-quality contracts become executable" specifically?</summary>
+
+A contract like "every NAV row has a non-null positive value and a valid ISIN" is written as `not_null`/`accepted_values`/dbt-expectations tests and singular tests, which run on every `dbt build` and fail the pipeline on breach. The contract is no longer prose — it is code the CI enforces. This is the concrete sense in which dbt operationalizes data quality.
+
+</details>
+
+<details><summary><b>92.</b> Your `dbt build` is green locally but fails in CI on `state:modified`. What is the likely cause?</summary>
+
+CI compares against a stored production manifest (the deferred state); if that artifact is missing, stale, or the `--state` path is wrong, `state:modified` selects nothing or the wrong set, and `--defer` cannot resolve upstream refs. Check that CI downloads the latest production `manifest.json` and that `--state`/`--defer` point at it. A mismatch between local full builds and CI slim builds is almost always a state-artifact problem.
+
+</details>
+
+<details><summary><b>93.</b> Why should staging models rename and recast even when the source "looks fine"?</summary>
+
+Standardizing names (snake_case, consistent prefixes) and types at the boundary insulates every downstream model from source quirks, so when the source changes a column name or type you fix it once in staging. It also makes the warehouse vocabulary consistent for the whole team. "Looks fine now" is not a contract; the staging layer makes the shape explicit and stable.
+
+</details>
+
+<details><summary><b>94.</b> What does `dbt build` do when a snapshot is included, and in what order?</summary>
+
+`dbt build` runs seeds, models, snapshots, and tests together in dependency order — snapshots run at their DAG position so models that `ref` a snapshot get the freshly-captured history, and tests on each node run right after it builds. This single command is why the done-when criterion is "`dbt build` is green from scratch". It guarantees the whole project, including SCD2 capture, is consistent in one pass.
+
+</details>
+
+<details><summary><b>95.</b> How do you verify "only changed rows moved" after an incremental run?</summary>
+
+Inspect the run's row-count/insert metrics (dbt logs rows affected), or compare the table before and after, or query for rows with the latest `loaded_at`/batch marker. You can also add a test or a `dbt run --select model+` with logging and confirm the inserted count matches the source delta. If the count equals a full rebuild, your incremental filter is not actually filtering.
+
+</details>
+
+<details><summary><b>96.</b> What is the risk of using `check` strategy with `check_cols: 'all'` on a wide table?</summary>
+
+Comparing every column on every run is expensive and brittle — any incidental change (even a reformatted but semantically identical value, or a volatile audit column) triggers a new SCD2 version, bloating history with noise. It is better to list only the business-meaningful `check_cols` you actually want to version. Reserve `'all'` for narrow tables where every column is significant.
+
+</details>
+
+<details><summary><b>97.</b> Why declare an exposure for a regulatory feed even though dbt does not "build" it?</summary>
+
+The exposure makes an otherwise-invisible downstream dependency explicit in lineage and docs, so the regulatory EMT/EPT consumer is part of the impact analysis when an upstream model changes. It also documents ownership and lets you run `+exposure:name` to rebuild its full upstream chain. Without it, someone could break the regulatory output by changing a model and never realize it fed a filing.
+
+</details>
+
+<details><summary><b>98.</b> What is the gotcha with `ephemeral` models and debugging?</summary>
+
+Because ephemeral models are inlined as CTEs and never materialized, you cannot query them directly to inspect intermediate results, and errors surface inside the consuming model's compiled SQL where they are harder to locate. Heavy reuse also produces deeply nested CTEs that some engines optimize poorly. When debugging, temporarily switch an ephemeral model to `view` to inspect it.
+
+</details>
+
+<details><summary><b>99.</b> How do generic tests and singular tests divide responsibility in a mature project?</summary>
+
+Generic tests cover the broad, repeatable invariants on keys and columns (`unique`, `not_null`, `relationships`, accepted values, dbt-expectations ranges/regex), applied densely and cheaply. Singular tests encode the few complex, relationship-spanning business rules that no parameterized test expresses — like cross-model NAV reconciliation. Most assertions are generic; a handful of singular tests carry the bespoke domain logic.
+
+</details>
+
+<details><summary><b>100.</b> Final synthesis: how would you justify the materialization of each layer to a stranger reviewing your DAG?</summary>
+
+Staging as `view` because it is cheap 1:1 cleanup that should always reflect the source; intermediate as `view` or `ephemeral` when light, `table` when reused heavily; marts as `table` for fast BI reads, switching append-heavy facts like daily NAV to `incremental` to avoid full rebuilds; and mutable dimensions as `snapshot` for auditable SCD2 history. The rule is freshness-vs-read-cost-vs-rebuild-cost, decided per model — and being able to state that reasoning is the explicit "Done when" criterion.
+
+</details>
+
+
+## Phase 2 · 5.2.2 Orchestrated ELT (build-vs-buy) — 100 self-test questions
+
+<details><summary><b>1.</b> What does "build-vs-buy" mean in the context of orchestrated ELT?</summary>
+
+It is the architectural decision between paying a managed vendor like Fivetran to run and maintain ingestion connectors ("buy") versus self-hosting an open-source tool like Airbyte that you operate yourself ("build"). The "buy" side trades money for engineer-hours and reliability; the "build" side trades a lower cash bill for the ongoing labour of patching connectors, fixing schema drift, and keeping the platform alive. As an architect you must price both sides for a specific estate rather than picking on ideology.
+
+</details>
+
+<details><summary><b>2.</b> What does the acronym MAR stand for in Fivetran's pricing?</summary>
+
+MAR stands for Monthly Active Rows, the unit Fivetran bills on. It counts the distinct rows synced from a source to your destination within a single calendar month, identified by their primary keys. Your bill is essentially `total MAR × spend rate`, so understanding MAR is the core of pricing the "buy" option.
+
+</details>
+
+<details><summary><b>3.</b> How is a single Monthly Active Row defined in Fivetran's model?</summary>
+
+A Monthly Active Row is a distinct primary key that was inserted, updated, or deleted in your destination during the calendar month. Fivetran tracks rows by their primary key, so "active" means the row changed (or was newly created) at least once that month. Rows that exist but never change in a month do not count.
+
+</details>
+
+<details><summary><b>4.</b> If the same row is updated 50 times in one month, how many MAR does it consume?</summary>
+
+Exactly one. Fivetran counts each distinct primary key only once per calendar month regardless of how many times it is updated or re-synced that month. This is why high-frequency syncing of a small, churny table does not multiply your bill the way row-by-row event billing would.
+
+</details>
+
+<details><summary><b>5.</b> Why does syncing every 15 minutes instead of every 24 hours not necessarily increase your Fivetran MAR cost?</summary>
+
+Because MAR is counted per distinct row per month, not per sync. A row that changes ten times a day is still one MAR for the month whether you capture each change at 15-minute or daily cadence. Sync frequency affects freshness (and which plan tier you need), not the raw MAR count for already-changing rows.
+
+</details>
+
+<details><summary><b>6.</b> Which row operations contribute to MAR?</summary>
+
+Inserts of new rows, updates to existing rows, and deletes all contribute to MAR. Deletes count when the Capture Deletes feature is enabled, because Fivetran records the deletion as a soft-delete update to that row. The common thread is that the row's state changed during the month.
+
+</details>
+
+<details><summary><b>7.</b> Does Fivetran count the initial historical backfill (first full sync) toward MAR?</summary>
+
+No. Initial syncs and historical/full re-imports are excluded from billable MAR, and new connections also get a free initial window. This matters because a one-time multi-billion-row backfill of a fund's trade history would be ruinous if it were billed, so Fivetran deliberately makes the first load free and bills only ongoing change.
+
+</details>
+
+<details><summary><b>8.</b> A teammate claims "Fivetran charges per row synced." Correct them precisely.</summary>
+
+Fivetran charges per distinct active row per month, not per row synced. The same row synced a thousand times in a month is one MAR; unchanged rows pulled during a re-sync are not billed; and the initial historical load is free. The mental model is "pay for change volume per month," not "pay per row movement."
+
+</details>
+
+<details><summary><b>9.</b> What is the relationship `total monthly usage × spend rate = connection monthly cost`?</summary>
+
+It is Fivetran's headline cost formula: your total billable MAR for a connection multiplied by a per-row spend rate gives that connection's monthly charge. The spend rate is not flat — it declines as your volume grows and depends on your plan tier. So doubling MAR does not exactly double cost.
+
+</details>
+
+<details><summary><b>10.</b> Why does Fivetran's per-row spend rate decline as volume increases?</summary>
+
+Fivetran uses tiered, consumption-based pricing where the marginal rate per MAR drops as you cross higher volume bands. The intent is volume discounting: a customer moving 50 million MAR pays a lower rate per row than one moving 50 thousand. The architectural consequence is that cost-per-row is not constant, so you cannot linearly extrapolate a small pilot's bill to production.
+
+</details>
+
+<details><summary><b>11.</b> How does MAR aggregate across multiple connections in one Fivetran account?</summary>
+
+Each connection contributes its own MAR, and these sum to a total account MAR that determines which volume-discount band your spend rate falls into. Two connections syncing identical data each count their rows independently, but the combined total can push you into a cheaper marginal tier. This is why consolidating into one account can lower the effective rate.
+
+</details>
+
+<details><summary><b>12.</b> What are Fivetran's four main plan tiers?</summary>
+
+Free, Standard, Enterprise, and Business Critical. They differ in features such as sync frequency, security and compliance guarantees, and support — for example Standard offers 15-minute syncs while Enterprise offers 1-minute syncs, and Business Critical adds customer-managed encryption keys and PCI DSS Level 1 certification. Higher tiers cost more per MAR but unlock the controls a regulated estate may require.
+
+</details>
+
+<details><summary><b>13.</b> What does the Fivetran Free tier offer and where is its ceiling?</summary>
+
+The Free plan covers up to 500,000 MAR per month for connections (with a much smaller allowance for activations). It lets a team prototype ingestion without a contract, but a real fund-administration estate will blow past 500,000 MAR quickly, so Free is a proof-of-concept tool, not a production answer.
+
+</details>
+
+<details><summary><b>14.</b> Why might a regulated fund administrator be forced onto Fivetran's Business Critical tier specifically?</summary>
+
+Because Business Critical adds controls that compliance demands — customer-managed encryption keys (so the customer controls the key material) and PCI DSS Level 1 certification, among other hardened security features. A regulated EU fund handling investor and payment data often cannot accept the lower tiers' shared-key model. The architectural point is that compliance, not data volume alone, can dictate the tier and therefore the price.
+
+</details>
+
+<details><summary><b>15.</b> What is the "long tail" of SaaS sources, and why does managed ELT win there?</summary>
+
+The long tail is the large set of small, third-party SaaS systems each contributing modest data — a CRM, a ticketing tool, a marketing platform, an HR system. Managed ELT wins here because the vendor maintains hundreds of pre-built, API-aware connectors and absorbs the constant breakage when those SaaS APIs change. Building and babysitting a bespoke connector for each low-value source would cost far more engineer-time than the MAR bill.
+
+</details>
+
+<details><summary><b>16.</b> Why is connector maintenance the hidden cost of the "build" (self-hosted) option?</summary>
+
+Because SaaS APIs, schemas, and auth flows change continuously, and every change can silently break a self-hosted connector that nobody is paid to watch. The cash you save on a vendor bill reappears as engineer-hours spent diagnosing failed syncs, upgrading connector versions, and handling schema drift. Pricing build-vs-buy honestly means putting a salary number on that maintenance line.
+
+</details>
+
+<details><summary><b>17.</b> How do you convert "engineer babysitting connectors" into a number for a build-vs-buy note?</summary>
+
+Estimate the fraction of an engineer's time the self-hosted platform consumes — connector upgrades, sync failures, schema-drift fixes, on-call — and multiply by the loaded annual salary. For example, if Airbyte connectors absorb 20 percent of a 90,000-euro engineer, that is 18,000 euros per year of hidden "build" cost to set against Fivetran's MAR bill. Without that figure the comparison is dishonest because it pretends self-hosting is free.
+
+</details>
+
+<details><summary><b>18.</b> Define the "crossover point" in a Fivetran-vs-Airbyte decision.</summary>
+
+The crossover point is the data-volume (MAR) level at which Fivetran's managed bill equals the fully-loaded cost of an engineer maintaining a self-hosted Airbyte for the same sources. Below it, managed ELT is cheaper because the MAR bill is small relative to a salary; above it, self-hosting wins because the MAR bill outgrows the fixed maintenance labour. Stating this number is the whole point of the build-vs-buy exercise.
+
+</details>
+
+<details><summary><b>19.</b> Why does the crossover point favour Fivetran at low volume and Airbyte at high volume?</summary>
+
+Fivetran's cost scales with MAR (a variable cost), while self-hosted Airbyte's dominant cost is a roughly fixed engineer-maintenance line that you pay whether you move one source or twenty. At low volume the fixed salary dwarfs a tiny MAR bill, so buying is cheaper; at high volume the MAR bill grows past the fixed salary, so building is cheaper. The two cost curves cross where variable equals fixed.
+
+</details>
+
+<details><summary><b>20.</b> A source has very high MAR but a perfectly maintained Airbyte connector exists for it. Which way does the crossover lean?</summary>
+
+It leans toward self-hosting (build), because the high MAR makes Fivetran's variable bill large while the maintained connector keeps Airbyte's marginal effort low. The maintenance cost — usually the killer for self-hosting — is mostly absorbed by the connector already existing and being stable, so you mainly pay infrastructure plus light oversight. High volume plus a stable connector is the classic "build" quadrant.
+
+</details>
+
+<details><summary><b>21.</b> A source has tiny MAR but a flaky, frequently-breaking API. Which way does the crossover lean?</summary>
+
+It leans toward managed ELT (buy), because the MAR bill is trivial while the flaky API would otherwise consume large amounts of engineer-time to keep a self-hosted connector alive. You are effectively paying Fivetran a small MAR fee to absorb the maintenance pain you would otherwise carry. Low volume plus high breakage is the classic "buy" quadrant.
+
+</details>
+
+<details><summary><b>22.</b> Why are "core banking, mainframe, and data-sovereignty" sources the place where managed ELT typically loses?</summary>
+
+Because these are the systems where the data is most sensitive and most constrained — it may be legally or contractually forbidden to send to a third-party SaaS cloud, and the source protocols (mainframe, core banking) are bespoke rather than long-tail SaaS. The managed vendor's main advantage (maintained SaaS connectors) does not apply, while its main disadvantage (data leaving your perimeter) becomes a hard blocker. So these stay in-house regardless of the MAR math.
+
+</details>
+
+<details><summary><b>23.</b> What is "data sovereignty" and why is it a hard constraint for an EU fund estate?</summary>
+
+Data sovereignty is the requirement that data be stored and processed under, and physically within, a particular jurisdiction's legal control — for an EU fund, often that data must remain within the EU and under EU law. It is a hard (not soft) constraint because regulators, fund prospectuses, and client contracts can flatly prohibit certain data from crossing borders or being processed by a foreign-controlled provider. No cost saving justifies violating it, so it can veto managed ELT outright.
+
+</details>
+
+<details><summary><b>24.</b> How can Fivetran's data-residency feature partially address EU sovereignty concerns?</summary>
+
+Fivetran lets you pin a destination's data-residency region — for the EU this is the Europe (Frankfurt) region — so that customer data is kept within EU borders rather than routed through the US. This satisfies a "data must stay in the EU" requirement for many sources. It does not, however, satisfy a requirement that data never touch a third-party-controlled environment at all.
+
+</details>
+
+<details><summary><b>25.</b> What is Fivetran's Hybrid Deployment model and what problem does it solve?</summary>
+
+In Hybrid Deployment, a Fivetran-provided agent runs inside your own network and performs the actual data processing locally, while Fivetran's cloud acts only as the control plane that orchestrates and configures pipelines. It solves the case where you want Fivetran's managed connectors and orchestration but cannot let the data itself leave your secure perimeter. The data stays local; only metadata and control signals talk to Fivetran's SaaS.
+
+</details>
+
+<details><summary><b>26.</b> For a sovereignty-constrained source, why might Hybrid Deployment still be unacceptable to a compliance team?</summary>
+
+Because even though the data stays in your network, the Fivetran control plane still orchestrates the pipeline and receives metadata, and the agent maintains constant communication with a foreign-controlled SaaS. A strict reading of sovereignty rules — "no third-party control plane touches this system" — can reject any dependency on an external orchestrator. The architect must check whether the constraint is about data location or about control and dependency.
+
+</details>
+
+<details><summary><b>27.</b> In the Do task, six internal systems and four SaaS sources are split how between build and buy?</summary>
+
+The four maintained-connector SaaS sources are the natural "buy" candidates for Fivetran, because they are long-tail and the vendor absorbs their API churn. The six internal systems — core banking, transfer agency, fund accounting, etc. — are the natural "build"/in-house candidates, because some cannot leave the EU perimeter and they lack off-the-shelf maintained connectors. The note's job is to make that split explicit and justified.
+
+</details>
+
+<details><summary><b>28.</b> How would you structure the half-page build-vs-buy note for a fund admin?</summary>
+
+State the estate (6 internal, 4 SaaS), estimate Fivetran MAR cost for the SaaS sources, estimate engineer-hours to self-host the internal ones, give the crossover point, and flag which internal sources are off-limits to managed ELT for sovereignty. Keep it decision-oriented: each source gets a build/buy verdict with a one-line reason. The deliverable is a recommendation an architecture board can sign, not an essay.
+
+</details>
+
+<details><summary><b>29.</b> Which internal fund-admin sources are most likely "off-limits" to any managed ELT vendor?</summary>
+
+Core banking ledgers, the transfer-agency register of investor holdings, fund-accounting/NAV systems, and anything carrying personal investor data under strict residency rules. These hold the most sensitive and most regulated data, often under explicit "data must not leave the perimeter / EU" obligations. They stay self-hosted regardless of the MAR economics.
+
+</details>
+
+<details><summary><b>30.</b> Why is a transfer-agency (TA) register a poor candidate for sending to a managed SaaS cloud?</summary>
+
+The TA register is the authoritative record of who owns which units of a fund — investor identities, holdings, and transactions — making it both highly sensitive personal/financial data and core to the fund's legal operation. Sending it to a third-party-controlled cloud raises GDPR, residency, and confidentiality issues that usually forbid it. It is a textbook "build, keep inside the perimeter" source.
+
+</details>
+
+<details><summary><b>31.</b> How does NAV (Net Asset Value) data flow relate to the build-vs-buy decision?</summary>
+
+NAV is the per-unit valuation produced by fund accounting and is both highly sensitive and tightly controlled, so the systems that compute and store it are typically in-scope for sovereignty and stay self-hosted. Downstream, non-sensitive distribution of published NAVs to external SaaS reporting tools might be a managed-ELT candidate. The architect separates the regulated core (build) from the publishable periphery (potentially buy).
+
+</details>
+
+<details><summary><b>32.</b> Why are EMT and EPT files more of a downstream concern than a managed-ELT ingestion target?</summary>
+
+EMT (European MiFID Template) and EPT (European PRIIPs Template) are standardised regulatory cost/risk disclosure files produced from internal data and exchanged with distributors. They are outputs of the regulated core rather than long-tail SaaS sources, so they are not the kind of system a Fivetran connector ingests. Their existence reinforces that the sensitive, regulated data lives in self-hosted systems that managed ELT should not touch.
+
+</details>
+
+<details><summary><b>33.</b> How do LEI and ISIN identifiers relate to deciding which sources stay in-house?</summary>
+
+ISIN identifies securities and LEI identifies legal entities; both are reference keys that flow through the most sensitive internal systems (fund accounting, TA, instrument masters). The systems that are authoritative for instrument and entity data are usually part of the regulated core and stay self-hosted. They are useful as join keys but their host systems are typically build-side, not managed-ELT candidates.
+
+</details>
+
+<details><summary><b>34.</b> Why does DORA strengthen the case against routing core feeds through a managed ELT vendor?</summary>
+
+DORA (the EU Digital Operational Resilience Act) imposes strict third-party ICT risk-management, oversight, and exit-planning obligations on financial entities and their critical providers. Pushing a core banking or TA feed through Fivetran turns the vendor into a regulated third-party dependency you must assess, monitor, and be able to exit. That governance burden can tip a marginal source toward staying in-house even when the MAR cost looks attractive.
+
+</details>
+
+<details><summary><b>35.</b> How do UCITS/AIFMD obligations influence the perimeter you draw around managed ELT?</summary>
+
+UCITS and AIFMD govern how funds and their managers handle investor protection, depositary oversight, and data, which constrains where holdings, valuations, and investor data may be processed. Data tied to these obligations generally must remain under controlled, often EU-resident, processing. That pushes the corresponding systems into the self-hosted "build" set rather than a third-party managed cloud.
+
+</details>
+
+<details><summary><b>36.</b> What is Airbyte's role in the build-vs-buy comparison?</summary>
+
+Airbyte is the open-source, self-hosted connector platform that represents the "build" option you price against Fivetran's "buy" option. Running it yourself gives you full control and keeps data inside your perimeter, at the cost of operating the platform and maintaining connectors. It is the concrete baseline for estimating the engineer-hours side of the crossover calculation.
+
+</details>
+
+<details><summary><b>37.</b> What is `abctl` and why does it matter for self-hosting Airbyte today?</summary>
+
+`abctl` is Airbyte's official command-line tool for installing and managing a local/self-hosted Airbyte deployment. It is the current recommended way to stand up Airbyte because it provisions a Kubernetes-based install under the hood rather than the deprecated Docker Compose path. Knowing it exists matters because build-vs-buy estimates must reflect the real, current operational tool, not an outdated quickstart.
+
+</details>
+
+<details><summary><b>38.</b> How does `abctl` actually run Airbyte under the hood?</summary>
+
+`abctl` uses kind (Kubernetes in Docker) to create a local Kubernetes cluster running inside a Docker container, then deploys Airbyte into it using Helm with the official Airbyte chart. This lets a single laptop preview what a production Kubernetes deployment looks like without you provisioning a real cluster. The operational implication is that "self-hosting Airbyte" now means "operating Kubernetes," which raises the maintenance estimate.
+
+</details>
+
+<details><summary><b>39.</b> Why was Airbyte's Docker Compose deployment deprecated, and what replaced it?</summary>
+
+Docker Compose was deprecated because Kubernetes became the de-facto production standard, offering better scalability, resource management, and a clean path from local to production. It was replaced by `abctl`, which deploys to a kind-based Kubernetes cluster locally and mirrors the production Helm/Kubernetes architecture. The `--migrate` flag that once helped move off Compose has itself been removed, so the recommended path is a fresh deployment.
+
+</details>
+
+<details><summary><b>40.</b> A colleague's old runbook says "deploy Airbyte with `docker compose up`." Why is that runbook out of date?</summary>
+
+Because Airbyte officially deprecated the Docker Compose deployment; it is no longer supported and the recommended install is `abctl`, which uses kind plus Helm. Following the old runbook may appear to work with stale images but leaves you on an unsupported path with no upgrade story. The current guidance is a fresh `abctl` deployment, not a Compose migration.
+
+</details>
+
+<details><summary><b>41.</b> When you self-host Airbyte for production, what deployment technology should you assume?</summary>
+
+A real Kubernetes cluster deployed via the official Airbyte Helm chart, since the local `abctl`/kind setup is explicitly designed to preview that production shape. This means the maintenance estimate in a build-vs-buy note must include Kubernetes operations — upgrades, scaling, monitoring, and cluster maintenance. That is a meaningful chunk of the "engineer babysitting" cost.
+
+</details>
+
+<details><summary><b>42.</b> Name three recurring operational tasks that make self-hosted Airbyte a maintenance line item.</summary>
+
+Upgrading the Airbyte platform and individual connector versions, handling connector breakages when source APIs or schemas change, and operating the underlying Kubernetes infrastructure (scaling, monitoring, resource tuning, and incident response). Each is ongoing rather than one-time. Summed and priced against an engineer's salary, they form the fixed cost on the "build" side of the crossover.
+
+</details>
+
+<details><summary><b>43.</b> Why does "free software" not mean "free platform" for Airbyte?</summary>
+
+Because Airbyte OSS has no licence fee, but running it costs infrastructure plus the engineer-time to operate Kubernetes, upgrade connectors, and fix breakages. The total cost of ownership is dominated by that labour, which is exactly the figure you compare against Fivetran's MAR bill. Treating "free" as "zero cost" is the most common build-vs-buy mistake.
+
+</details>
+
+<details><summary><b>44.</b> How would you estimate Fivetran MAR cost for the four SaaS sources in the Do task?</summary>
+
+Estimate each source's monthly change volume — distinct rows inserted, updated, or deleted per month — sum to a total MAR, then apply the plan's spend rate (remembering it declines at higher volume and that initial backfills are free). For four modest SaaS sources this is usually a small number of MAR, so the bill is typically low. Document your row-volume assumptions so the estimate is auditable.
+
+</details>
+
+<details><summary><b>45.</b> How would you estimate the engineer-hours to self-host the six internal sources?</summary>
+
+Estimate initial build effort (connector configuration or custom connectors, Kubernetes setup) plus a recurring monthly maintenance allowance (connector and platform upgrades, schema-drift fixes, on-call), then convert hours to cost at a loaded rate. The recurring figure is what dominates over time and feeds the crossover calculation. Be explicit that some internal sources have no off-the-shelf connector and cost more to build.
+
+</details>
+
+<details><summary><b>46.</b> What does it mean for a build-vs-buy verdict if your estimated MAR bill is far below the maintenance salary?</summary>
+
+It means you are well below the crossover point, so managed ELT (buy) is cheaper for that scope and the recommendation should lean toward Fivetran for the SaaS sources. The cash bill is small relative to the engineer-time you would otherwise spend, so paying the vendor is the rational choice. You would only build when volume grows enough to invert that comparison.
+
+</details>
+
+<details><summary><b>47.</b> Why can't you state a single universal crossover point that applies to every estate?</summary>
+
+Because the crossover depends on your specific MAR volume, your plan's spend rate, your engineers' loaded cost, and how stable your connectors are — all of which vary by organisation. A churny high-volume estate crosses over at a different point than a low-volume one. The skill is computing the crossover for the estate in front of you, not memorising a magic number.
+
+</details>
+
+<details><summary><b>48.</b> How does connector stability shift the crossover point independent of volume?</summary>
+
+Stable, well-maintained connectors lower the maintenance labour on the build side, pushing the crossover toward lower volumes (making self-hosting attractive sooner). Flaky connectors raise maintenance labour, pushing the crossover toward higher volumes (making managed ELT attractive longer). So two estates with identical MAR can have opposite verdicts purely on connector reliability.
+
+</details>
+
+<details><summary><b>49.</b> Why is "an engineer babysitting Airbyte forever" the failure mode of getting build-vs-buy wrong?</summary>
+
+If you self-host below the crossover point, you commit an engineer to perpetual platform and connector maintenance for sources whose tiny MAR bill Fivetran would have absorbed cheaply. You have spent salary to save a trivial vendor fee. The note exists precisely to catch this: pay the MAR bill where it is cheaper than the labour.
+
+</details>
+
+<details><summary><b>50.</b> Why is "a surprise MAR bill" the opposite failure mode?</summary>
+
+If you buy (Fivetran) above the crossover point for a high-volume, churny source, the variable MAR cost can balloon past what a fixed-cost self-hosted setup would have cost. Because MAR scales with change volume, a source that suddenly churns more can spike the bill unexpectedly. The note guards against this by self-hosting high-volume sources where the fixed maintenance cost is the cheaper, more predictable option.
+
+</details>
+
+<details><summary><b>51.</b> Why does managed ELT give more predictable operational behaviour but less predictable cost than self-hosting?</summary>
+
+Managed ELT removes operational unpredictability (the vendor keeps connectors working) but introduces cost unpredictability, because MAR scales with change volume you do not fully control. Self-hosting flips this: cost is a relatively fixed salary, but operations are unpredictable because breakages land on your team. Build-vs-buy is partly a choice about which kind of risk you would rather carry.
+
+</details>
+
+<details><summary><b>52.</b> For a churny, high-MAR internal source that *could* legally use managed ELT, what is the tension?</summary>
+
+The high MAR makes Fivetran's variable bill large and unpredictable, favouring self-hosting on cost grounds, even though there is no legal barrier to buying. You weigh the predictable fixed maintenance cost of building against the volatile MAR cost of buying. This is the case where pure economics, not sovereignty, decides, and high volume usually tips it toward build.
+
+</details>
+
+<details><summary><b>53.</b> Why should the build-vs-buy note flag sovereignty constraints *separately* from cost?</summary>
+
+Because sovereignty is a hard veto, not a number you trade off — a source that legally cannot leave the perimeter stays in-house even if managed ELT would be cheaper. Mixing it into the cost comparison risks "saving money" by violating a regulation. The note should first remove sovereignty-blocked sources from the managed pool, then run the cost crossover only on what remains.
+
+</details>
+
+<details><summary><b>54.</b> What is the correct order of operations when classifying sources in the note?</summary>
+
+First apply the sovereignty/regulatory filter to remove any source that cannot legally use managed ELT, marking it build-only. Then, for the remaining eligible sources, compute the cost crossover (MAR bill versus maintenance labour) to assign build or buy on economics. Hard constraints precede soft optimisation, so you never accidentally optimise a forbidden source onto a vendor.
+
+</details>
+
+<details><summary><b>55.</b> Why is the spend rate, not just MAR count, essential to a correct Fivetran estimate?</summary>
+
+Because cost is `MAR × spend rate`, and the spend rate varies by plan tier and declines with volume. Estimating MAR alone tells you change volume but not money; you can only get the bill by applying the correct, tier-and-volume-dependent rate. Using a flat per-row rate over- or under-states cost, especially at high volume where discounts kick in.
+
+</details>
+
+<details><summary><b>56.</b> How does Fivetran's exclusion of unchanged rows during re-syncs protect you from runaway bills?</summary>
+
+When Fivetran re-imports a table, rows that did not actually change are not counted as MAR, so a defensive full re-sync of a large but stable table does not generate a huge bill. Only genuine changes count. This means you are billed on real change volume, not on operational re-reads, which keeps the cost tied to business activity.
+
+</details>
+
+<details><summary><b>57.</b> What is the difference between a "connector," a "source," and a "destination" in this ingestion picture?</summary>
+
+A source is the system you read from (a SaaS API, a database), a destination is where data lands (a warehouse or object store), and a connector is the configured pipe that moves data from a specific source into the destination on a sync schedule. In managed ELT the vendor supplies and maintains the connector; in self-hosting you operate it. The build-vs-buy choice is really about who owns the connector's lifecycle.
+
+</details>
+
+<details><summary><b>58.</b> Why does "maintained connectors" appear repeatedly as the deciding advantage of managed ELT?</summary>
+
+Because the single largest hidden cost of self-hosting is keeping connectors working as source APIs and schemas change, and a managed vendor absorbs exactly that work across its whole customer base. For any long-tail SaaS source with a vendor-maintained connector, you are mostly paying to outsource maintenance. Where no maintained connector exists, that advantage evaporates and the calculus shifts toward building.
+
+</details>
+
+<details><summary><b>59.</b> A SaaS source has *no* maintained Fivetran connector. How does that affect the decision?</summary>
+
+The main reason to buy — outsourced connector maintenance — disappears, because you would have to build or wait for a connector anyway. That pushes the source toward self-hosting (where at least you control the connector) or toward a different tool. Always check connector availability before assuming a SaaS source is a "buy"; a missing connector quietly removes the buy advantage.
+
+</details>
+
+<details><summary><b>60.</b> Why is the crossover analysis more about labour cost than software cost?</summary>
+
+Because the managed software fee (MAR) and the self-hosted software fee (zero licence for OSS) are easy to state, but the decisive variable is the engineer-labour to operate and maintain the self-hosted platform. The crossover is essentially "MAR bill versus salary fraction." Whoever ignores the labour line will systematically under-cost the build option.
+
+</details>
+
+<details><summary><b>61.</b> How would you sanity-check a Fivetran MAR estimate before putting it in the note?</summary>
+
+Cross-check your assumed monthly change volume against the source's real activity — for a slowly-changing reference table the MAR should be small, for a high-churn transaction table it should be large — and confirm you excluded the free initial backfill. Then confirm you applied the correct plan tier's spend rate. If the number feels surprisingly high or low, your row-volume assumption is usually the error.
+
+</details>
+
+<details><summary><b>62.</b> Why might two architects produce very different Fivetran estimates for the same source?</summary>
+
+Because the estimate hinges on assumed monthly change volume and the assumed plan tier/spend rate, both of which are judgement calls. One architect might assume heavy daily churn while another assumes a mostly-static table, producing wildly different MAR. This is why documenting the row-volume and tier assumptions is essential to make the estimate defensible.
+
+</details>
+
+<details><summary><b>63.</b> What infrastructure cost must you add to self-hosted Airbyte beyond engineer labour?</summary>
+
+The compute, storage, and networking to run the Kubernetes cluster (or kind environment) plus any object storage destination such as the project's MinIO, and the cost of monitoring and backups. These are smaller than the labour line but non-zero and must appear in the build-side total. Omitting them understates the build option just as omitting maintenance does.
+
+</details>
+
+<details><summary><b>64.</b> Why is data-sovereignty often more decisive than cost for an EU fund estate?</summary>
+
+Because a sovereignty breach is a regulatory and legal failure that no cost saving can justify, whereas cost is a continuous trade-off you can optimise. For an EU fund, residency and third-party-control rules can flatly forbid certain data from reaching a managed cloud, ending the conversation before economics matter. The architect treats sovereignty as a gate and cost as a dial.
+
+</details>
+
+<details><summary><b>65.</b> If a SaaS source contains *no* personal or regulated data, how does that simplify the decision?</summary>
+
+It removes the sovereignty gate, so the source can be decided purely on the cost crossover: buy if its MAR bill is below the maintenance labour, build if above. Non-sensitive, long-tail SaaS with a maintained connector and low MAR is the cleanest "buy." Confirming the data is non-regulated is what lets you optimise on money alone.
+
+</details>
+
+<details><summary><b>66.</b> Why is "data never leaves the secure perimeter" the key phrase to look for in a sovereignty requirement?</summary>
+
+Because it tells you whether even Fivetran's Hybrid Deployment (data processed locally, control plane in the cloud) could satisfy the rule, or whether the requirement also forbids any external control-plane dependency. If the rule is strictly about data location, Hybrid or EU-residency may pass; if it forbids any third-party touch, only fully self-hosted Airbyte qualifies. Parsing that phrase precisely changes the available options.
+
+</details>
+
+<details><summary><b>67.</b> How does the "buy" option's MAR cost behave if a source suddenly starts changing far more rows?</summary>
+
+The MAR rises with the increased change volume, so the bill goes up roughly in proportion (modulated by volume discounts). A source that becomes much churnier — say a daily-revalued holdings table — can produce a larger-than-budgeted bill. This volatility is exactly the "surprise MAR bill" risk that pushes high-churn sources toward predictable self-hosting.
+
+</details>
+
+<details><summary><b>68.</b> Why does the "build" option's cost stay relatively flat as volume grows?</summary>
+
+Because the dominant cost is fixed engineer-maintenance labour plus modest infrastructure, neither of which scales tightly with row volume once the connector is running. Whether the connector moves a thousand or a million rows, the engineer's babysitting effort is similar. This flatness is precisely why build wins above the crossover, where Fivetran's volume-scaled bill overtakes it.
+
+</details>
+
+<details><summary><b>69.</b> In one sentence, when does managed ELT win?</summary>
+
+Managed ELT wins for long-tail SaaS sources with low-to-moderate change volume and vendor-maintained connectors, where the small MAR bill is cheaper than the engineer-time to operate a connector yourself. The vendor absorbs the maintenance you would otherwise pay a salary for. Below the crossover, buy.
+
+</details>
+
+<details><summary><b>70.</b> In one sentence, when does managed ELT lose?</summary>
+
+Managed ELT loses for core banking, mainframe, and data-sovereignty-constrained sources — where the data cannot leave the perimeter or no maintained connector exists — and for high-volume churny sources where the MAR bill outruns a fixed self-hosted maintenance cost. Above the crossover, or behind a sovereignty gate, build.
+
+</details>
+
+<details><summary><b>71.</b> Why are mainframe feeds specifically poor candidates for managed ELT?</summary>
+
+Mainframe systems use bespoke, legacy protocols and data formats that fall outside the long-tail-SaaS connector library managed vendors specialise in, so the vendor's maintained-connector advantage rarely applies. They are also typically core, sensitive systems unlikely to be allowed to ship data externally. Both the technical and the sovereignty arguments push mainframe feeds in-house.
+
+</details>
+
+<details><summary><b>72.</b> How does a half-page note differ from a full architecture proposal in this exercise?</summary>
+
+A half-page note is a tight decision artefact: estate summary, MAR estimate, engineer-hour estimate, crossover point, and sovereignty flags — enough for a board to make the build-vs-buy call. It deliberately omits implementation detail, vendor negotiation, and migration planning. The discipline is forcing the decision into a page so the crossover and the sovereignty veto are unmistakable.
+
+</details>
+
+<details><summary><b>73.</b> What is the first "Done when" criterion for this lesson?</summary>
+
+That you can state the crossover point where Fivetran's cost beats an engineer maintaining Airbyte. Concretely, you must be able to identify the MAR/volume level at which the managed bill equals the fully-loaded self-hosting labour, and explain which side of it a given source falls on. It proves you can turn the build-vs-buy idea into an actual decision threshold.
+
+</details>
+
+<details><summary><b>74.</b> What is the second "Done when" criterion for this lesson?</summary>
+
+That you can name which sources are off-limits to managed ELT for sovereignty reasons. You must identify, from an estate, the systems whose data legally or contractually cannot leave the perimeter — core banking, TA register, regulated investor data — and mark them build-only regardless of cost. It proves you treat sovereignty as a gate, not a tunable cost.
+
+</details>
+
+<details><summary><b>75.</b> Why is it dangerous to extrapolate a Fivetran pilot's cost linearly to production?</summary>
+
+Because the spend rate declines with volume and the initial backfill is free, so a small pilot pays a higher marginal rate and skips the free historical load that production already absorbed. Linear extrapolation therefore overstates the per-row cost while ignoring tier discounts. You must model the production volume band's rate, not multiply the pilot bill.
+
+</details>
+
+<details><summary><b>76.</b> How do schema changes at the source affect the two options differently?</summary>
+
+Under managed ELT the vendor's connector is built to absorb and propagate schema changes, so a new or altered column is largely handled for you. Under self-hosting, the same schema change can break your connector or silently drop data until an engineer intervenes. Schema-drift handling is a concrete slice of the maintenance burden that managed ELT removes and self-hosting adds.
+
+</details>
+
+<details><summary><b>77.</b> Why might a regulated client contractually forbid a managed ELT vendor even where law would allow it?</summary>
+
+Because fund prospectuses, client mandates, and service agreements can impose confidentiality and processing restrictions stricter than statute — for example forbidding any third-party processing of investor holdings. Contracts are a source of hard constraints just like regulation. The architect must read the mandate, not only the law, before classifying a source as eligible for managed ELT.
+
+</details>
+
+<details><summary><b>78.</b> How does DORA's "exit planning" obligation specifically complicate using Fivetran for critical feeds?</summary>
+
+DORA requires financial entities to maintain documented exit strategies for critical ICT third-party providers, so depending on Fivetran for a critical feed obliges you to design and test how you would leave it. That adds governance work and a real switching-cost consideration to the "buy" side. For a marginal source, that overhead can tip the decision back toward self-hosting.
+
+</details>
+
+<details><summary><b>79.</b> Why is the transfer-agency feed a likely "sovereignty veto" rather than a "cost decision"?</summary>
+
+Because the TA register holds investor identities and holdings — personal and financial data under GDPR, residency, and confidentiality rules — so it is usually barred from a third-party managed cloud outright. That makes it a gate (build-only) rather than something you weigh on MAR cost. You remove it from the managed pool before any crossover math.
+
+</details>
+
+<details><summary><b>80.</b> How does choosing MinIO/object storage as the destination interact with build-vs-buy?</summary>
+
+If your destination is your own MinIO/object store inside the perimeter, you keep the landing zone sovereign, which supports the "build" side and any hybrid arrangement; a fully-managed vendor writing to an external cloud would not. The destination's location is part of the sovereignty assessment, not just the source's. Keeping both source and destination inside the perimeter is what makes self-hosting compliant by construction.
+
+</details>
+
+<details><summary><b>81.</b> Why does the lesson frame this as something "as architect you must price," not just choose?</summary>
+
+Because the decision is fundamentally an economic and risk trade-off, and an architect's value is producing a defensible number — the crossover — plus the hard-constraint flags, not an opinion. "Pricing it" means quantifying both the MAR bill and the maintenance labour so the board can see exactly why each source is build or buy. An unpriced preference is not an architecture decision.
+
+</details>
+
+<details><summary><b>82.</b> What concrete number must your note ultimately deliver?</summary>
+
+The crossover point — the MAR/volume (or equivalently the cost) level at which Fivetran's managed bill equals the fully-loaded cost of an engineer maintaining Airbyte for the same scope. Above it, build; below it, buy. Everything else in the note (MAR estimate, engineer-hours, sovereignty flags) exists to compute and contextualise that single threshold.
+
+</details>
+
+<details><summary><b>83.</b> How would you justify recommending Fivetran for the four SaaS sources to a sceptical CFO?</summary>
+
+Show that their combined MAR is small, so the monthly bill is far below the cost of the engineer-time needed to build and maintain four self-hosted connectors against churning SaaS APIs — i.e. they sit well below the crossover. Add that the vendor absorbs schema drift and connector breakage, reducing operational risk. The argument is "you save salary and risk for a small predictable fee."
+
+</details>
+
+<details><summary><b>84.</b> How would you justify keeping the six internal sources self-hosted to the same CFO?</summary>
+
+Argue that several carry sovereignty/regulatory constraints that legally forbid managed ELT (a gate, not a cost choice), and that the remainder are high-value, bespoke systems whose volume or sensitivity puts them above the crossover where fixed self-hosting cost beats a volatile MAR bill. Emphasise predictability and compliance. The message is "these cannot or should not leave the perimeter, and self-hosting is also the cheaper or safer option."
+
+</details>
+
+<details><summary><b>85.</b> Why is "data sovereignty is a hard constraint" stated so forcefully in the lesson's Why?</summary>
+
+Because in a regulated EU fund estate sovereignty can single-handedly veto the otherwise-cheaper managed option, so it must dominate the analysis rather than be traded away. Treating it as just another cost line is how compliance failures happen. The lesson wants you to internalise that some sources are off-limits to managed ELT no matter what the MAR math says.
+
+</details>
+
+<details><summary><b>86.</b> What happens to the crossover if you can self-host Airbyte cheaply (e.g. it co-tenants existing Kubernetes)?</summary>
+
+The build side's fixed cost drops because you reuse existing infrastructure and operational capacity, lowering the crossover so self-hosting wins at lower volumes. Conversely, if standing up and operating Kubernetes is greenfield and expensive, the crossover rises and managed ELT stays attractive longer. The marginal cost of self-hosting, not just the headline, moves the threshold.
+
+</details>
+
+<details><summary><b>87.</b> Why is "MAR scales with change volume" the single most important pricing fact to internalise?</summary>
+
+Because it tells you the managed bill tracks how much your data *changes* per month, not how big it is or how often you sync — so churny sources are expensive and static-but-large sources are cheap on Fivetran. This directly drives which sources are economical to buy. Misreading it (thinking you pay per row or per sync) produces wrong estimates and wrong verdicts.
+
+</details>
+
+<details><summary><b>88.</b> A reference table with a million rows never changes month to month. What is its approximate Fivetran MAR?</summary>
+
+Approximately zero billable MAR after the free initial load, because MAR counts only rows that are inserted, updated, or deleted in the month, and an unchanged table has no active rows. Its sheer size does not matter once it is loaded. This is a clean "buy" candidate on cost — huge but cheap — assuming no sovereignty barrier.
+
+</details>
+
+<details><summary><b>89.</b> A small table of 10,000 rows where every row updates daily — what is its monthly MAR?</summary>
+
+About 10,000 MAR for the month, because each distinct row is counted once regardless of being updated daily, so the per-row-per-month rule caps it at the number of distinct rows. Despite heavy daily churn, the bill is modest because the row count is small. This shows that change frequency does not inflate MAR; only the count of distinct changed rows does.
+
+</details>
+
+<details><summary><b>90.</b> Why can a "small" table still produce more MAR than a "large" one?</summary>
+
+Because MAR depends on how many distinct rows change in a month, not table size — a small but fully-churning table can have every row active while a large but static table has none. A 10,000-row table where all rows change beats a 10-million-row table where none change. Size is a red herring; monthly change is the driver.
+
+</details>
+
+<details><summary><b>91.</b> How does the free initial-sync window affect onboarding a high-volume historical source?</summary>
+
+The first full historical load and a brief new-connection window are free of MAR charges, so onboarding even a massive history does not generate a one-time bill spike. You are billed only on the ongoing monthly change after onboarding. This makes the *steady-state* change volume, not the backfill, the figure that matters for the crossover.
+
+</details>
+
+<details><summary><b>92.</b> Why should you separate "steady-state MAR" from "onboarding load" when estimating cost?</summary>
+
+Because onboarding/backfill is free, the steady-state monthly change volume is what actually drives the recurring bill, and conflating the two over- or under-states cost. A source with a huge history but little monthly change is cheap in steady state; one with modest history but heavy churn is expensive. The estimate should be built on steady-state MAR.
+
+</details>
+
+<details><summary><b>93.</b> How does the build-vs-buy decision change if regulators later tighten residency rules?</summary>
+
+Sources previously eligible for managed ELT may move behind the sovereignty gate and become build-only, shrinking the managed pool regardless of their attractive MAR economics. The crossover math then applies to fewer sources. This is why the note flags sovereignty explicitly and why the decision must be revisited when the regulatory perimeter moves.
+
+</details>
+
+<details><summary><b>94.</b> Why is it risky to let "the connector exists" alone decide a source is a "buy"?</summary>
+
+Because connector availability removes only the maintenance-cost argument; you must still pass the sovereignty gate and check that the MAR bill is below the maintenance crossover. A maintained connector for a sovereignty-blocked source is irrelevant. Always run the gate and the cost check, not just the connector-availability check.
+
+</details>
+
+<details><summary><b>95.</b> What does it mean to "price it against self-hosted connectors," in the architect's job framing?</summary>
+
+It means producing a quantified comparison — Fivetran's MAR bill versus the fully-loaded cost of self-hosting the same sources on Airbyte — and identifying the crossover where they meet. The output is a defensible recommendation per source. "Pricing against" is the active verb: you are not asked to like one tool but to compute when each is cheaper.
+
+</details>
+
+<details><summary><b>96.</b> How does Fivetran's automatic adaptation to source schema changes factor into the buy case?</summary>
+
+Fivetran's connectors automatically adapt to changes in source APIs and schemas, which removes a major operational burden you would otherwise carry when self-hosting. That reliability is part of what the MAR fee buys, and it reduces the risk of silent data loss from drift. It strengthens the buy case for any eligible long-tail SaaS source.
+
+</details>
+
+<details><summary><b>97.</b> Why is the predictability of self-hosted cost attractive to a finance function even when it is higher?</summary>
+
+Because a fixed, salary-driven self-hosting cost is budgetable and immune to surprise spikes, whereas a MAR bill can jump with change volume. A CFO may prefer a known higher number to a volatile lower one, especially for core sources. Predictability is a legitimate factor in build-vs-buy alongside the raw crossover.
+
+</details>
+
+<details><summary><b>98.</b> What is the danger of running self-hosted Airbyte *below* the crossover purely "to avoid vendor lock-in"?</summary>
+
+You pay perpetual engineer-maintenance for sources whose tiny MAR bill Fivetran would have absorbed cheaply, spending salary to avoid a lock-in risk that may be modest for long-tail SaaS. Avoiding lock-in is valid for critical or sovereign sources but is a poor reason to self-host low-value SaaS. The note should weigh lock-in against the real maintenance cost, not assume self-hosting is free.
+
+</details>
+
+<details><summary><b>99.</b> Why is the loaded (fully-burdened) engineer cost, not the base salary, the right figure for the build side?</summary>
+
+Because the true cost of an engineer includes employer taxes, benefits, tooling, management overhead, and on-call burden on top of base salary, often inflating it well above the headline number. Using only base salary understates the build side and biases the crossover toward self-hosting. A defensible note prices maintenance labour at the loaded rate so the comparison against Fivetran's MAR bill is honest.
+
+</details>
+
+<details><summary><b>100.</b> How would you summarise the whole build-vs-buy decision in a single decision rule?</summary>
+
+For each source, first apply the sovereignty/regulatory gate — if the data cannot leave the perimeter, build it; otherwise compute the crossover and buy when its monthly MAR bill is below the fully-loaded cost of self-hosting it, and build when it is above. Sovereignty is a hard gate, cost is the dial. That two-step rule produces the per-source verdicts the note must deliver.
+
+</details>
+
+
+## Phase 2 · 2.1.1 Batch ELT connectors — 100 self-test questions
+
+<details><summary><b>1.</b> What is a batch ELT connector platform like Airbyte, in one sentence?</summary>
+
+It is a tool that moves data from many sources into destinations on a schedule, extracting and loading raw records (the E and L of ELT) while leaving most transformation to a downstream tool like dbt. The platform supplies a library of pre-built connectors so you do not hand-code extraction logic for every API or database. For a fund administrator it is how you land transfer-agency exports, NAV feeds, and reference data into bronze without writing a bespoke script per source.
+
+</details>
+
+<details><summary><b>2.</b> In Airbyte's model, what is a `source`?</summary>
+
+A `source` is the system you ingest data from — Airbyte defines it as "an API, file, database, or data warehouse that you want to ingest data from." It is one half of a pipeline and is configured from a source connector plus the credentials and settings that connector's spec requires. Example: your Phase-1 Postgres holding NAV and holdings tables is a `source`.
+
+</details>
+
+<details><summary><b>3.</b> Where does ingested data land, and what does Airbyte call that endpoint?</summary>
+
+It lands in a `destination` — "a data warehouse, data lake, database, or an analytics tool where you want to load your ingested data." It is the second endpoint of a pipeline and, like a source, is an instance of a destination connector with its own configuration. In the capstone, MinIO holding bronze Parquet plays this role.
+
+</details>
+
+<details><summary><b>4.</b> What does the term `connector` mean as distinct from a source or destination?</summary>
+
+A `connector` is the reusable software component that knows how to talk to a particular system — it pulls records from sources or pushes records to destinations and declares what configuration it needs. A `source` or `destination` is a configured instance of a connector with your specific credentials and options. So "Postgres source connector" is the reusable code; "my fund Postgres source" is the configured source.
+
+</details>
+
+<details><summary><b>5.</b> What is a `connection` in Airbyte?</summary>
+
+A `connection` is "an automated data pipeline that replicates data from a source to a destination" — it binds a configured source to a configured destination and adds the sync schedule, stream selection, and sync-mode choices. It is the object you actually run and monitor. One source and one destination can be combined into multiple connections with different stream selections.
+
+</details>
+
+<details><summary><b>6.</b> What is a `stream` in Airbyte terms?</summary>
+
+A `stream` is "a group of related records," which maps to a table in a relational database, a file, an API endpoint, or a blob depending on the source type. You select which streams a connection replicates and set the sync mode per stream. For your fund Postgres source, each table (funds, share_classes, nav) surfaces as a separate stream.
+
+</details>
+
+<details><summary><b>7.</b> What is a `field` in a stream?</summary>
+
+A `field` is "an attribute of a record in a stream" — a database column, a JSON property in an API response, or a key in a file record. Fields are what schema-change handling watches: a new or retyped field is a field-level schema change. In a NAV stream, `nav_date`, `share_class_isin`, and `nav_per_share` are fields.
+
+</details>
+
+<details><summary><b>8.</b> What are the four pillars commonly described as the connector model: source, destination, spec, and state?</summary>
+
+They are the contract every Airbyte connector implements: the `source`/`destination` say where data comes from and goes; the `spec` declares how the connector is configured; and `state` records how far an incremental sync has progressed. Together they let the platform run, resume, and reconfigure any connector uniformly. Learning these four is the core mental model for this lesson.
+
+</details>
+
+<details><summary><b>9.</b> What is a connector's `spec` (specification)?</summary>
+
+The `spec` is the connector's self-description of how it can be configured — it is returned by the `spec` operation as a `ConnectorSpecification` and is expressed in JsonSchema. Airbyte renders that JsonSchema into the configuration form you fill in (host, port, credentials, options). It is how the platform supports arbitrary connectors without hard-coding each one's settings.
+
+</details>
+
+<details><summary><b>10.</b> Where does a Python connector usually define its spec, and in what format?</summary>
+
+A connector typically declares its spec in a `spec.yaml` or `spec.json` file at the module root, written as a JsonSchema document. The platform reads this file when it runs the `spec` command and uses it both to validate your config and to generate the setup form. So the same JsonSchema both documents and enforces the connector's configuration.
+
+</details>
+
+<details><summary><b>11.</b> What does the `spec` command actually return at the protocol level?</summary>
+
+It returns a `ConnectorSpecification` wrapped in an `AirbyteMessage` of type `spec`. That message carries the JsonSchema connection specification plus metadata such as which features the connector supports. The platform consumes this to know how to configure and drive the connector.
+
+</details>
+
+<details><summary><b>12.</b> What is `supported_destination_sync_modes` in a spec, and why does it matter?</summary>
+
+It is a field in the specification that lists which sync modes a destination connector can support. It matters because a connection's available sync modes are the intersection of what the source offers and what the destination accepts — a destination that cannot do dedup limits your options. Checking it explains why some source/destination pairs cannot run incremental append + deduped.
+
+</details>
+
+<details><summary><b>13.</b> What is `protocol_version` in a connector spec?</summary>
+
+`protocol_version` describes which version of the Airbyte Protocol the connector implements, with a documented default of `0.2.0`. It lets the platform and connector negotiate compatible message formats. You rarely set it by hand, but a mismatch is a thing to check when a connector behaves oddly after an upgrade.
+
+</details>
+
+<details><summary><b>14.</b> What is the Airbyte Protocol, conceptually?</summary>
+
+It is the standardized set of commands (`spec`, `check`, `discover`, `read`/`write`) and JSON message types that every connector speaks, so the platform can drive any connector uniformly. Connectors emit and consume `AirbyteMessage` objects (records, state, logs, specs, catalogs) over stdio. This protocol is exactly what decouples the connector library from the orchestration platform.
+
+</details>
+
+<details><summary><b>15.</b> What is the `check` operation a connector exposes?</summary>
+
+`check` validates that the configuration you supplied actually works — it attempts a connection to the source or destination using your credentials and returns success or a failure reason. It is what the UI runs when you click "Test connection." A failing `check` on a fund Postgres source usually means a credential, host, or network/firewall problem, not a sync logic problem.
+
+</details>
+
+<details><summary><b>16.</b> What is the `discover` operation and what does it produce?</summary>
+
+`discover` inspects the source and returns an `AirbyteCatalog` describing the available streams and their fields and types. It is how Airbyte learns the source's schema so you can select streams and the UI can show field lists. Re-running discover is also how the platform detects schema changes against the previously stored catalog.
+
+</details>
+
+<details><summary><b>17.</b> What is the difference between the discovered `AirbyteCatalog` and the `ConfiguredAirbyteCatalog`?</summary>
+
+The `AirbyteCatalog` is everything the source offers (all streams and fields from `discover`); the `ConfiguredAirbyteCatalog` is your selection — the streams you chose, each annotated with its sync mode, cursor field, and primary key. The connection runs against the configured catalog, not the full one. So enabling a new stream means adding it to the configured catalog.
+
+</details>
+
+<details><summary><b>18.</b> What is `state` in Airbyte, in plain terms?</summary>
+
+`state` is the bookmark that records how far an incremental sync has progressed — typically the maximum cursor value seen so far per stream. The platform persists it after each successful sync so the next run only fetches records beyond that point. Without state, every sync would be a full refresh.
+
+</details>
+
+<details><summary><b>19.</b> Why does full refresh not use state, but incremental does?</summary>
+
+Full refresh modes "always retrieve all available information requested from the source, regardless of whether it has been synced before," so there is nothing to remember between runs. Incremental modes must remember the last cursor position to fetch only newer records, so they read and advance `state` each sync. State is therefore the defining mechanism of incremental sync.
+
+</details>
+
+<details><summary><b>20.</b> Name the four sync modes Airbyte offers.</summary>
+
+They are full refresh overwrite, full refresh append, incremental append (history), and incremental append + deduped (dedup). The "full refresh vs incremental" axis decides whether state is used; the "overwrite/append vs deduped" axis decides what the destination ends up holding. Your choice per stream is recorded in the configured catalog.
+
+</details>
+
+<details><summary><b>21.</b> What does full refresh overwrite do to the destination?</summary>
+
+Each sync destroys all existing data in the destination table and reloads the complete current source dataset — "new syncs will destroy all data in the existing destination table and then pull the new data in." A consequence is that rows deleted at the source disappear from the destination too. It is the simplest mode and fine for small, fully reloadable reference tables.
+
+</details>
+
+<details><summary><b>22.</b> How does full refresh append differ from full refresh overwrite?</summary>
+
+Both pull the entire source each sync (no state), but append adds the full pulled dataset alongside what is already there instead of replacing it. The result is accumulating snapshots — useful if you want a crude history of how a small table looked over time. The cost is unbounded growth, since every sync re-lands every row.
+
+</details>
+
+<details><summary><b>23.</b> What does incremental append do?</summary>
+
+It replicates only new or modified records since the last sync using a cursor, and appends each one to the destination — "a copy of each new or updated record is appended." It uses state but does not deduplicate, so the destination can hold multiple copies of the same logical record over time. It is the right mode when you want full change history per record.
+
+</details>
+
+<details><summary><b>24.</b> Why can incremental append produce multiple rows for the same logical entity?</summary>
+
+Because an updated source record is appended as a new row rather than replacing the old one — "you can find multiple copies of the same record in the destination warehouse." Each NAV correction for the same `share_class_isin` and `nav_date` lands as an additional row. That is a feature if you want an audit trail, and a problem if downstream consumers assume one row per key.
+
+</details>
+
+<details><summary><b>25.</b> What does incremental append + deduped (dedup) guarantee at the destination?</summary>
+
+It syncs only new or modified data and guarantees the final table is "unique per primary key," keeping only the latest version of each entity. Behind the scenes it appends the delta to a history table and upserts the deduped final table by primary key. It is the mode you want for a silver NAV table where one row per share class per date is the contract.
+
+</details>
+
+<details><summary><b>26.</b> In dedup mode, what two stream-level settings must you supply?</summary>
+
+A cursor field (to detect what changed) and a primary key (to deduplicate). The cursor — for example `updated_at` — decides which records to pull; the primary key — for example (`share_class_isin`, `nav_date`) — decides which rows collapse into one in the final table. Missing either makes correct dedup impossible.
+
+</details>
+
+<details><summary><b>27.</b> What is a `cursor field` versus a `cursor`?</summary>
+
+The cursor field is "the field or column in the data where that cursor can be found," such as an `updated_at` timestamp column. The cursor is "the actual timestamp value used to determine if a record should be replicated" — the concrete value stored in state. So the field names the column; the cursor is the bookmark value within it.
+
+</details>
+
+<details><summary><b>28.</b> What is a `primary key` in Airbyte dedup terms?</summary>
+
+It is "one or multiple (called composite primary keys) fields or columns that is used to identify the unique entities of a table," ensuring only one row per primary key value in the final destination. It is the dedup key, not necessarily the database's declared PK — you choose it per stream. For a NAV stream the natural choice is the share class identifier plus the valuation date.
+
+</details>
+
+<details><summary><b>29.</b> Mechanically, what query does cursor-based incremental sync run each time?</summary>
+
+It pulls records where `cursor_field > 'last_sync_max_cursor_field_value'` — that is, everything strictly newer than the highest cursor value stored in state. After the sync it advances state to the new maximum cursor it observed. This is why the cursor field must be monotonically updated whenever a row changes.
+
+</details>
+
+<details><summary><b>30.</b> How does `state` advance during an incremental sync?</summary>
+
+During each sync the source emits a delta — "the set of records that the source identifies as being new or updated" — and the platform tracks the maximum cursor value seen. On success it persists that new maximum as the stream's state, so the next sync starts just past it. The advance is per stream, so streams progress independently.
+
+</details>
+
+<details><summary><b>31.</b> A connection is configured incremental but re-fetches every row each sync. What is the first thing to check?</summary>
+
+Check that a valid cursor field is selected and that the source actually provides it for every record — if no cursor is set, or the field is null, the sync degrades toward pulling everything. Then confirm state is being persisted between runs. A frequent cause is choosing a cursor column that the source does not update on change.
+
+</details>
+
+<details><summary><b>32.</b> A row was edited at the source but the incremental sync did not pick it up. Why?</summary>
+
+Because the edit did not bump the cursor field — "if modifications to the underlying records are made without properly updating the cursor field, then the updated records won't be picked up." Since the sync only pulls `cursor_field > last_max`, an update that leaves `updated_at` unchanged is invisible. This is the classic silent-data-loss trap with cursor-based incremental.
+
+</details>
+
+<details><summary><b>33.</b> What makes a good cursor field?</summary>
+
+One that is updated on every insert and update, is monotonically non-decreasing, and ideally has reasonable time resolution — an `updated_at` timestamp maintained by the database is the canonical example. A `created_at` is wrong for updates because it never changes after insert. A cursor with coarse resolution can cause boundary records to be missed or duplicated.
+
+</details>
+
+<details><summary><b>34.</b> Why is a `created_at` column a poor cursor for catching updates?</summary>
+
+Because `created_at` is set once at insert and never changes, so an updated row keeps an old cursor value and is never re-pulled by a `cursor_field > last_max` query. You would capture new rows but silently miss every edit. For a NAV table where corrections happen, that means restated figures would never propagate.
+
+</details>
+
+<details><summary><b>35.</b> Why must a cursor field be monotonically increasing?</summary>
+
+Because state stores a single high-water mark and the next sync fetches only values strictly above it; if the field can go backwards, records with smaller cursor values written after the bookmark advanced are skipped forever. A clock that jumps backward (NTP correction, timezone confusion) can therefore drop records. This is why server-side, monotonic timestamps are preferred over client-supplied ones.
+
+</details>
+
+<details><summary><b>36.</b> What is a risk of using a low-resolution cursor like a date-only column?</summary>
+
+Records sharing the same cursor value at the sync boundary can be either missed (if the boundary is exclusive) or re-emitted (if inclusive), because the high-water mark cannot distinguish among same-value rows. With a date-only `nav_date`, many NAV rows share one value, so a mid-day sync boundary is ambiguous. A timestamp with sub-second precision largely avoids this.
+
+</details>
+
+<details><summary><b>37.</b> How does cursor-based incremental handle deletes at the source?</summary>
+
+It does not — a deleted row simply stops appearing in future deltas, and nothing instructs the destination to remove it, so the stale row persists. Cursor-based methods typically miss deletions entirely. If a share class is closed and its row deleted in the source, a cursor-based sync leaves it in your destination indefinitely.
+
+</details>
+
+<details><summary><b>38.</b> What is the practical takeaway about deletes and cursor-based incremental for a fund mart?</summary>
+
+Closed funds, withdrawn ISINs, or removed holdings will linger in your destination because the cursor never sees the deletion event. You must either run periodic full refreshes, model soft-deletes upstream, or use log-based CDC to capture deletes. Otherwise a "closed" share class quietly stays "open" in downstream reporting.
+
+</details>
+
+<details><summary><b>39.</b> What is the difference between "CDC-flavored" cursor incremental and true log-based CDC?</summary>
+
+CDC-flavored incremental infers changes by polling a cursor column and only sees inserts and cursor-bumping updates; true log-based CDC reads the database's transaction log and sees every committed change including deletes. The first is a query-time approximation; the second is a faithful replay of the write-ahead history. Their guarantees differ sharply, especially around deletes and missed updates.
+
+</details>
+
+<details><summary><b>40.</b> What does log-based CDC read to capture changes?</summary>
+
+It reads the database's transaction/replication log — "many common databases support writing all record changes to log files for the purpose of replication" — and keeps track of its current position in the log. For Postgres that is the write-ahead log via logical replication; for MySQL it is the binlog. Because it reads committed log entries, it captures changes the application made regardless of any cursor column.
+
+</details>
+
+<details><summary><b>41.</b> Which databases does Airbyte support for log-based CDC?</summary>
+
+Airbyte documents log-based CDC support for Postgres, MySQL, Microsoft SQL Server, MongoDB, Oracle DB, SAP HANA, and IBM Db2. Other sources fall back to cursor-based incremental or full refresh. So whether you can use CDC depends on which source system the fund feed comes from.
+
+</details>
+
+<details><summary><b>42.</b> What can log-based CDC capture that cursor-based incremental cannot?</summary>
+
+Deletes — CDC emits a metadata column `_ab_cdc_deleted_at` that "is only present for records from DELETE statements," letting the destination know a row was removed. It also captures every update faithfully, independent of whether an application bumped a cursor column. This is the central reason to prefer CDC when deletes and hard updates matter.
+
+</details>
+
+<details><summary><b>43.</b> What is `_ab_cdc_deleted_at` and when does it appear?</summary>
+
+It is an Airbyte CDC metadata column that is populated only for records originating from a DELETE statement, marking when the source row was deleted. Its presence lets downstream logic remove or tombstone the corresponding destination row. In dedup mode the final table "will not show the records whose most recent entry has been deleted."
+
+</details>
+
+<details><summary><b>44.</b> What is a key requirement for CDC incremental on most sources?</summary>
+
+"CDC incremental is only supported for tables with primary keys for most sources." The primary key is needed to identify which row each log event applies to so updates and deletes can be matched. A source table without a primary key generally cannot be replicated via CDC.
+
+</details>
+
+<details><summary><b>45.</b> Which source changes does log-based CDC NOT capture?</summary>
+
+Changes from `TRUNCATE` and `ALTER` statements do not appear in the change log the way row-level DML does, so a truncate or a column type change is not reliably propagated as data events. CDC also requires data in tables, not views. So a schema migration on the source still needs schema-change handling, not just CDC.
+
+</details>
+
+<details><summary><b>46.</b> Why can't you run CDC against a database view?</summary>
+
+Because log-based CDC reads row-level changes from the transaction log of base tables, and views have no independent log presence — "data must be in tables, not views." A view's apparent rows are computed from underlying tables at query time and are not written to the log as their own changes. If a fund feed is exposed only as a view, you must point CDC at the underlying tables or use cursor-based incremental.
+
+</details>
+
+<details><summary><b>47.</b> Why is CDC described as not being treated like an infinite streaming source, and what follows?</summary>
+
+Airbyte runs CDC as periodic batch reads of the log rather than a continuously open stream, so you must schedule syncs frequently enough that the source's log is not rotated or purged before Airbyte reads it. If the log overflows between runs, CDC can require a costly resync from scratch. For a busy transfer-agency database this means tuning both sync frequency and the source's log retention.
+
+</details>
+
+<details><summary><b>48.</b> For Postgres specifically, what must be configured to enable log-based CDC?</summary>
+
+Logical replication must be enabled (for example `wal_level = logical`), and a replication slot and a publication are typically created so Airbyte can read row changes from the WAL. The replication slot pins the WAL until consumed, so an unread slot can cause WAL to accumulate and fill disk. That makes monitoring slot lag an operational must for a CDC pipeline.
+
+</details>
+
+<details><summary><b>49.</b> What operational hazard does a Postgres replication slot introduce?</summary>
+
+An active but unread (or slow) slot prevents the WAL from being recycled, so transaction log files pile up and can fill the source database's disk, risking an outage. If an Airbyte CDC connection is paused or broken for too long, the slot keeps holding WAL. You must monitor slot lag and clean up abandoned slots — a real "self-hosting maintenance" cost.
+
+</details>
+
+<details><summary><b>50.</b> When should you choose CDC over cursor-based incremental for a fund source?</summary>
+
+Choose CDC when you need deletes captured, when updates may not bump a reliable cursor column, or when you need near-real-time low-latency change capture. Choose cursor-based when the source lacks CDC support, lacks primary keys, or when a clean `updated_at` exists and deletes are handled by soft-delete flags. The decision is about which guarantees the downstream NAV/holdings model actually needs.
+
+</details>
+
+<details><summary><b>51.</b> What is schema-change detection in Airbyte?</summary>
+
+It is the platform re-running `discover` and comparing the new source catalog against the stored one to spot added, removed, or retyped streams and fields. Detection is configured per connection in its Settings tab. It is the first half of schema evolution; what to do about a detected change is the second half.
+
+</details>
+
+<details><summary><b>52.</b> How often does Airbyte check for schema changes?</summary>
+
+For Cloud, it checks immediately before a sync, at most every 15 minutes per source; for self-managed deployments, at most every 24 hours. The cadence differs because cloud can afford frequent discovery while self-hosted minimizes load on the source. So a self-hosted fund deployment may not notice an upstream column change until the next daily check.
+
+</details>
+
+<details><summary><b>53.</b> What are the propagation options for detected schema changes?</summary>
+
+"Propagate field changes only" applies field additions/changes but ignores new or removed streams; "Propagate all field and stream changes" applies both field and stream changes automatically. There are also options to ignore changes or to disable the connection on certain changes. You pick the policy per connection based on how much drift you tolerate.
+
+</details>
+
+<details><summary><b>54.</b> What is the difference between "Propagate field changes only" and "Propagate all field and stream changes"?</summary>
+
+"Propagate field changes only" automatically applies new or altered fields but leaves new and removed streams out of the sync; "Propagate all field and stream changes" additionally brings in new streams and removes dropped ones. The first is conservative — you opt into new tables manually; the second keeps the destination fully in step with the source. Regulated estates often prefer the conservative setting so a new upstream table is reviewed before it lands.
+
+</details>
+
+<details><summary><b>55.</b> What is the distinction between breaking and non-breaking schema changes?</summary>
+
+Non-breaking changes (a new field, a widened type) can be auto-propagated to the next sync; breaking changes (such as a removed or retyped cursor or primary key) are not auto-applied because they would invalidate the sync. Breaking changes pause the connection and require a human to review and refresh the configuration. So the breaking/non-breaking line is essentially "can the existing sync still run safely?"
+
+</details>
+
+<details><summary><b>56.</b> For a non-breaking change, what options does Airbyte give beyond propagating?</summary>
+
+For non-breaking schema changes you can configure the connection to "Ignore" the change (sync proceeds, change not applied) or to "Disable connection" (sync stops until reviewed). This lets you trade automation against control. A fund platform that wants every new column reviewed might choose ignore-or-disable rather than auto-propagate.
+
+</details>
+
+<details><summary><b>57.</b> What happens when a brand-new column appears in a source table?</summary>
+
+It is detected as a non-breaking field change; depending on policy it is auto-propagated into the stream and destination, ignored, or it pauses the connection for review. If propagated, future syncs include the new field and the destination schema is extended. So a new `swing_factor` column on a NAV table can flow through automatically or wait for sign-off, by your choice.
+
+</details>
+
+<details><summary><b>58.</b> What typically makes a column type change a breaking issue?</summary>
+
+If the retyped column is the cursor field or part of the primary key, the change can break incremental/dedup logic and is treated as breaking, pausing the connection. A general field retype may be non-breaking and widened at the destination, but a narrowing or incompatible change can cause load errors. The safe move is to review type changes on key columns before resuming.
+
+</details>
+
+<details><summary><b>59.</b> Why is removing or renaming the cursor column especially dangerous?</summary>
+
+Because the incremental query depends on `cursor_field > last_max`; if the column vanishes or is renamed, the sync loses its bookmark mechanism and is flagged as breaking. Resuming usually requires reselecting a cursor and may force a full re-sync. This is exactly the kind of "break the cursor on purpose, then repair it" scenario in the lesson's Do steps.
+
+</details>
+
+<details><summary><b>60.</b> After a breaking schema change is resolved, what does a re-sync often involve?</summary>
+
+Often a full refresh of the affected stream to rebuild a consistent state, because the old cursor/PK basis is no longer valid. Airbyte may reset the stream's state so the next sync re-reads everything before resuming incremental. For a large holdings table that re-sync is a real cost, which is why breaking changes are gated behind human review.
+
+</details>
+
+<details><summary><b>61.</b> What does "resetting a stream" do, and when would you do it?</summary>
+
+Resetting clears the destination data and the stored state for that stream so the next sync starts clean as a full load, then resumes incrementally. You do it after a breaking schema change, a cursor change, or to recover from corrupted/duplicated data. It is the standard repair when a cursor has been broken or mis-selected.
+
+</details>
+
+<details><summary><b>62.</b> A connection's sync now errors after the source added a NOT-NULL column with no default. First thing to check?</summary>
+
+Check the schema-change status on the connection: detection likely flagged the new field, and your propagation policy determines whether it was applied or the connection paused. Confirm whether the destination accepted the new column and whether any load constraints rejected nulls for historical rows. The fix is to propagate the schema and backfill or relax the constraint, not to keep retrying the same failing sync.
+
+</details>
+
+<details><summary><b>63.</b> Why is "the hidden maintenance line item" the real cost of self-hosting connectors?</summary>
+
+Because the software is free but keeping it running is not — a self-hosted deployment typically needs ongoing engineering time to patch connectors, handle schema changes, and chase failures, with no vendor support desk. That labor, at a loaded engineering rate, can exceed the price of a managed service for many teams. The whole point of running Airbyte yourself in this lesson is to feel that cost concretely.
+
+</details>
+
+<details><summary><b>64.</b> Roughly how much ongoing effort does a self-hosted Airbyte deployment tend to require?</summary>
+
+Reported figures are on the order of 1–5 hours of engineering maintenance per week depending on connector count and schema stability, which at a fully loaded rate translates into hundreds to a few thousand dollars per month in labor. The variance is driven mostly by how often upstream schemas drift and how flaky the connectors are. That is the line item a managed vendor like Fivetran absorbs for you.
+
+</details>
+
+<details><summary><b>65.</b> Why does connector reliability vary in an open-source connector ecosystem?</summary>
+
+Because many connectors are community-contributed and differ in maturity and upkeep, whereas a managed vendor staffs a large dedicated team maintaining its connectors around the clock. A long-tail SaaS connector you depend on may lag API changes or carry bugs. That risk is the maintenance you are insourcing when you self-host.
+
+</details>
+
+<details><summary><b>66.</b> What are you "really paying Fivetran to absorb" when you choose managed over self-hosted?</summary>
+
+Connector maintenance, schema-change handling, infrastructure operation, monitoring, and on-call response to breakages — the operational toil rather than the bytes moved. Fivetran prices that as a managed service; you trade money for not staffing it. Running Airbyte yourself once is how you learn the size of that toil before signing a vendor contract.
+
+</details>
+
+<details><summary><b>67.</b> When does self-hosted Airbyte clearly make economic or compliance sense despite the maintenance cost?</summary>
+
+When you have spare engineering capacity, when sources must stay inside a data-residency perimeter, or when the workload is core/on-prem data that cannot be sent to a managed cloud. For a Luxembourg fund administrator, EU data-sovereignty constraints on core banking and transfer-agency feeds can make self-hosting mandatory regardless of cost. The cost question is then secondary to the legal one.
+
+</details>
+
+<details><summary><b>68.</b> How do you stand up Airbyte OSS for this lesson's lab?</summary>
+
+You run it locally in Docker Compose (or via the `abctl` local install), which brings up the platform services so you can configure sources, destinations, and connections through the web UI. The lesson's first Do step is exactly "stand up Airbyte in Docker Compose." On native Ubuntu this is straightforward with Docker installed; WSL2 would be the Windows equivalent and Docker Desktop on macOS.
+
+</details>
+
+<details><summary><b>69.</b> For the lab, how would you configure an incremental Postgres-to-MinIO Parquet sync with a cursor?</summary>
+
+Create a Postgres source pointing at the Phase-1 database, a destination writing Parquet to a MinIO bucket, then a connection selecting the relevant stream with sync mode incremental and a cursor field such as `updated_at` (and a primary key if using dedup). Run an initial sync, then an incremental one. The goal is to confirm that the second sync moves only changed rows.
+
+</details>
+
+<details><summary><b>70.</b> How do you prove an incremental sync moved only changed rows?</summary>
+
+Run an initial sync, change a small known set of source rows (and bump their cursor), then run a second sync and inspect that only those rows landed — the connection's sync logs show record counts and the destination shows only the delta. Comparing emitted record counts between the two runs makes it concrete. This satisfies the "demonstrate an incremental sync moving only changed rows" done-when criterion.
+
+</details>
+
+<details><summary><b>71.</b> The lesson asks you to "break the cursor on purpose." What is a clean way to do that, and how do you repair it?</summary>
+
+Alter or reset the cursor column at the source (or change which column is the cursor) so the sync loses its bookmark, then observe the failure or full re-pull; repair it by reselecting a valid cursor field and resetting the stream's state to rebuild a clean baseline. The exercise teaches what breaks and what the recovery costs. Being able to explain what broke is an explicit done-when criterion.
+
+</details>
+
+<details><summary><b>72.</b> Why might you choose dedup over plain incremental append for a silver NAV table?</summary>
+
+Because silver should expose one conformed row per share class per valuation date, and dedup keeps the final table unique per primary key while still preserving change history in the raw/history table. Plain append would leave multiple NAV rows per key, pushing the dedup burden downstream. Dedup puts the one-row-per-key contract right at the load boundary.
+
+</details>
+
+<details><summary><b>73.</b> When is plain incremental append actually the better choice for fund data?</summary>
+
+When you want a full, immutable change history — for example every restated NAV value over time — rather than only the latest. Append preserves each version as its own row, which is useful for audit reconstruction and bronze immutability. You can then derive a deduped view downstream in dbt when you need the current value.
+
+</details>
+
+<details><summary><b>74.</b> How does Airbyte's incremental loading relate to the bronze layer of a medallion lakehouse?</summary>
+
+Incremental append fits bronze's "immutable, replayable" contract by accumulating raw deltas without overwriting, preserving everything the source emitted. Dedup or conformance belongs to silver, not bronze. So you typically land raw incremental Parquet in bronze, then conform and deduplicate in a downstream transform.
+
+</details>
+
+<details><summary><b>75.</b> Why is full refresh overwrite risky for capturing source deletes versus convenient for small dimensions?</summary>
+
+It is convenient because it naturally reflects deletes — anything gone from the source is gone from the destination after the reload — but risky because it discards history and re-reads the whole table every run. For a tiny reference dimension (a few hundred fund codes) that is fine; for a large holdings table it is expensive and loses any audit trail. The mode choice is a cost-versus-history tradeoff.
+
+</details>
+
+<details><summary><b>76.</b> A nightly incremental sync of NAV data is missing some same-day corrections. What is the likely cause?</summary>
+
+The corrections probably did not advance the cursor (or share the cursor value at the sync boundary), so the `cursor_field > last_max` query skipped them. Check that corrections update `updated_at` and consider a higher-resolution cursor or a periodic full refresh to catch stragglers. This is the cursor-bump trap applied to NAV restatements.
+
+</details>
+
+<details><summary><b>77.</b> Why might a transfer-agency feed that does hard deletes need CDC rather than cursor incremental?</summary>
+
+Because cursor-based incremental never sees deletes, so redeemed or closed positions deleted at the source would persist in your destination and distort holdings. Log-based CDC captures the delete via `_ab_cdc_deleted_at`, letting you tombstone the row. If the source supports CDC and has primary keys, that is the correct tool for accurate position data.
+
+</details>
+
+<details><summary><b>78.</b> How does Airbyte's role as the E and L map onto an ELT architecture with dbt?</summary>
+
+Airbyte extracts from sources and loads raw records into the destination (bronze) with minimal transformation; dbt then transforms in-warehouse to produce silver and gold models. This separation is why Airbyte focuses on connectors, sync modes, and state rather than business logic. The clean handoff keeps transformation in version-controlled SQL rather than buried in the ingestion tool.
+
+</details>
+
+<details><summary><b>79.</b> Why is incremental sync important for cost and load on a fund source database?</summary>
+
+Because pulling only changed rows minimizes load on the operational source, network transfer, and destination write volume, which matters when the source is a live transfer-agency or accounting database you must not hammer. A full refresh of a large holdings table every hour could degrade the OLTP system. Incremental keeps ingestion light enough to run often.
+
+</details>
+
+<details><summary><b>80.</b> What is the relationship between a connection's schedule and incremental state?</summary>
+
+The schedule decides how often the connection runs; each run reads the persisted state, fetches records past the cursor, loads them, and writes back the advanced state. More frequent schedules mean smaller deltas per run and lower latency. State is what makes those frequent small runs correct rather than redundant.
+
+</details>
+
+<details><summary><b>81.</b> If two connections share the same source, do they share state?</summary>
+
+No — state is tracked per stream within a connection, so two connections each maintain their own bookmarks even against the same source table. This lets you sync the same stream to two destinations independently. It also means resetting one connection's stream does not reset the other's.
+
+</details>
+
+<details><summary><b>82.</b> What does it mean operationally that state is stored by the platform, not the source?</summary>
+
+It means resumability is the platform's responsibility: Airbyte persists the cursor high-water mark in its internal database, so losing or corrupting that store loses your incremental position. A platform database backup is therefore part of protecting your pipelines. Restoring a stale state could cause re-pulls or, worse, skipped records if the store is ahead of reality.
+
+</details>
+
+<details><summary><b>83.</b> Why might a sync that was incremental suddenly perform a full refresh on its own?</summary>
+
+Common triggers are a stream reset, a breaking schema change that invalidated the cursor/PK, a changed cursor field, or lost/cleared state in the platform database. Any of these removes the valid bookmark and forces a fresh full load before incremental resumes. Diagnosing which one happened is the first step before worrying about performance.
+
+</details>
+
+<details><summary><b>84.</b> What does "append vs dedup" mean for downstream consumers querying the destination?</summary>
+
+With append, consumers must themselves pick the latest version per key (e.g., a window function on the cursor) because multiple rows per entity exist; with dedup, the final table already holds one row per primary key. Append pushes correctness work downstream; dedup centralizes it at load time. Choosing wisely avoids every analyst re-implementing the same "latest NAV per share class" logic.
+
+</details>
+
+<details><summary><b>85.</b> In dedup mode, what is the purpose of the history (raw) table behind the final table?</summary>
+
+It retains the appended delta of all changes so the deduped final table can be rebuilt and so change history is not lost; the final table is derived from it by keeping the latest record per primary key. This gives you both a single-row current view and a full audit trail. For NAV corrections, the history table is where the superseded values still live.
+
+</details>
+
+<details><summary><b>86.</b> Why must the primary key you choose for dedup truly be unique per entity?</summary>
+
+Because dedup collapses all rows sharing a primary key to the latest one; if the key is not actually unique per entity, legitimately distinct records merge and data is lost. Picking (`share_class_isin`) alone for a NAV stream is wrong because the same ISIN recurs every valuation date — you need the date too. Composite keys exist precisely for this.
+
+</details>
+
+<details><summary><b>87.</b> How do you decide the dedup primary key for a NAV-per-share-class stream?</summary>
+
+The grain is one value per share class per valuation date, so a composite key of the share-class identifier (e.g., ISIN or an internal surrogate) plus `nav_date` is correct. Using only the identifier would overwrite every prior day's NAV. Getting the grain right is the same modeling discipline you applied to fact tables in Phase 1.
+
+</details>
+
+<details><summary><b>88.</b> Why might you prefer an internal surrogate over the ISIN as a dedup/join key in fund data?</summary>
+
+Because ISINs can be reused or reassigned by corporate actions, so keying on ISIN alone can merge or split instruments over time and break continuity. An internal surrogate stays stable across identifier lifecycle events. This is the same security-master argument from the LEI/ISIN lesson, applied at the ingestion layer.
+
+</details>
+
+<details><summary><b>89.</b> What happens to your incremental sync if the source's `updated_at` is set by application code that sometimes forgets to bump it?</summary>
+
+Those un-bumped updates are silently skipped by the `cursor_field > last_max` query, so the destination drifts out of sync with the source for exactly the edited rows. Because nothing errors, the drift is invisible until someone notices stale data. The fix is a reliable, database-maintained `updated_at` (or CDC), not trusting application discipline.
+
+</details>
+
+<details><summary><b>90.</b> How would you detect that incremental drift has occurred without an error being raised?</summary>
+
+Periodically reconcile counts and checksums between source and destination, or run an occasional full refresh and diff it against the incremental result. Row-count or hash mismatches reveal records the cursor missed. Building such a reconciliation check is part of treating ingestion as a data-quality boundary in a regulated platform.
+
+</details>
+
+<details><summary><b>91.</b> Why is a periodic full refresh sometimes used alongside incremental sync?</summary>
+
+To self-heal drift from missed updates, missed deletes, or cursor gaps by occasionally reloading the whole table and reconciling it. It trades extra load for correctness guarantees that pure incremental cannot give. A common pattern is frequent incremental with a weekly full refresh of critical tables like NAV.
+
+</details>
+
+<details><summary><b>92.</b> What is the tradeoff between sync frequency and source impact for CDC versus cursor incremental?</summary>
+
+CDC must run frequently enough that the source log is not purged before it is read, so very infrequent CDC risks a costly resync; cursor incremental can run less often but with bigger deltas and higher latency. CDC trades steady low-latency log reading against the need for adequate log retention. You tune frequency to the source's log/WAL retention and your latency needs.
+
+</details>
+
+<details><summary><b>93.</b> Why does CDC require careful coordination with the source DBA in a fund shop?</summary>
+
+Because enabling logical replication, sizing log/WAL retention, granting replication privileges, and managing replication slots all touch the production source database that operations depends on. A mis-managed slot can fill disk and threaten an outage on a system running NAV calculations. So CDC is as much an operational agreement as a technical setting.
+
+</details>
+
+<details><summary><b>94.</b> What is the connection-level "Settings" tab used for regarding schema changes?</summary>
+
+It is where you set the detection-and-propagation policy — which kinds of changes auto-apply, which are ignored, and whether non-breaking changes should disable the connection. The setting is per connection, so different pipelines can have different drift tolerance. A strict fund pipeline can disable on change while a sandbox auto-propagates.
+
+</details>
+
+<details><summary><b>95.</b> Why might a regulated fund platform prefer "ignore" or "disable" over auto-propagating schema changes?</summary>
+
+Because unreviewed schema changes can silently alter what lands in a regulated dataset, undermining lineage and auditability — an auditor expects deliberate, reviewed evolution. Pausing on change forces a human to assess and document the impact before data flows. The slight operational friction is the price of a defensible audit trail.
+
+</details>
+
+<details><summary><b>96.</b> How does schema-change handling interact with the cursor field specifically?</summary>
+
+A change to the cursor field — removal, rename, or incompatible retype — is typically breaking because it invalidates incremental state, so it pauses the connection rather than auto-propagating. Adding unrelated fields is non-breaking and can flow through. This is why the cursor and primary key columns deserve special change-control attention.
+
+</details>
+
+<details><summary><b>97.</b> What is the first diagnostic step when an Airbyte connection turns red after an upstream release?</summary>
+
+Inspect the connection's sync logs and schema-change status to see whether a detected schema change (especially breaking) paused it, or whether `check` now fails on credentials/connectivity. The status usually names the cause directly. Reading the log beats blindly retrying, which just re-hits the same wall.
+
+</details>
+
+<details><summary><b>98.</b> A self-hosted connector silently stopped fetching new rows after a source API version bump. What is the likely root cause and remedy?</summary>
+
+The community connector probably lags the new API version, so its extraction no longer matches the source — a classic self-hosted maintenance hit. The remedy is to upgrade the connector image (or patch/fork it) and re-test, which is exactly the unbudgeted labor managed vendors absorb. It illustrates why connector currency is an ongoing operational cost.
+
+</details>
+
+<details><summary><b>99.</b> How does the connector model (source/destination/spec/state) make Airbyte extensible to new systems?</summary>
+
+Because any new system only has to implement the same protocol contract — declare a `spec`, support `check`/`discover`/`read` or `write`, and emit/consume `state` — the platform drives it without bespoke orchestration code. New connectors slot into the same engine. This uniformity is what lets a connector library scale to hundreds of sources.
+
+</details>
+
+<details><summary><b>100.</b> Summarize when batch ELT connectors are the right ingestion choice versus streaming or hand-coded extraction.</summary>
+
+Batch ELT connectors fit scheduled, non-streaming ingestion of database tables, files, and SaaS APIs where minute-to-hour latency is acceptable and you value pre-built connectors over custom code. Streaming (Kafka/CDC-to-stream) fits sub-second event flows; hand-coded extraction fits one-off or highly bespoke sources. For most fund reference, NAV, and holdings feeds, scheduled incremental batch ELT is the pragmatic default — which is exactly why this lesson makes you run one.
+
+</details>
+
+
+## Phase 2 · 8.2.5 Data Vault modeling (+ 1.4.7 pattern) — 100 self-test questions
+
+<details><summary><b>1.</b> What is Data Vault 2.0 and what problem does it solve for a regulated fund-administration warehouse?</summary>
+
+Data Vault 2.0 is an enterprise data warehouse modeling pattern, defined by Linstedt and Olschimke, built from hubs, links, and satellites and loaded insert-only. It solves auditability-by-construction and multi-source integration: you can absorb a second transfer-agency feed without re-modeling the existing warehouse, and every change is preserved as a new row an auditor can trace. The trade-off is ceremony — on a single small source it is overkill.
+
+</details>
+
+<details><summary><b>2.</b> What are the three core table types of a raw Data Vault?</summary>
+
+Hubs, links, and satellites. Hubs store the distinct list of business keys, links store the relationships (associations) between business keys, and satellites store the descriptive, time-variant context and history for hubs and links. This deliberate split is what lets you add sources and attributes independently without rewriting existing structures.
+
+</details>
+
+<details><summary><b>3.</b> What does a hub table actually store?</summary>
+
+A hub stores the unique list of a single business key plus a small fixed set of system columns: the hash key (its surrogate primary key), the business key column(s), the load datetime, and the record source. It deliberately holds no descriptive attributes and no relationships — only the agreed identity of a business concept such as a fund, share class, or administrator.
+
+</details>
+
+<details><summary><b>4.</b> What is a business key in Data Vault terms?</summary>
+
+A business key is the identifier the business actually uses to recognise an entity in the real world, independent of any source system's surrogate key. For a fund that might be an ISIN; for a share class an ISIN plus class code; for an administrator a LEI. Choosing it well is the single most consequential modeling decision because hubs and integration hinge on it.
+
+</details>
+
+<details><summary><b>5.</b> Why must a hub's business key be source-system-independent?</summary>
+
+Because the whole point of the hub is to integrate the same real-world entity arriving from multiple systems into one identity. If you keyed the hub on a source surrogate (e.g. a TA system's internal account number), the same fund from a second TA would land as a separate hub row and integration would fail. A business key like ISIN or LEI is stable across systems, so both feeds map to the same hub record.
+
+</details>
+
+<details><summary><b>6.</b> What does a link table represent?</summary>
+
+A link represents a relationship or transaction connecting two or more business keys — for example the association between a fund hub, a share-class hub, and an administrator hub. It is many-to-many by construction and stores the hash keys of the participating hubs, its own link hash key, the load datetime, and record source, but no descriptive context.
+
+</details>
+
+<details><summary><b>7.</b> Why does Data Vault model every relationship as many-to-many?</summary>
+
+Modeling links as many-to-many future-proofs the relationship: if the business rule changes so that what was one-to-many becomes many-to-many (e.g. a share class is later serviced by two administrators), no structural change is needed — only new link rows. Cardinality is enforced and reported through the data and business vault, not baked into the link's structure, preserving non-destructive evolution.
+
+</details>
+
+<details><summary><b>8.</b> What goes in a satellite table?</summary>
+
+A satellite holds the descriptive attributes and their history for exactly one parent hub or one link. It stores the parent hash key, the load datetime (part of the primary key), the descriptive columns, a hashdiff for change detection, and the record source. Multiple satellites can hang off the same hub, typically split by source or rate of change.
+
+</details>
+
+<details><summary><b>9.</b> Why are satellites separated from hubs rather than stored as columns on the hub?</summary>
+
+Because context changes over time and varies by source, whereas the business key's identity does not. Keeping descriptive, time-variant data in satellites lets you keep full history, add a new source's attributes as a new satellite, and load each at its own cadence — all without touching the stable hub. It is the separation of identity, relationship, and context that gives Data Vault its agility.
+
+</details>
+
+<details><summary><b>10.</b> How is history captured in a satellite without overwriting data?</summary>
+
+Every change produces a new satellite row keyed by parent hash key plus load datetime; the prior row is left untouched. There is no UPDATE — the current version is simply the row with the latest load datetime for that key. This insert-only history is what makes the full timeline of a fund's attributes reconstructable.
+
+</details>
+
+<details><summary><b>11.</b> Why might you split one hub's attributes across several satellites?</summary>
+
+You split satellites by source system and by rate of change. Splitting by source keeps each feed's data isolated and independently loadable; splitting by rate of change avoids re-storing slow-changing attributes every time a fast-changing one moves. For a fund hub you might have one satellite for stable static data and another for frequently updated NAV-related descriptive fields.
+
+</details>
+
+<details><summary><b>12.</b> What system columns appear on essentially every Data Vault table?</summary>
+
+A load datetime (when the row was loaded) and a record source (which feed it came from), plus the relevant hash key(s). Hubs and links use the load datetime to mark first-seen; satellites include it in the primary key to version history. The record source is essential for the audit trail — it tells an auditor exactly which system asserted each fact.
+
+</details>
+
+<details><summary><b>13.</b> What is the record source column for and why does an auditor care?</summary>
+
+The record source records the originating system or file for each row, so any fact can be traced back to who asserted it. In fund administration, when a NAV or holding figure is questioned, the record source lets you prove whether it came from the transfer agency, the fund accountant, or a market-data feed. It is part of auditability-by-construction, not an afterthought.
+
+</details>
+
+<details><summary><b>14.</b> Distinguish identity, relationship, and context in one sentence each.</summary>
+
+Identity is the business key, stored once per concept in a hub. Relationship is the association between business keys, stored in a link. Context is the descriptive, time-variant detail, stored in satellites; separating the three is the foundational idea of Data Vault.
+
+</details>
+
+<details><summary><b>15.</b> What is the raw vault?</summary>
+
+The raw vault is the layer of hubs, links, and satellites loaded directly from source data with no business rules applied — a faithful, integrated-by-business-key copy of what the sources said. Data is cleansed only of hard technical issues (type alignment, trimming), never soft business logic, so the raw vault remains a defensible system of record.
+
+</details>
+
+<details><summary><b>16.</b> What is the business vault and how does it differ from the raw vault?</summary>
+
+The business vault is a sparse set of additional hubs, links, and satellites that hold the results of applied business rules and computations — derived attributes, computed satellites, mappings. It sits on top of the raw vault and is rebuildable from it, so if a rule changes you recompute the business vault without re-ingesting source data. The boundary is exactly where raw integration ends and computed logic begins.
+
+</details>
+
+<details><summary><b>17.</b> Why is the boundary between raw vault and business vault important for auditability?</summary>
+
+Because it cleanly separates "what the source said" (raw, immutable, reproducible) from "what we computed" (business vault, derivable). An auditor can verify that the raw vault matches the source files, then separately review the business rules that produced computed values. If you mixed business logic into the raw load, you could no longer prove the warehouse is a faithful copy of the source.
+
+</details>
+
+<details><summary><b>18.</b> Can the business vault be rebuilt from the raw vault, and why does that matter?</summary>
+
+Yes — by design the business vault contains only derived structures, so it can be dropped and regenerated from the raw vault. This matters because a corrected or changed business rule then only requires recomputing the business vault, with no risky re-ingestion of source data and no loss of the original raw record. It localises the blast radius of rule changes.
+
+</details>
+
+<details><summary><b>19.</b> Where should soft business rules live in a Data Vault, and where should they not?</summary>
+
+Soft business rules — interpretations, derivations, harmonisation that could change — belong in the business vault and downstream marts, never in the raw vault load. The raw vault applies only hard rules (technical type coercion, splitting, hashing). Keeping soft rules out of the raw layer is what guarantees the raw vault stays an unaltered system of record.
+
+</details>
+
+<details><summary><b>20.</b> What is a computed satellite?</summary>
+
+A computed satellite is a business-vault satellite whose attributes are the output of applied business logic rather than raw source values — for example a satellite holding a derived risk classification or a harmonised currency. It hangs off an existing raw hub or link and is fully rebuildable from raw data, keeping the computation explicit and re-runnable.
+
+</details>
+
+<details><summary><b>21.</b> What is a hash key in Data Vault 2.0 and why is it used instead of a sequence surrogate?</summary>
+
+A hash key is a deterministic surrogate produced by hashing the business key(s) — by default MD5 in AutomateDV. It is used instead of a database sequence because it can be computed independently on every node in parallel without a central counter, enabling fully parallel, load-order-independent loading. The same business key always yields the same hash key, so loads need no lookups against existing keys.
+
+</details>
+
+<details><summary><b>22.</b> How is a hub hash key computed?</summary>
+
+The hub hash key is computed by hashing the standardised business key(s) for that hub — typically uppercased and trimmed, with a defined null placeholder. In AutomateDV the default algorithm is MD5, the multi-column concatenator defaults to `||`, and the null placeholder defaults to `^^`. Determinism is the whole point: identical business keys produce identical hash keys across systems and runs.
+
+</details>
+
+<details><summary><b>23.</b> How is a link hash key computed?</summary>
+
+A link hash key is computed by hashing the combined business keys of all hubs participating in the relationship, in a fixed, agreed column order. Because it is derived from the underlying business keys (not the hub hash keys' sequences), it too is deterministic and reproducible independently on every node. Column order must be standardised or two systems would compute different link hashes for the same relationship.
+
+</details>
+
+<details><summary><b>24.</b> What is a hashdiff and what is it used for?</summary>
+
+A hashdiff is a hash of all the descriptive attribute values in a satellite row, stored alongside the row. It enables cheap change detection: to decide whether a source record represents a change, you compare its computed hashdiff to the latest stored hashdiff for that key instead of column-by-column comparison. If they match, nothing changed and no new satellite row is inserted.
+
+</details>
+
+<details><summary><b>25.</b> Why is comparing a hashdiff cheaper than comparing every column?</summary>
+
+Because a single fixed-width hash comparison replaces an N-column equality check across potentially dozens of wide attributes, which is faster and far simpler to express in SQL. It also handles nulls uniformly through the null placeholder, avoiding the `NULL <> NULL` pitfalls of column-wise comparison. The cost is computing the hash once at load time.
+
+</details>
+
+<details><summary><b>26.</b> What determinism property must hashing guarantee across systems?</summary>
+
+Given the same input values, the same standardisation, the same column order, and the same null placeholder, the hash must be byte-for-byte identical on every platform and every run. Without this, two systems loading the same fund would compute different hash keys and integration would silently break. This is why AutomateDV exposes config for casing, concatenator, and null placeholder.
+
+</details>
+
+<details><summary><b>27.</b> Why does the order of columns matter when computing a multi-column hash?</summary>
+
+Because hashing is over a concatenated string, swapping column order changes the input and therefore the hash. A hub on ISIN plus share-class code must always concatenate them in the same fixed order, or the same key produces different hashes in different models or systems. AutomateDV uses the order you declare in the staging hash configuration, so it must be standardised.
+
+</details>
+
+<details><summary><b>28.</b> What is the default hash algorithm in AutomateDV and how do you change it?</summary>
+
+The default is `MD5`. You change it by setting the package-level `hash` variable in `dbt_project.yml` (e.g. to `SHA` for SHA-256), which switches the algorithm used by the `hash_columns` staging macro across all models. The choice trades collision resistance and width against storage and compute cost.
+
+</details>
+
+<details><summary><b>29.</b> Why might a team choose SHA-256 over MD5 for hash keys?</summary>
+
+To reduce the (already tiny) probability of hash collisions and to meet security or governance policies that disallow MD5. The cost is wider keys (32 bytes vs 16) and slightly more compute, which inflates storage and join cost across a large vault. Many teams accept MD5 for surrogate keys because collisions are statistically negligible at warehouse scale, but a regulated shop may mandate SHA-256.
+
+</details>
+
+<details><summary><b>30.</b> How are nulls handled when computing a hashdiff, and why does it matter?</summary>
+
+Nulls are replaced with a fixed null placeholder string (AutomateDV default `^^`) before hashing, so a null is hashed as a stable, distinct token. This matters because without it, an actual data value that happened to equal an empty string could collide with a null, or `NULL` concatenation could produce inconsistent results across platforms. The placeholder makes null-versus-value changes detectable and deterministic.
+
+</details>
+
+<details><summary><b>31.</b> Why does AutomateDV uppercase hash content by default, and when would you disable it?</summary>
+
+It uppercases (via `hash_content_casing: UPPER`) so that case-only differences in source values do not register as changes — `LU0123456789` and `lu0123456789` hash to the same key. You disable it (`DISABLED`) only when case is genuinely meaningful and a lowercase value must be treated as a different value. For ISINs, uppercasing is appropriate since they are conventionally uppercase.
+
+</details>
+
+<details><summary><b>32.</b> What are the three defining characteristics of Data Vault loading?</summary>
+
+Loads are parallel, insert-only, and idempotent in the sense that re-running them does not corrupt history. Parallelism comes from deterministic hash keys removing the need for sequential surrogate lookups; insert-only means no UPDATE or DELETE; and the combination is what makes the warehouse auditable and restartable. These properties follow directly from the hash-key and satellite design.
+
+</details>
+
+<details><summary><b>33.</b> What does insert-only loading mean and what is explicitly forbidden?</summary>
+
+Insert-only means every load only appends new rows; existing rows are never UPDATEd or DELETEd. A changed attribute becomes a new satellite row with a later load datetime, and a logically deleted record is recorded by a separate mechanism, not by removing the row. Forbidding in-place mutation is what preserves the complete, tamper-evident history.
+
+</details>
+
+<details><summary><b>34.</b> Why is insert-only loading inherently auditable?</summary>
+
+Because history is never destroyed — every version of every fact persists with its load datetime and record source, so the warehouse itself is the audit log. An auditor can reconstruct exactly what was known at any point in time and see who asserted it, without relying on a separate change-data-capture trail. There is no overwrite that could hide a prior value.
+
+</details>
+
+<details><summary><b>35.</b> How do deterministic hash keys enable parallel loading?</summary>
+
+Because a hub, link, or satellite key can be computed purely from the source row's business keys, no row needs to look up a previously assigned surrogate from a central sequence. That removes the serialization point, so hubs, links, and satellites — and even multiple sources — can load concurrently and in any order. Re-running a load just re-inserts the same deterministic keys, which can be deduplicated.
+
+</details>
+
+<details><summary><b>36.</b> Why can hubs, links, and satellites be loaded independently and in any order?</summary>
+
+Because each derives its keys from business keys via hashing, not from foreign-key lookups into already-loaded tables. A satellite can be loaded before, after, or alongside its hub since both compute the same parent hash key from the same business key. This load-order independence is central to Data Vault's parallel, restartable loading model.
+
+</details>
+
+<details><summary><b>37.</b> How is a logical delete represented in an insert-only Data Vault?</summary>
+
+It is not represented by deleting a row but by inserting a status record — commonly a record-tracking satellite or a "deleted" flag in a status satellite — so the deletion itself becomes a timestamped, auditable fact. The original satellite rows remain intact. This preserves the principle that the warehouse never loses history, even for removed source records.
+
+</details>
+
+<details><summary><b>38.</b> In a fund-administration context, how would insert-only loading appear to an auditor?</summary>
+
+Each NAV strike, holding update, or static-data change appears as an additional satellite row with its load datetime and record source, never as an overwrite of the previous value. The auditor sees an immutable timeline: the original value, every subsequent restatement, and the source of each. This is exactly the explainability regulated administration demands.
+
+</details>
+
+<details><summary><b>39.</b> What is a record-tracking satellite?</summary>
+
+A record-tracking satellite (also driving-key or status satellite variant) tracks the presence or appearance of a business key or relationship in each source load, rather than its descriptive attributes. It is used to detect logical deletes and to know which source last reported a key, supporting status tracking without ever updating prior rows. It is an insert-only mechanism like all satellites.
+
+</details>
+
+<details><summary><b>40.</b> How does Data Vault let you add a second source system without re-modeling?</summary>
+
+You add new satellites for the new source's attributes, map its business keys onto the existing hubs, and add links for any new relationships — all without touching existing hubs, links, or satellites. Because integration happens on the business key, the second transfer agency's fund records flow into the same fund hub. Existing structures and their history are untouched, so nothing downstream breaks.
+
+</details>
+
+<details><summary><b>41.</b> A second transfer agency reuses an ISIN for a different internal account. How does the hub design cope?</summary>
+
+If the ISIN truly identifies the same fund, both feeds map to one hub row and their differing internal codes live in separate per-source satellites or a separate hub keyed on the internal code. If the ISIN has been reused for a genuinely different instrument, the ISIN alone is an inadequate business key and you must compose it with another stable attribute. The decision turns on whether the key denotes the same real-world entity.
+
+</details>
+
+<details><summary><b>42.</b> Why can a reused or recycled ISIN be a problem as a hub business key?</summary>
+
+Because ISINs can be reassigned after an instrument matures or is delisted, so over time one ISIN string may denote two different instruments. Keyed naively, both would collapse into one hub, conflating two funds' histories. The fix is to defend the key choice — for example by composing ISIN with an effective-date or issuer attribute, or by using a more stable internal identifier as the business key.
+
+</details>
+
+<details><summary><b>43.</b> How would you defend a hub key choice for messy real-world fund identifiers?</summary>
+
+You document why the chosen key uniquely and stably identifies the business concept, what failure modes (reuse, nulls, formatting variants) exist, and how you mitigated them (composite keys, standardisation, source-priority). For funds you might justify a composite of ISIN and a stable internal fund code precisely because ISINs can be reused. The defence is part of the modeling deliverable, not optional.
+
+</details>
+
+<details><summary><b>44.</b> When two sources disagree on a fund's attribute, where does that conflict live in a raw vault?</summary>
+
+It lives as two satellite rows — one per source satellite — each faithfully recording what its source asserted, with no attempt to reconcile in the raw layer. Reconciliation (which value wins) is a soft business rule that belongs in the business vault. This keeps the raw vault an honest record of disagreement and makes the resolution logic explicit and auditable.
+
+</details>
+
+<details><summary><b>45.</b> Why does Data Vault keep multi-source conflicts unresolved in the raw vault?</summary>
+
+Because resolving them requires a business rule that could change or be wrong, and the raw vault must remain a defensible, unaltered copy of each source. Storing both assertions preserves the ability to re-resolve later and to prove what each source said. Premature reconciliation in the raw layer would destroy that auditability and lock in a possibly mistaken choice.
+
+</details>
+
+<details><summary><b>46.</b> What is a PIT (point-in-time) table and what problem does it solve?</summary>
+
+A PIT table is a query-assistance structure that, for each parent key and each snapshot date, pre-records which satellite row was current at that time. It solves the performance problem of "as-of" queries over a normalized vault, where reconstructing the current row per satellite otherwise requires expensive per-satellite max-load-datetime subqueries. The PIT turns those into simple equality joins.
+
+</details>
+
+<details><summary><b>47.</b> Why are point-in-time queries slow against a raw vault without a PIT table?</summary>
+
+Because finding the version of each attribute that was current at a given date means, for every satellite, filtering to rows at or before that date and picking the latest — a correlated max-per-key operation across many satellites, then joining them. With several satellites per hub this becomes many expensive subqueries. A PIT precomputes those choices so the query just joins on stored keys and dates.
+
+</details>
+
+<details><summary><b>48.</b> What does a PIT table physically contain?</summary>
+
+For each parent hash key and each snapshot date in a defined grid, the PIT stores the load datetime (and often the hash key) of the satellite row that was current as of that snapshot, for each satellite it spans. Querying then becomes an equi-join from the PIT to each satellite on parent key plus that stored load datetime. It holds no business attributes itself — only the pointers.
+
+</details>
+
+<details><summary><b>49.</b> What is a bridge table in Data Vault and how does it differ from a PIT table?</summary>
+
+A bridge table is a query-assistance structure that pre-joins a hub with one or more links (and often related hubs) to flatten frequently traversed relationships and improve join performance. Whereas a PIT optimises as-of access across satellites of one parent, a bridge optimises navigation across multiple hubs and links. Both are derivable business-vault artifacts, rebuildable from the raw vault.
+
+</details>
+
+<details><summary><b>50.</b> Are PIT and bridge tables part of the raw vault or the business vault?</summary>
+
+They are business-vault (query-assistance) structures, not raw vault. They contain no new source facts — only precomputed pointers and joins derived from raw hubs, links, and satellites — so they can be dropped and rebuilt at any time. Keeping them out of the raw vault preserves the raw layer as the pure system of record.
+
+</details>
+
+<details><summary><b>51.</b> How does a PIT table restore performance for "what was the NAV as of month-end" queries?</summary>
+
+The PIT precomputes, for each fund key and each month-end snapshot, exactly which satellite row was current then, so the as-of query is a direct join rather than a per-satellite max-datetime scan. Reporting NAV history across many month-ends over a large satellite becomes fast and predictable. This is precisely the kind of regulated, repeated as-of reporting where PITs pay off.
+
+</details>
+
+<details><summary><b>52.</b> How often are PIT and bridge tables typically refreshed?</summary>
+
+They are rebuilt or extended on a regular cadence aligned to the snapshot grid they serve — often nightly, with the snapshot date range extended each run. Because they are fully derivable from the raw vault, refreshing means recomputing the pointers, not re-ingesting data. The cadence is a performance/storage trade-off, not a correctness one.
+
+</details>
+
+<details><summary><b>53.</b> When is Data Vault overkill?</summary>
+
+When you have a single, small, stable source with no real integration need and no strong audit-history requirement, the hub/link/satellite ceremony adds tables and load logic for no payoff. A simple dimensional model or even a flat table loads faster and is easier to query. Data Vault earns its keep with multiple evolving sources and hard auditability needs — exactly fund administration's profile, but not every small mart's.
+
+</details>
+
+<details><summary><b>54.</b> What is the cost of misapplying Data Vault to a trivial source?</summary>
+
+You multiply table count and join depth, write and maintain more load code, and pay query-time assembly cost — all to model context that never integrates or needs deep history. The Why note for this lesson puts it bluntly: you build ceremony with no payoff. The skill is recognising when the auditability and integration benefits do not apply.
+
+</details>
+
+<details><summary><b>55.</b> What is a lakehouse, and what does "Vault-on-lakehouse" mean?</summary>
+
+A lakehouse combines data-lake storage (columnar files on object storage, often with a table format like Delta or Iceberg) with warehouse-style transactional tables and SQL. Vault-on-lakehouse means implementing the hub/link/satellite Data Vault on that platform — typically with dbt and the AutomateDV package generating and testing the loads — rather than on a classic relational EDW. It brings Data Vault's auditability to modern, scalable, file-based storage.
+
+</details>
+
+<details><summary><b>56.</b> What is AutomateDV?</summary>
+
+AutomateDV is a dbt package (by Datavault-UK, available on dbt Hub as `Datavault-UK/automate_dv`) that generates and executes the SQL to load a Data Vault 2.0 warehouse from metadata. You declare staging hashes and source models, and its macros emit insert-only hub, link, and satellite loads plus PIT and bridge logic. It removes the repetitive, error-prone hand-coding of vault loads.
+
+</details>
+
+<details><summary><b>57.</b> What was AutomateDV previously called?</summary>
+
+It was previously called dbtvault. The rename to AutomateDV better reflects the tool's purpose, and a key practical consequence is that macros are now namespaced as `automate_dv.*` (e.g. `automate_dv.hub`) instead of `dbtvault.*`. Old tutorials and code using `dbtvault.hub(...)` need updating to the new namespace.
+
+</details>
+
+<details><summary><b>58.</b> Name the core AutomateDV table macros.</summary>
+
+`automate_dv.hub`, `automate_dv.link`, `automate_dv.t_link` (transactional/non-historized link), `automate_dv.sat`, `automate_dv.ma_sat` (multi-active satellite), `automate_dv.eff_sat` (effectivity satellite), `automate_dv.xts` (extended tracking satellite), `automate_dv.pit`, and `automate_dv.bridge`. You call them inside dbt models, passing the staged source model and the relevant key and column metadata. They generate the insert-only loading SQL for each structure.
+
+</details>
+
+<details><summary><b>59.</b> What do the AutomateDV staging macros `hash_columns` and `derive_columns` do?</summary>
+
+In a staging model, `hash_columns` generates the hash key and hashdiff columns from your business keys and attributes using the configured algorithm and standardisation, and `derive_columns` adds constant or computed columns such as record source and load datetime. The staging layer thus prepares every downstream hub/link/sat to read pre-hashed, standardised rows. Getting the staging hashes right is what makes the vault loads deterministic.
+
+</details>
+
+<details><summary><b>60.</b> Why pair dbt with AutomateDV rather than hand-writing vault SQL?</summary>
+
+Because vault loads are highly repetitive yet error-prone — the same insert-only, hashdiff-compare pattern across dozens of satellites — and a single inconsistency in hashing or null handling breaks integration. AutomateDV's macros encode the patterns once, and dbt provides version control, testing, and lineage on top. You get generated, tested raw-vault loads instead of bespoke SQL per table.
+
+</details>
+
+<details><summary><b>61.</b> How does dbt's testing support the auditability goals of a Data Vault?</summary>
+
+dbt lets you assert constraints — uniqueness of hub keys, not-null on business keys, relationships between links and hubs, accepted record-source values — as code that runs every build. Combined with AutomateDV's deterministic generation, this gives continuous, documented evidence that the vault's integrity rules hold. For a regulated administrator, automated tests are part of the controls story you show an auditor.
+
+</details>
+
+<details><summary><b>62.</b> What is a multi-active satellite (`ma_sat`) and when is it needed?</summary>
+
+A multi-active satellite stores multiple concurrently-active rows for the same parent at the same load datetime — for example several contact methods or several share-class distribution policies effective simultaneously. It needs an additional sub-sequence or business-key-within-parent to make each active row unique. A plain satellite assumes one current row per parent, which would be wrong for genuinely multi-valued context.
+
+</details>
+
+<details><summary><b>63.</b> What is an effectivity satellite (`eff_sat`)?</summary>
+
+An effectivity satellite tracks the start and end of the effective period of a relationship recorded in a link — for example when a particular administrator was effectively the servicer of a share class. It records driving keys and effective-from/-to in an insert-only way, so you can answer "which relationship was effective when" without updating prior rows. It is how Data Vault models relationship validity over time.
+
+</details>
+
+<details><summary><b>64.</b> What is a driving key in an effectivity satellite?</summary>
+
+The driving key is the subset of the link's hub keys that determines the one-side of a relationship being tracked, used to detect when that relationship changes — for example the share-class key driving which administrator is currently effective. It tells the effectivity logic which existing relationship to "close" when a new one appears. Choosing the right driving key is essential for correct effectivity tracking.
+
+</details>
+
+<details><summary><b>65.</b> What is a non-historized (transactional) link, `t_link`?</summary>
+
+A non-historized or transactional link stores immutable transaction or event records — such as an individual subscription or redemption order — directly in the link, including their payload, because such events never change after they occur. Since the record is immutable there is no associated satellite history to track. It models facts that are write-once by nature.
+
+</details>
+
+<details><summary><b>66.</b> How would you model fund, share class, and administrator as a raw vault?</summary>
+
+Create a hub each for fund, share class, and administrator on their business keys (e.g. ISIN-based fund and share-class keys, LEI for administrator), a link connecting them to express the servicing relationship, and per-source satellites carrying each entity's descriptive context. Load all of it insert-only with deterministic hash keys via AutomateDV. A second TA source then adds satellites and link rows, not new structures.
+
+</details>
+
+<details><summary><b>67.</b> Why might an administrator hub be keyed on LEI rather than a name?</summary>
+
+Because the LEI is a globally unique, stable, regulator-maintained identifier for a legal entity, whereas names vary in spelling, abbreviation, and language and change on rebranding. Keying on LEI ensures the same administrator from two feeds integrates into one hub, and that mergers/renames do not fragment its history. It is the textbook example of choosing a source-independent business key.
+
+</details>
+
+<details><summary><b>68.</b> How does loading a late-arriving correction work in insert-only Data Vault?</summary>
+
+The correction is inserted as a new satellite row for the affected key, with its own load datetime (and often a separately tracked applied/effective date), leaving the erroneous prior row in place. The current view then resolves to the corrected row by latest load datetime, while the full history — original, correction, and their sources — remains queryable. Nothing is overwritten.
+
+</details>
+
+<details><summary><b>69.</b> How do you show the full audit trail of a corrected NAV from the satellites?</summary>
+
+You query all satellite rows for that fund/share-class key ordered by load datetime: the original NAV row, the later correction row, each with its record source, are all present. That sequence is the audit trail, reconstructable directly from the vault without a separate change log. It demonstrates the Done-when criterion of showing a late correction as a new row, not an overwrite.
+
+</details>
+
+<details><summary><b>70.</b> Why is a late correction modeled as a new satellite row rather than an overwrite?</summary>
+
+Because overwriting would destroy the record that the original (wrong) value was once asserted and reported, which is exactly what regulated administration must preserve. A new row keeps both the original and the correction, with their timestamps and sources, so you can prove what was known and reported at each moment. This is the auditability-by-construction the pattern promises.
+
+</details>
+
+<details><summary><b>71.</b> How would you distinguish the time an event happened from the time you loaded it in a satellite?</summary>
+
+The load datetime is the warehouse's processing time (when the row was inserted) and is part of the satellite key, while a separate applied/effective date column captures the business event or as-of time. Keeping both lets you answer bitemporal questions — what the value was for a date, and when the warehouse learned it — which matters for late corrections. Conflating them loses the ability to explain corrections.
+
+</details>
+
+<details><summary><b>72.</b> What is the 1.4.7 pattern referenced in this lesson and how does it relate to Data Vault?</summary>
+
+It refers to the Phase-1 modeling pattern (lesson 1.4.7) that this Data Vault lesson builds on and reuses — the canonical fund/share-class/administrator modeling you established earlier. Data Vault here is the EDW expression of that same domain pattern, so your hubs, links, and satellites should align to the business keys and relationships already defined. The cross-reference signals continuity, not a new domain.
+
+</details>
+
+<details><summary><b>73.</b> Why is Data Vault specifically favored in financial services and Luxembourg fund shops?</summary>
+
+Because it delivers auditability by construction and non-destructive multi-source integration — exactly the controls a regulated fund-administration and asset-management context needs for NAV, holdings, and static data lineage. Luxembourg fund shops ask for it by name in job specs, so it is both a technical and a hiring reality. Its insert-only history makes every change explainable to an auditor.
+
+</details>
+
+<details><summary><b>74.</b> What does "auditability by construction" mean for Data Vault?</summary>
+
+It means the audit trail is a structural property of the model, not an add-on: because loading is insert-only and every row carries load datetime and record source, the warehouse inherently preserves who said what and when. You do not bolt on a separate change-tracking system; querying the satellites is the audit. This is why the pattern resonates in regulated finance.
+
+</details>
+
+<details><summary><b>75.</b> First thing to check when AutomateDV produces duplicate hub rows for the same business key.</summary>
+
+Check the staging hash configuration: a difference in casing, the concatenator, null placeholder, or column order between loads will produce different hash keys for the same business key, so it appears as a new hub row. Confirm `hash_content_casing`, `concat_string`, `null_placeholder_string`, and the declared column order are identical everywhere. Inconsistent standardisation is the classic cause of "duplicate" hubs.
+
+</details>
+
+<details><summary><b>76.</b> Source A sends ISIN as lowercase and source B as uppercase. What breaks and how do you fix it?</summary>
+
+With `hash_content_casing` not normalising, the two ISINs hash to different hub keys, so the same fund splits into two hubs and integration fails. The fix is to ensure uppercasing is enabled (the AutomateDV default) or to standardise ISIN case in staging before hashing. This is why standardising the business key before hashing is mandatory.
+
+</details>
+
+<details><summary><b>77.</b> Your satellite is inserting a new row on every load even when nothing changed. What is the likely cause?</summary>
+
+The hashdiff is being computed inconsistently — for example over a different column set, different order, different null handling, or including a volatile column like a load timestamp — so it never matches the stored hashdiff and every load looks like a change. Verify the hashdiff covers exactly the descriptive attributes, in a fixed order, with the standard null placeholder. A non-deterministic hashdiff defeats change detection.
+
+</details>
+
+<details><summary><b>78.</b> Why must a load datetime or processing timestamp never be part of a satellite's hashdiff?</summary>
+
+Because the hashdiff exists to detect changes in business content, and a per-run timestamp changes every load, so including it would make every record look changed and insert a redundant row each time. The hashdiff must cover only the descriptive attributes whose change you care about. Excluding system/processing columns from the hashdiff is a fundamental rule.
+
+</details>
+
+<details><summary><b>79.</b> An auditor asks you to prove no historical NAV was ever altered. How does Data Vault answer this?</summary>
+
+You show that loading is insert-only with no UPDATE or DELETE on satellites, so the original NAV row, identified by parent key and load datetime, still exists alongside any corrections. The presence of all versions, with record source, is itself the proof of non-alteration. Combined with dbt tests asserting key uniqueness and not-null, you have a controls-backed, structural argument.
+
+</details>
+
+<details><summary><b>80.</b> Where does NAV calculation logic belong relative to the vault?</summary>
+
+NAV computation is a business rule, so it belongs in the business vault or downstream marts, never in the raw vault load. The raw vault stores the inputs (holdings, prices, fees) faithfully per source; the computed NAV is a derived, rebuildable result. Keeping the calculation out of the raw layer preserves the raw vault as an unaltered system of record and keeps the calculation auditable separately.
+
+</details>
+
+<details><summary><b>81.</b> How would EMT/EPT template attributes map into a Data Vault?</summary>
+
+The funds and share classes the templates describe map to existing hubs; the template-specific attributes (target market, costs blocks, PRIIPs inputs) land in satellites, ideally per-source and per-template-version, off those hubs. Because templates version frequently, satellites let you keep each version's values as new rows without disturbing prior data. This is multi-source integration applied to FinDatEx data.
+
+</details>
+
+<details><summary><b>82.</b> A new EMT template version adds fields. How does Data Vault absorb it without re-modeling?</summary>
+
+You add a new satellite (or extend an existing one) on the relevant hub to hold the new fields, loaded insert-only, while existing structures and history stay untouched. The hubs and links for fund and share class do not change because the business keys did not change. This is precisely the "absorb a new source/version without rewriting the warehouse" property.
+
+</details>
+
+<details><summary><b>83.</b> How do you represent the version of a FinDatEx template that supplied a satellite row?</summary>
+
+Capture the template version in the record source (or a dedicated version attribute) so each satellite row is attributable to a specific template release. That lets you trace which EMT/EPT version asserted each value and answer questions about partial or superseded files. It is the same record-source-driven traceability the pattern uses everywhere.
+
+</details>
+
+<details><summary><b>84.</b> How would individual subscription and redemption orders be modeled in the vault?</summary>
+
+As records in a non-historized transactional link (`t_link`) connecting the investor, share-class, and fund hubs, because each order is an immutable event with its own payload that never changes after it occurs. There is no satellite history needed for the order itself. Order status updates, by contrast, are separate facts and can be tracked via status satellites or further links.
+
+</details>
+
+<details><summary><b>85.</b> How do SWIFT-message-derived facts fit the raw vault?</summary>
+
+Business keys carried in the messages (ISIN, LEI, account identifiers) map to hubs, the relationships they describe map to links, and the message field values become satellite or transactional-link payload, with record source identifying the SWIFT message type. The raw vault stores exactly what the message asserted, faithfully per source. Any normalisation of message codes to canonical values is a business-vault rule.
+
+</details>
+
+<details><summary><b>86.</b> Why might two transfer agencies' fund feeds need separate satellites even though they share a fund hub?</summary>
+
+Because each source can assert different or conflicting attribute values and may load on a different schedule, and the raw vault must keep each source's assertions intact and independently loadable. Separate per-source satellites preserve who said what and avoid one feed overwriting another's context. Reconciliation across them is a later business-vault concern.
+
+</details>
+
+<details><summary><b>87.</b> What is the consequence of choosing too narrow a business key for a fund hub?</summary>
+
+If the key fails to uniquely identify the fund — e.g. ISIN alone where ISINs are reused or shared across share-class structures — distinct funds collapse into one hub and their histories conflate, corrupting every downstream query and report. The remedy is a composite or more stable key, justified explicitly. Too-narrow keys are a leading cause of silent integration errors.
+
+</details>
+
+<details><summary><b>88.</b> What is the consequence of choosing too broad (over-composite) a business key for a hub?</summary>
+
+If the key includes attributes that are not actually part of the entity's identity, the same real-world fund can appear as multiple hub rows whenever those extra attributes differ, defeating integration. You end up failing to merge feeds that should merge. The key must be exactly the minimal set that uniquely and stably identifies the business concept — no more, no less.
+
+</details>
+
+<details><summary><b>89.</b> Why are dbt models the natural home for Vault-on-lakehouse loads?</summary>
+
+Because dbt expresses each hub/link/sat as a SELECT-based model with dependencies, version control, tests, and documentation, and AutomateDV's macros generate the insert-only SQL inside those models. The lakehouse's transactional table format gives the ACID semantics the inserts need. Together they bring engineering discipline and lineage to a pattern that is otherwise repetitive hand-written SQL.
+
+</details>
+
+<details><summary><b>90.</b> How does a PIT table interact with multiple satellites on the same hub?</summary>
+
+For each snapshot date and parent key, the PIT records the current load datetime for each of the hub's satellites, so an as-of query joins the PIT to every satellite on parent key plus that satellite's stored load datetime. This collapses a multi-satellite, per-satellite-max reconstruction into a set of simple equi-joins. The PIT must span exactly the satellites the report needs.
+
+</details>
+
+<details><summary><b>91.</b> What is the trade-off of building many PIT and bridge tables?</summary>
+
+They speed queries but add storage and a maintenance/refresh burden, and they must be rebuilt as new snapshots and data arrive. Because they are derived, they never threaten correctness, but over-building them wastes compute and storage on access paths nobody uses. You build them where measured query pain justifies them, not pre-emptively for every report.
+
+</details>
+
+<details><summary><b>92.</b> Why is "raw vault is never cleansed of business meaning" a hard rule?</summary>
+
+Because the raw vault's value is being a faithful, defensible copy of the sources; applying business interpretation there makes it impossible to prove the warehouse matches the source files and bakes in possibly-wrong logic irreversibly. Only hard technical fixes (type alignment, hashing, trimming) are allowed in the raw load. All interpretation moves to the business vault, where it is explicit and rebuildable.
+
+</details>
+
+<details><summary><b>93.</b> How does Data Vault's structure help when a regulator requires reconstructing the warehouse state as of a past date?</summary>
+
+Because every satellite row carries a load datetime and nothing is overwritten, you can filter every satellite to rows at or before the target date and select the latest per key to reconstruct exactly what was known then. PIT tables make this fast for common snapshot dates. The model is inherently bitemporal-friendly, which is precisely what point-in-time regulatory reconstruction needs.
+
+</details>
+
+<details><summary><b>94.</b> First thing to check when an as-of query over the vault is unexpectedly slow.</summary>
+
+Check whether a PIT table exists and covers the snapshot dates and satellites the query uses; without one, the query is doing correlated max-load-datetime scans per satellite. If a PIT exists, confirm the query actually joins through it rather than the raw satellites directly. Missing or unused query-assistance structures are the usual cause of slow as-of queries.
+
+</details>
+
+<details><summary><b>95.</b> Why does Data Vault separate raw integration from computed logic, in one sentence?</summary>
+
+So the raw layer stays a provable, source-faithful, immutable record of what every system asserted, while all interpretation lives in a rebuildable business vault — preserving both auditability and the freedom to change business rules without re-ingesting data.
+
+</details>
+
+<details><summary><b>96.</b> What is an extended tracking satellite (`xts`) in AutomateDV and what is it for?</summary>
+
+An `xts` is a satellite variant that records, per load, which records appeared in which source feed — an audit of presence across loads — feeding logical-delete and record-tracking logic. It carries tracking metadata rather than business attributes and is loaded insert-only like every satellite. It supports answering "which source last reported this key, and when" without ever mutating prior rows.
+
+</details>
+
+<details><summary><b>97.</b> How do hash keys behave when a business key value is genuinely null in the source?</summary>
+
+The null is replaced with the configured null placeholder (AutomateDV default `^^`) before hashing, so a missing key hashes deterministically rather than producing an inconsistent or platform-dependent result. However, a hub keyed on a frequently-null business key is a modeling smell — the key may not actually identify the entity. Consistent null handling guarantees reproducibility, but it does not excuse a poor key choice.
+
+</details>
+
+<details><summary><b>98.</b> When integrating two TA feeds with different code lists for the same attribute, where does the harmonisation belong?</summary>
+
+The raw vault stores each feed's native codes verbatim in its own per-source satellite, and the mapping to a single canonical code list is a soft business rule that belongs in the business vault as a computed satellite or mapping structure. This keeps the originals provable and the harmonisation explicit and rebuildable. Doing the mapping during the raw load would destroy the ability to show what each source actually sent.
+
+</details>
+
+<details><summary><b>99.</b> Why is dbt lineage valuable when defending a Data Vault to an auditor?</summary>
+
+dbt builds a directed dependency graph from sources through staging, raw vault, business vault, and marts, so you can show exactly how any reported value was derived and which raw satellites and rules contributed. Combined with record source on every row and dbt tests on every build, this turns "trust us" into a documented, reproducible lineage. For regulated fund administration, that end-to-end traceability is a core part of the controls evidence.
+
+</details>
+
+<details><summary><b>100.</b> Summarise the Done-when criteria for this lesson.</summary>
+
+You can defend hub business-key choices for messy real-world identifiers such as reused ISINs; you can explain insert-only loading and the audit trail it produces to an auditor; and you can show a late correction as a new satellite row rather than an overwrite. Together these prove you can both model and operate a raw vault. They are the capability bar this Data Vault lesson is aiming for.
+
+</details>
+
+
+## Phase 2 · 1.12.1 ISO 20022 — 100 self-test questions
+
+<details><summary><b>1.</b> What is ISO 20022 in one sentence?</summary>
+
+ISO 20022 is an international standard for electronic data interchange between financial institutions, defining a common modelling methodology and a library of XML message schemas. It is the successor to legacy formats like SWIFT MT, and post-migration it is the lingua franca of EU payments and securities messaging. For a fund platform it matters because subscription orders, statements, and settlement instructions arrive and depart as ISO 20022 messages your canonical model must align to.
+
+</details>
+
+<details><summary><b>2.</b> What are the three layers of the ISO 20022 standard?</summary>
+
+ISO 20022 is layered as a business model (conceptual, the business processes and concepts), logical messages (the structured message definitions independent of syntax), and physical messages (the concrete XML schemas, the XSDs). This separation means the same business meaning can in principle be expressed in different syntaxes. In practice the physical layer you work with day to day is XML validated against an XSD.
+
+</details>
+
+<details><summary><b>3.</b> Decode the message identifier `setr.010.001.04` part by part.</summary>
+
+The four dot-separated tokens are business area (`setr`, securities trade), message number (`010`, unique within that business area), variant (`001`, a constrained flavour of the global definition), and version (`04`, the schema version). So `setr.010.001.04` is version 4 of the SubscriptionOrder message in the securities-trade area. Reading the identifier tells you exactly which schema you must validate against.
+
+</details>
+
+<details><summary><b>4.</b> In the identifier `pacs.008.001.13`, what does the `008` represent and what does the final `13` represent?</summary>
+
+The `008` is the message number, which is unique inside the `pacs` business area and identifies the specific message function — here FIToFICustomerCreditTransfer. The final `13` is the version number of that message definition. The third token (`001`) is the variant; together the four tokens pin down one exact XSD.
+
+</details>
+
+<details><summary><b>5.</b> What does the four-letter prefix in an ISO 20022 message name tell you?</summary>
+
+The four-letter prefix is the business area (sometimes called the business domain), grouping messages that serve a related purpose. Examples are `pacs` for payments clearing and settlement, `camt` for cash management, and `setr`, `semt`, `sese` for securities trade, management, and settlement. Recognising the prefix immediately tells you which functional domain a message belongs to before you read any payload.
+
+</details>
+
+<details><summary><b>6.</b> What does the business area `setr` cover, and why does it matter for funds?</summary>
+
+`setr` is the securities-trade business area, and it carries investment-fund order messages — subscriptions, redemptions, switches, and their confirmations. It matters for funds because transfer-agency order flow is expressed in `setr` messages, so your platform must ingest and emit them. The canonical example is `setr.010`, the SubscriptionOrder.
+
+</details>
+
+<details><summary><b>7.</b> What does the business area `semt` cover, and which fund artefacts use it?</summary>
+
+`semt` is the securities-management business area, carrying statements and reporting — holdings statements, transaction statements, and reconciliation reporting. For funds it underpins the periodic position and movement statements a custodian or transfer agent sends. Think of `semt` whenever you need a snapshot or movement report rather than an order instruction.
+
+</details>
+
+<details><summary><b>8.</b> What does the business area `sese` cover?</summary>
+
+`sese` is the securities-settlement business area, carrying settlement instructions and their statuses and confirmations — the messages that move securities and cash against each other after a trade. For a fund, `sese` is where the settlement leg of a subscription or redemption is instructed and confirmed. It is distinct from `setr`, which carries the order itself rather than its settlement.
+
+</details>
+
+<details><summary><b>9.</b> Sketch the fund order message flow and name the message family at each hop.</summary>
+
+A typical flow is order → status → confirmation → settlement: a `setr` order (for example `setr.010` SubscriptionOrder) is sent, an order-status message reports acceptance or rejection, a `setr` confirmation (for example `setr.012` SubscriptionOrderConfirmation) reports execution, and settlement is instructed and confirmed in the `sese` family. A `semt` statement may later report the resulting holding. Being able to name the type at each hop is exactly the Done-when criterion for this lesson.
+
+</details>
+
+<details><summary><b>10.</b> What does the business area `seev` cover, and why should a fund security master care?</summary>
+
+`seev` is the securities-events business area, carrying corporate-action messages — notifications, instructions, and confirmations for events like dividends, splits, mergers, and reorganisations. A fund security master cares because corporate actions can rename or retire an ISIN, so `seev` messages drive identifier-lifecycle handling. Ignoring them is how a single instrument silently becomes two rows in your warehouse.
+
+</details>
+
+<details><summary><b>11.</b> What does the business area `pacs` cover?</summary>
+
+`pacs` (payments clearing and settlement) carries interbank payment messages — for example FIToFICustomerCreditTransfer (`pacs.008`) and the payment status report (`pacs.002`). These move funds between financial institutions rather than instructing a customer's bank. They are the high-value-payment backbone in the post-MT world but are less central to fund-order processing than `setr`.
+
+</details>
+
+<details><summary><b>12.</b> What does the business area `camt` cover, and give a fund-relevant example.</summary>
+
+`camt` (cash management) carries account-reporting and cash-management messages, including bank-to-customer statements and notifications. The classic examples are `camt.053` (bank-to-customer statement) and `camt.052` (intraday report). For a fund, `camt.053` is how you receive the daily cash statement you reconcile against the NAV cash position.
+
+</details>
+
+<details><summary><b>13.</b> What does the business area `pain` cover?</summary>
+
+`pain` (payments initiation) carries customer-to-bank messages — the customer instructing its bank to make a payment or set up a direct debit, for example `pain.001` (CustomerCreditTransferInitiation). It is the initiation leg, upstream of the interbank `pacs` leg. A fund's treasury function uses `pain` messages to instruct payments out of fund accounts.
+
+</details>
+
+<details><summary><b>14.</b> Which three securities business areas are most central to fund order processing, and why?</summary>
+
+`setr`, `semt`, and `sese` — `setr` carries the fund orders and confirmations, `semt` carries the statements and reporting, and `sese` carries the settlement instructions. Together they cover the order-to-settlement lifecycle that a transfer-agency platform must capture. The payments families `pacs`, `camt`, and `pain` are relevant for the cash legs but secondary to the order flow itself.
+
+</details>
+
+<details><summary><b>15.</b> What message is `setr.010` and who sends it to whom?</summary>
+
+`setr.010` is the SubscriptionOrder. It is sent by an instructing party — for example an investment manager or its authorised representative — to the executing party, typically a transfer agent, to instruct the subscription of one or more financial instruments for an investment-fund account. It is the canonical sample message this lesson asks you to parse and map.
+
+</details>
+
+<details><summary><b>16.</b> Can a single `setr.010` SubscriptionOrder contain more than one order?</summary>
+
+Yes. The SubscriptionOrder message can carry a single order (one financial instrument for one investment account) or multiple orders (several instruments for the same investment account in one message). This matters for your model because the order is a repeating block, not a one-to-one record. A naive flat mapping that assumes one order per message will lose data on bulk files.
+
+</details>
+
+<details><summary><b>17.</b> What is `setr.012` and how does it relate to `setr.010`?</summary>
+
+`setr.012` is the SubscriptionOrderConfirmation, sent by the executing party (the transfer agent) back to the instructing party to confirm execution details of a subscription. It is the confirmation hop that follows the `setr.010` order and any status message. Linking the confirmation back to the original order is a key join your model must support.
+
+</details>
+
+<details><summary><b>18.</b> Why is XSD the syntax layer you actually validate against?</summary>
+
+The XSD (XML Schema Definition) is the physical-message representation of an ISO 20022 logical message — it defines element names, nesting, cardinalities, and data types. You validate an incoming XML instance against the corresponding XSD to confirm it is structurally well-formed and conformant. With `lxml` in Python you load the schema with `etree.XMLSchema` and call `.validate()` or `.assertValid()` on the parsed tree.
+
+</details>
+
+<details><summary><b>19.</b> What is the difference between a business component and a message component in ISO 20022?</summary>
+
+Business components belong to the conceptual business model and capture reusable real-world concepts (for example a party, an account, or a financial instrument). Message components are the message-level building blocks derived from them that actually appear in the schema, reused across many messages. The reuse is why the same address or party structure looks identical across `setr`, `semt`, and `sese` payloads.
+
+</details>
+
+<details><summary><b>20.</b> What is an external code set in ISO 20022, and why is it kept external?</summary>
+
+An external code set is a list of allowed code values (for example currency, country, or a status reason code) that is maintained outside the message XSD and published separately, often as a spreadsheet on the ISO 20022 site. It is kept external so the values can be updated on their own cadence without reissuing every message schema. The gotcha is that an XSD validates the field as a string of the right pattern but does not itself enforce the current external code list, so a value can be schema-valid yet not a real code.
+
+</details>
+
+<details><summary><b>21.</b> If an XSD passes validation but a field still holds an invalid code, what is likely going on?</summary>
+
+The field is almost certainly governed by an external code set rather than an inline enumeration, so the XSD only checks the lexical pattern (for example a length-restricted token), not membership in the live list. You must validate that value against the published external code set separately. This is a classic data-quality trap: structurally valid, semantically wrong.
+
+</details>
+
+<details><summary><b>22.</b> What is the e-Repository in ISO 20022?</summary>
+
+The e-Repository is the machine-readable master dictionary of the entire ISO 20022 standard — all registered business and message components, message definitions, and data types — published by the Registration Authority. It is the authoritative source from which the schemas and documentation are generated. When a flag, a cardinality, or a code is uncertain, the e-Repository (not a third-party site) is the place to settle it.
+
+</details>
+
+<details><summary><b>23.</b> What is a Message Definition Report (MDR) and what does it contain?</summary>
+
+A Message Definition Report (MDR) is the human-readable specification document for a group of related messages, generated from the e-Repository. It contains the message scope and usage, the structure of each message, element-by-element definitions, cardinalities, and the rules and code sets that apply. For mapping `setr.010` onto your model, the MDR is the document you read field by field.
+
+</details>
+
+<details><summary><b>24.</b> Why treat the e-Repository and MDRs as the authoritative source rather than a convenient third-party reference site?</summary>
+
+Third-party reference sites can lag, paraphrase, or omit constraints, whereas the e-Repository and the official MDRs are generated from the registered master and carry the exact cardinalities, rules, and code sets. For a regulated fund-administration context, you must be able to trace a design decision to the authoritative definition, not to a blog. Use third-party sites to orient yourself, then confirm against the MDR.
+
+</details>
+
+<details><summary><b>25.</b> Where do you obtain the official message definitions and MDRs?</summary>
+
+From the ISO 20022 message-definitions catalogue at `iso20022.org`, which publishes Message Definition Reports including the `setr` investment-funds set, alongside the XSD schemas and external code sets. SWIFT also publishes standards material for the MX-over-SWIFT context. The lesson's primary resource is the ISO 20022 catalogue.
+
+</details>
+
+<details><summary><b>26.</b> What is a "variant" (the third token) in a message identifier, and why does it exist?</summary>
+
+A variant is a constrained version of a global message definition — typically a subset with tighter cardinalities or fewer optional elements — registered for a specific community or usage. It exists so a market practice can pin down exactly which optional elements are used without inventing a new message. The third token in the identifier (commonly `001`) names the variant.
+
+</details>
+
+<details><summary><b>27.</b> How do you parse and validate a `setr.010` instance with Python and `lxml` via `uv`?</summary>
+
+You parse the XML with `etree.parse('setr010.xml')`, load the schema with `schema = etree.XMLSchema(etree.parse('setr.010.001.04.xsd'))`, and call `schema.assertValid(tree)` to raise on the first violation or `schema.validate(tree)` for a boolean. You run it under the project toolchain with `uv run python parse.py` rather than a bare `python`. The `assertValid` exception message points you to the offending element, which is invaluable when mapping.
+
+</details>
+
+<details><summary><b>28.</b> ISO 20022 XML uses namespaces; what does that mean for your XPath queries in `lxml`?</summary>
+
+Each ISO 20022 document declares a default namespace such as `urn:iso:std:iso:20022:tech:xsd:setr.010.001.04`, so element names are namespace-qualified. In `lxml` your XPath must bind a prefix to that URI (for example `tree.xpath('//x:SbcptOrdr', namespaces={'x': 'urn:...'})`) or it will return nothing. Forgetting the namespace is the single most common reason an XPath silently matches zero nodes.
+
+</details>
+
+<details><summary><b>29.</b> What does "mapping a message to a canonical model" mean in this lesson's terms?</summary>
+
+It means deciding, for every business field in the message, which table and column of your warehouse model it lands in — and recording that mapping. The point is that the canonical model, not the message, is your stable internal representation, and messages are mapped onto it at ingestion. The deliverable is a documented field-to-column mapping for `setr.010` against your Phase-1 model.
+
+</details>
+
+<details><summary><b>30.</b> Why is it dangerous if your warehouse model cannot hold a field present in the message?</summary>
+
+Because dropping a field at ingestion means it is gone for downstream lineage, reconciliation, and audit — and auditors in a fund-administration context expect to trace fields end to end. An unmappable field is a gap you must document along with what extending the model would require. Designing without checking the message against the model is how you build something that silently loses data auditors want.
+
+</details>
+
+<details><summary><b>31.</b> A `setr.010` carries a repeating order block. How should that influence your canonical-model design?</summary>
+
+The repeating block means the message maps to a parent (the order message / bulk) and a child (the individual order line), so you need a one-to-many relationship rather than a single flat table. Modelling it flat forces you either to keep only the first order or to denormalise message-level fields onto every line. A header table plus an order-line table keyed back to it preserves the structure cleanly.
+
+</details>
+
+<details><summary><b>32.</b> How would you record an ISO 20022 field-to-model mapping so it is auditable?</summary>
+
+Keep a mapping artefact (for example a versioned spreadsheet, a dbt model with documented columns, or a YAML mapping) that lists, per field, the XPath in the message, the business meaning from the MDR, the target table and column, any transformation, and a gap flag if it cannot be held. Versioning it lets you show how the mapping changed when a new message version arrives. This is what "record the mapping" in the Do steps means concretely.
+
+</details>
+
+<details><summary><b>33.</b> What does "MX" mean in the SWIFT context?</summary>
+
+MX refers to the XML-based ISO 20022 messages carried over SWIFT, as opposed to MT, the legacy text-based FIN message formats. So when people say "MX-over-SWIFT" they mean ISO 20022 XML payloads transported through SWIFT's network. Your `setr`, `semt`, and `sese` fund messages are MX messages.
+
+</details>
+
+<details><summary><b>34.</b> How do MT and MX messages differ at the format level?</summary>
+
+MT messages are SWIFT's legacy fixed-tag text format (for example `:20:` reference fields), while MX messages are ISO 20022 XML validated against XSDs. MX carries richer, more structured and granular data than the terse MT tags. The migration from MT to MX is precisely why ISO 20022 has become the standard your canonical model must align to.
+
+</details>
+
+<details><summary><b>35.</b> What are SWIFT's InterAct, FileAct, and FIN services, and which carry MX?</summary>
+
+FIN is the legacy store-and-forward service that carries MT text messages; InterAct is the XML messaging service that carries MX (ISO 20022) messages; FileAct is a bulk file-transfer service that is format-agnostic and can carry MT, MX, or proprietary files. So MX travels over InterAct for real-time messaging or over FileAct when sent as files. Knowing the transport helps you reason about batching, acknowledgements, and where files land on your platform.
+
+</details>
+
+<details><summary><b>36.</b> What is the Business Application Header (BAH) and why does it matter?</summary>
+
+The Business Application Header is a standard ISO 20022 header (`head.001`) that wraps a message document, carrying routing and business metadata such as sender, receiver, message definition identifier, business message identifier, and creation timestamp. Many newer ISO 20022 services mandate it, so a valid payload is the AppHdr plus the Document. For your platform it is where you reliably read who sent what and which message type without parsing the body.
+
+</details>
+
+<details><summary><b>37.</b> A counterparty sends an MX file but your parser only sees envelope metadata and no business content. What is the likely cause?</summary>
+
+You are probably parsing only the Business Application Header (the AppHdr) and not unwrapping the Document, or the file is an envelope (BAH plus Document, or a SWIFT/FileAct envelope) whose inner payload you have not descended into. Inspect the structure: the business content lives under the `Document` element with its own namespace. Bind the correct namespace and target the document body, not the header.
+
+</details>
+
+<details><summary><b>38.</b> Why did ISO 20022 adoption accelerate in EU payments and securities messaging?</summary>
+
+Because the industry committed to migrating off legacy MT formats onto richer, structured ISO 20022 messages, with coordinated programmes driving high-value payments and securities flows onto the standard. Richer structured data improves automation, reconciliation, and regulatory reporting. For an architect this means ISO 20022 is now the reference your canonical model aligns to rather than an optional add-on.
+
+</details>
+
+<details><summary><b>39.</b> True or false: after the MT decommissioning for cross-border payments, every ISO 20022 securities message is automatically mandatory too. Explain.</summary>
+
+False. The widely cited MT-to-MX decommissioning timeline applies to specific programmes such as cross-border payments and reporting (CBPR+); securities messaging migration follows its own governance and timelines. Do not assume a single cut-over date covers `setr`, `semt`, and `sese`. When the exact mandate matters, check the relevant SWIFT and market-practice schedule rather than generalising from the payments deadline.
+
+</details>
+
+<details><summary><b>40.</b> What does an XSD `minOccurs`/`maxOccurs` pair tell you when mapping a field?</summary>
+
+They define the element's cardinality — `minOccurs="0"` means optional, `minOccurs="1"` means mandatory, and `maxOccurs="unbounded"` means it repeats with no fixed limit. This directly drives your model: a mandatory single field can be a not-null column, while an unbounded element needs a child table. Misreading cardinality is how you end up with a column that cannot hold legitimately repeating data.
+
+</details>
+
+<details><summary><b>41.</b> How does ISO 20022 typically represent a monetary amount, and why is that significant for NAV work?</summary>
+
+A currency-and-amount element carries the numeric amount together with a currency code as an attribute (commonly `Ccy`), so the currency is inseparable from the figure. This is significant for NAV work because you must persist both the amount and its currency, never an amount alone. Storing the number without the currency is a subtle data-loss bug that surfaces in multi-currency funds.
+
+</details>
+
+<details><summary><b>42.</b> In an ISO 20022 instrument identification block, where does the ISIN appear and why care?</summary>
+
+The financial-instrument identification typically offers an `ISIN` element plus optional other identifications, so an instrument can be carried by ISIN and supplementary codes. You care because your security master should key on the ISIN you extract here while preserving any other identifiers for cross-reference. Picking the wrong identification node, or assuming ISIN is always present, breaks the join to your instrument master.
+
+</details>
+
+<details><summary><b>43.</b> How is a date typically expressed in ISO 20022 XML, and what is the parsing gotcha?</summary>
+
+Dates use ISO 8601 types — an `ISODate` like `2026-06-13` or an `ISODateTime` with time and possibly a timezone offset. The gotcha is mixing a date-only field with a datetime field, or ignoring the timezone on a datetime, which shifts a NAV or settlement date across a day boundary. Parse with timezone awareness and store dates and timestamps in distinct, well-typed columns.
+
+</details>
+
+<details><summary><b>44.</b> What is the difference between the `setr` order and the `sese` settlement instruction conceptually?</summary>
+
+The `setr` order is the business instruction to subscribe to or redeem fund units; the `sese` settlement instruction is the post-trade message that actually moves the securities and cash to settle the resulting transaction. One expresses intent in the fund-order domain, the other expresses the settlement mechanics. Conflating them in your model collapses two distinct lifecycle stages auditors expect to see separately.
+
+</details>
+
+<details><summary><b>45.</b> Where does an order-status message fit in the lifecycle and which family carries it?</summary>
+
+After an order is sent and before its confirmation, an order-status (or order-instruction-status) message reports acceptance, rejection, or pending status; for fund orders this sits in the `setr` family alongside the order and confirmation. It is the hop that tells the instructing party whether the transfer agent accepted the instruction. Capturing status is essential for an end-to-end order state machine.
+
+</details>
+
+<details><summary><b>46.</b> Two fund order messages share the same address and party structure. Why, in ISO 20022 terms?</summary>
+
+Because both reuse the same registered message components (derived from shared business components) for party and postal-address concepts, the reuse is by design across the catalogue. This is the methodology's whole point: define a concept once and reuse it everywhere. For you it means a single canonical party/address mapping can be reused across `setr`, `semt`, and `sese`.
+
+</details>
+
+<details><summary><b>47.</b> What does it mean that ISO 20022 is "syntax-independent" at the logical layer?</summary>
+
+It means the logical message definition describes structure and meaning without committing to a wire format, so in principle it could be rendered in XML or another syntax. In practice the registered physical representation is XML (XSD), which is what you exchange. The separation is why the same business message can survive a syntax change without redefining the business meaning.
+
+</details>
+
+<details><summary><b>48.</b> You receive `setr.010.001.04` but your mapping was built for `setr.010.001.08`. What must you check?</summary>
+
+Check the differences between the two versions in their MDRs — added, removed, or recardinalised elements and changed code sets — because a higher version can introduce mandatory fields or restructure blocks. Validate the incoming instance against the version-4 XSD, not the version-8 one. Treat the version token as load-bearing: silently reusing a mapping across versions is how subtle field shifts slip through.
+
+</details>
+
+<details><summary><b>49.</b> Why might an incoming ISO 20022 instance fail XSD validation on a perfectly real-looking value?</summary>
+
+Common causes are a value that violates a type restriction (wrong length, pattern, or fraction digits), an element out of sequence, a missing mandatory element, or the wrong namespace/version of the schema. The XSD enforces structure and lexical types strictly, so a "real-looking" amount with too many decimals or a code of the wrong length will fail. The validator's error message names the element and the rule it broke — read it first.
+
+</details>
+
+<details><summary><b>50.</b> First thing to check when `lxml` reports an empty result for an XPath against an ISO 20022 file?</summary>
+
+Check the namespace. ISO 20022 documents carry a default namespace on the `Document` element, so an unqualified XPath matches nothing; you must register a prefix bound to that namespace URI and use it in the query. Confirm the exact URI from the document root, since it encodes the message version. This single issue accounts for most "my XPath returns nothing" reports.
+
+</details>
+
+<details><summary><b>51.</b> A subscription's amount imported as a bare number with no currency. Where did it go wrong and what is the fix?</summary>
+
+The currency lives in an attribute (commonly `Ccy`) on the amount element, and the import read the element text but not the attribute. The fix is to extract both the numeric value and the `Ccy` attribute and persist them together. In multi-currency fund accounting, an amount without its currency is unusable and a reconciliation break waiting to happen.
+
+</details>
+
+<details><summary><b>52.</b> What is the practical risk of relying on a third-party site for an exact ISO 20022 cardinality or code value?</summary>
+
+The site may be out of date or may have simplified the constraint, so you could encode a wrong cardinality or accept a retired code, which then propagates into your model and validation. In a regulated context you need traceability to the registered definition. Use third-party material to orient, then confirm the exact value against the official MDR, XSD, or external code set.
+
+</details>
+
+<details><summary><b>53.</b> How does the e-Repository help when you are unsure whether a field is mandatory?</summary>
+
+The e-Repository holds the registered cardinality for every element, and the MDR generated from it states `minOccurs`/`maxOccurs` per field, so you can confirm whether the field is mandatory rather than guessing. Cross-check against the XSD, which encodes the same constraint. This authoritative check is exactly the discipline a fund architect needs when a missing field could block downstream processing.
+
+</details>
+
+<details><summary><b>54.</b> In the order-to-settlement flow, where would a `semt` statement typically appear?</summary>
+
+A `semt` statement (for example a holdings or transaction statement) typically appears after settlement, reporting the resulting position or the movements over a period. It is the reporting hop rather than an instruction in the active order flow. You use it to reconcile that your booked holding matches what the custodian or transfer agent reports.
+
+</details>
+
+<details><summary><b>55.</b> Why is being able to "sketch the message flow and name the type at each hop" a design skill, not trivia?</summary>
+
+Because the message at each hop tells you what your platform must capture, link, and persist — order reference, status, confirmation details, settlement reference, statement position — and missing any hop leaves a gap in lineage. Naming the types forces you to design the joins between order, status, confirmation, and settlement. It is the reasoning that prevents a model that drops fields auditors expect to trace.
+
+</details>
+
+<details><summary><b>56.</b> What is the relationship between a message component and the XSD complex types you see in the schema?</summary>
+
+A message component in the e-Repository is realised in the XSD as a complex type (a reusable element group) that the message references wherever that concept appears. So the same complex type, such as a party or financial-instrument block, recurs across messages by reference. Recognising shared complex types lets you write one parsing routine and reuse it across `setr`, `semt`, and `sese`.
+
+</details>
+
+<details><summary><b>57.</b> Distinguish `pacs.008` from `pacs.002`.</summary>
+
+`pacs.008` is the FIToFICustomerCreditTransfer, the interbank instruction that moves a customer credit transfer between financial institutions. `pacs.002` is the FIToFIPaymentStatusReport, which reports the status (accepted, rejected, pending) of a prior payment instruction. One initiates the interbank movement, the other reports back on its fate.
+
+</details>
+
+<details><summary><b>58.</b> Distinguish `camt.052` from `camt.053`.</summary>
+
+`camt.052` is the BankToCustomerAccountReport, typically an intraday or interim account report, while `camt.053` is the BankToCustomerStatement, the end-of-day statement. For fund cash reconciliation you generally reconcile against the `camt.053` statement and may use `camt.052` for intraday visibility. Choosing the wrong one means reconciling against an incomplete picture.
+
+</details>
+
+<details><summary><b>59.</b> A counterparty says they will send you a `pain.001`. What should you expect?</summary>
+
+A `pain.001` is a CustomerCreditTransferInitiation — a customer instructing its bank to make one or more credit transfers, the initiation leg upstream of the interbank `pacs.008`. Expect an XML message with debtor, creditor, and payment-instruction blocks, validated against the relevant `pain.001` XSD version. It is an instruction to pay, not a confirmation that money has moved.
+
+</details>
+
+<details><summary><b>60.</b> Why must your platform persist the message version it received, not just the parsed business data?</summary>
+
+Because reprocessing, dispute resolution, and audit may require knowing exactly which schema version and variant governed the original instance, including which optional fields could legally appear. Storing only parsed data loses the provenance needed to re-validate or explain a historical decision. Keep the raw message and its message-definition identifier alongside the extracted fields.
+
+</details>
+
+<details><summary><b>61.</b> What does the message-definition identifier in the BAH let you do before parsing the body?</summary>
+
+It tells you the exact message type, variant, and version (for example `setr.010.001.04`), so you can route the message to the right parser and schema without inspecting the body. This is efficient and safe: you select the correct XSD up front rather than guessing from the payload. It is also a reliable field for logging and lineage.
+
+</details>
+
+<details><summary><b>62.</b> How do you validate an external-code-set value in practice when the XSD will not?</summary>
+
+You load the published external code-set list (often a spreadsheet or its registered form) and check the field's value against that list as a separate validation step after XSD validation. In a pipeline this is typically a reference table you join against, raising a data-quality error on no match. This catches schema-valid but semantically invalid codes such as a retired status reason.
+
+</details>
+
+<details><summary><b>63.</b> What is the difference between a maintenance version bump and a new message number?</summary>
+
+A version bump (the last token) keeps the same business message but revises its definition — added fields, relaxed or tightened cardinalities, new code values — under the same message number. A new message number is a different message function entirely within the business area. Your mapping can often be migrated across version bumps with diffs, but a new number means a new mapping.
+
+</details>
+
+<details><summary><b>64.</b> Why is ISO 20022 described as a "methodology" and not just a set of messages?</summary>
+
+Because it defines a modelling approach — a data dictionary of reusable business and message components and a process for registering new messages — from which the actual message schemas are derived. The library of messages is the output of the methodology, not the whole of it. Understanding it as a methodology explains why components are so consistently reused across business areas.
+
+</details>
+
+<details><summary><b>65.</b> A Luxembourg transfer agent sends bulk subscription orders as one file. Which message and which transport are most likely?</summary>
+
+The orders are most likely `setr.010` SubscriptionOrder messages, and a bulk file is most likely delivered over SWIFT FileAct (or an equivalent file channel) rather than single InterAct messages. A single `setr.010` can itself carry multiple orders, and many such messages can be bundled into one file. Your ingestion must handle both the multi-order message and the file-of-messages dimension.
+
+</details>
+
+<details><summary><b>66.</b> What is the risk of mapping ISO 20022 party identifications onto a single "name" column?</summary>
+
+Party blocks carry structured identification — names, postal-address sub-elements, and identifiers such as a BIC or LEI — so collapsing them into one free-text name discards structure you may need for matching, regulatory reporting, and entity resolution. In a fund context the management company's LEI is a join key you would lose. Map party structure into structured columns, preserving identifiers separately.
+
+</details>
+
+<details><summary><b>67.</b> How would you handle an optional repeating element that your model currently cannot store?</summary>
+
+Record it as a gap: note the XPath, the business meaning from the MDR, its cardinality, and what extending the model would require (for example a new child table). Until the model is extended, decide explicitly whether to reject the message, quarantine the data, or store the raw element for later. Silently dropping it is the failure mode this lesson warns against.
+
+</details>
+
+<details><summary><b>68.</b> What does it mean that ISO 20022 message components are "registered"?</summary>
+
+It means each component and message definition is submitted to and approved by the Registration Authority and recorded in the e-Repository, giving it a single authoritative definition. Registration is what makes the standard interoperable: everyone refers to the same registered concept. It is also why you should treat the registered definition, not a copy, as ground truth.
+
+</details>
+
+<details><summary><b>69.</b> Why might two valid ISO 20022 messages of the same type look structurally different?</summary>
+
+They may use different versions or variants, so optional elements present in one are absent in another, or a variant constrains cardinalities differently. Both can be schema-valid against their respective XSDs. Your parser must therefore be tolerant of optional elements and explicit about which version/variant it expects.
+
+</details>
+
+<details><summary><b>70.</b> What is the practical first step the lesson's Do section asks for, and why start there?</summary>
+
+The first step is to obtain a sample `setr.010` subscription-order message and its schema. You start there because you cannot meaningfully map fields, find gaps, or validate without a concrete instance and the XSD that governs it. Working from a real message keeps the exercise grounded in actual structure rather than assumptions.
+
+</details>
+
+<details><summary><b>71.</b> After parsing a `setr.010`, what is the deliverable for the mapping step?</summary>
+
+The deliverable is a recorded mapping of every business field onto your Phase-1 model — field, meaning, target table and column — plus a documented list of gaps (fields the model cannot hold and what they would require). This satisfies the Done-when criterion of being able to map a `setr.010` and list the unmappable fields. The mapping is an artefact, not a mental note.
+
+</details>
+
+<details><summary><b>72.</b> How does knowing the business area help you triage an unfamiliar message file?</summary>
+
+The four-letter business-area prefix immediately tells you the domain — `setr` is a fund order, `semt` a statement, `sese` a settlement, `camt`/`pacs`/`pain` a cash or payment flow — so you know which subsystem and parser it belongs to before reading the body. This lets you route and prioritise without deep inspection. It is the fastest reliable signal in the identifier.
+
+</details>
+
+<details><summary><b>73.</b> What is the difference between the AppHdr (BAH) namespace and the Document namespace in an MX message?</summary>
+
+The BAH has its own namespace (the `head.001` schema) while the business document under `Document` has the message-specific namespace such as `urn:iso:std:iso:20022:tech:xsd:setr.010.001.04`. They are two distinct schemas in one envelope, so you validate and parse each against its own XSD. Mixing them up is a common reason header parsing or body parsing fails.
+
+</details>
+
+<details><summary><b>74.</b> Why is ISO 20022 considered better suited to regulatory reporting than legacy MT?</summary>
+
+Because its richer, structured, and explicitly typed data captures granular business detail — parties, identifiers, amounts with currency, reasons — that terse MT tags compressed or omitted. More structure means more fields can be carried, validated, and traced end to end. For DORA-era operational resilience and audit expectations, that traceability is a direct benefit.
+
+</details>
+
+<details><summary><b>75.</b> A redemption order and a subscription order in `setr` — are they the same message number?</summary>
+
+No. Subscription and redemption are distinct functions with their own message numbers within `setr` (for example SubscriptionOrder versus RedemptionOrder), each with its own confirmation message. They share reusable components but are separate definitions. Your model should distinguish order type explicitly rather than inferring it.
+
+</details>
+
+<details><summary><b>76.</b> What is the consequence of ignoring `maxOccurs="unbounded"` on an order element when designing tables?</summary>
+
+You will model a one-to-many relationship as one-to-one, so a message carrying several order lines either overwrites or truncates to one. The unbounded cardinality is the schema telling you a child table is required. Catching this at design time, by reading the XSD, prevents silent data loss on bulk files.
+
+</details>
+
+<details><summary><b>77.</b> How do you confirm the exact namespace URI to use in your XPath for a given message?</summary>
+
+Read it from the root element of the instance (the `xmlns` on `Document`) or from the target namespace declared in the message's XSD, which both encode the message identifier and version. Do not hard-code a remembered URI, because the version token changes it. Binding the exact URI is what makes your XPath match nodes.
+
+</details>
+
+<details><summary><b>78.</b> Why does the standard keep code sets external rather than enumerating them inline in every schema?</summary>
+
+To decouple the cadence of code-value changes from schema releases — a currency or status-reason list can be updated without reissuing and re-deploying every message XSD that uses it. This keeps schemas stable and code lists current. The trade-off is that validation against the live list becomes a separate step you must implement.
+
+</details>
+
+<details><summary><b>79.</b> What is the role of SWIFT relative to ISO 20022?</summary>
+
+SWIFT is a network and standards body that transports ISO 20022 (MX) messages — over InterAct and FileAct — and historically carried MT over FIN, and it publishes standards and market-practice material. ISO 20022 is the message standard; SWIFT is one major rail that carries it. Other rails and market infrastructures also use ISO 20022.
+
+</details>
+
+<details><summary><b>80.</b> A field is present in the MDR but absent from a received valid instance. Is the message wrong?</summary>
+
+Not necessarily — if the field is optional (`minOccurs="0"`), a conformant sender can omit it, so the instance is still valid. Your model and code must treat such fields as nullable and not assume presence. Treating an optional field as mandatory causes spurious validation failures and brittle pipelines.
+
+</details>
+
+<details><summary><b>81.</b> What does it mean to "align your canonical model to ISO 20022"?</summary>
+
+It means designing your internal warehouse model so that the business concepts ISO 20022 carries — orders, parties, instruments, amounts, statuses, settlement references — all have a stable home, so incoming messages map cleanly and nothing auditors expect is dropped. It does not mean copying the XML structure verbatim; it means covering its business content. Alignment is about coverage and traceability, not literal shape.
+
+</details>
+
+<details><summary><b>82.</b> How can you tell, from the identifier alone, whether a message is securities or payments?</summary>
+
+The business-area prefix tells you: securities messages start with `se` (`setr`, `semt`, `sese`, `seev`, `secl`, `sevt`), while payments use `pain`, `pacs`, and cash management uses `camt`. So `setr.010` is securities and `pacs.008` is payments at a glance. This lets you route by prefix before any parsing.
+
+</details>
+
+<details><summary><b>83.</b> Why is it risky to assume the FIN MT network is still your fallback for fund messages indefinitely?</summary>
+
+Because the industry is decommissioning MT in favour of MX on a programme-by-programme basis, so relying on MT as a permanent fallback builds in obsolescence. The exact timeline depends on the message domain, so you should confirm the relevant schedule rather than assume MT persists. Designing for MX-first avoids a forced rework later.
+
+</details>
+
+<details><summary><b>84.</b> What is a Business Message Identifier, and how is it useful operationally?</summary>
+
+The Business Message Identifier is a sender-assigned unique reference in the BAH for a specific message instance, distinct from the message-definition identifier that names the type. Operationally it is a natural key for deduplication, acknowledgement matching, and tracing a single message through your pipeline. Persisting it lets you answer "did we already process this exact message?".
+
+</details>
+
+<details><summary><b>85.</b> In mapping `setr.010`, where would the investment-account identification typically land in your model?</summary>
+
+It lands on the order or order-line as a reference to the investment account, which you would resolve to your account dimension via a surrogate key. The message carries the account identification in the order block; your model stores both the raw identifier and the resolved internal key. This preserves the source value while enabling joins.
+
+</details>
+
+<details><summary><b>86.</b> What is the difference between validating well-formedness and validating against the XSD?</summary>
+
+Well-formedness checks that the XML is syntactically correct (proper nesting, closed tags, single root), which any parser does on load; XSD validation additionally checks the document against the schema's element structure, cardinalities, and data types. A document can be well-formed but schema-invalid. For ISO 20022 you need both, and `lxml`'s `XMLSchema` gives you the second.
+
+</details>
+
+<details><summary><b>87.</b> Why might persisting the raw message alongside parsed fields be a regulatory expectation, not just good hygiene?</summary>
+
+Because audit and dispute processes may require reproducing exactly what was received, byte for byte, including elements you did not map. Keeping the raw message preserves the authoritative record and supports re-parsing if your model later extends. In a regulated fund-administration context, that immutable source record underpins lineage and defensibility.
+
+</details>
+
+<details><summary><b>88.</b> How would you approach documenting "gaps" as required by the Do steps?</summary>
+
+For each unmappable field, record the XPath, the MDR business definition, its cardinality and data type, why the current model cannot hold it, and what change would be needed (new column, new child table, new code-set reference). Group gaps by the model change they imply so you can scope work. This gap log is a direct deliverable and a design backlog.
+
+</details>
+
+<details><summary><b>89.</b> A new external code set version retires a code your historical data uses. How should your model cope?</summary>
+
+Your model should store the code as received and validate against the code-set version in force at the time, not only the latest, so historical records remain explainable. Keep the code-set lists versioned as reference data. This avoids rejecting or mislabelling valid historical values when the live list changes.
+
+</details>
+
+<details><summary><b>90.</b> Why does ISO 20022 separate the order (`setr`) from its confirmation (`setr.012`) rather than using one round-trip message?</summary>
+
+Because the order and its execution are distinct events that can be separated in time and may have different statuses, so each warrants its own message with its own reference and lifecycle. Separating them lets the platform track state — instructed, accepted, executed — explicitly. Your model should mirror this with linked but distinct order and confirmation records.
+
+</details>
+
+<details><summary><b>91.</b> What does it tell you if an MX message validates against the XSD but downstream systems still reject it?</summary>
+
+It usually means the message breaks a usage rule, market-practice constraint, or external-code-set requirement that the XSD alone does not enforce, or it omits an element a particular community mandates. Schema validity is necessary but not sufficient; the MDR's textual rules and the relevant market practice add constraints. Check those rules and code sets beyond bare XSD validation.
+
+</details>
+
+<details><summary><b>92.</b> How does the layered model help when a new fund-order requirement appears?</summary>
+
+You can reason about the change at the business layer (what concept is needed), find or define the message component, and then see it reflected in the logical and physical (XSD) layers, with a clear path to your canonical model. The separation keeps business intent from being tangled with XML mechanics. It is why an architect benefits from understanding all three layers.
+
+</details>
+
+<details><summary><b>93.</b> Why is the `Ccy` attribute placement on amounts a frequent source of mapping bugs?</summary>
+
+Because developers naturally read element text and overlook attributes, so an XPath that grabs the amount text alone silently drops the currency held in `Ccy`. The fix is to extract the attribute explicitly and store currency with every amount. In multi-currency fund accounting this bug corrupts valuations and reconciliations.
+
+</details>
+
+<details><summary><b>94.</b> What distinguishes a "global" message definition from a registered variant in practice?</summary>
+
+The global definition is the full registered message with all optional elements available; a variant is a constrained subset registered for a community, typically removing optionality or tightening cardinalities. In practice you may be required to send or accept a specific variant, so you validate against the variant's XSD. The variant token in the identifier signals which you are dealing with.
+
+</details>
+
+<details><summary><b>95.</b> How would you sanity-check that you have mapped every field of a `setr.010`, not just the obvious ones?</summary>
+
+Drive the check from the schema, not the sample: enumerate every element and attribute in the `setr.010` XSD (including optional and repeating ones), and confirm each has a target column or a documented gap. A sample instance only exercises the fields that sender used. Schema-driven coverage is the only way to be confident nothing is silently unmapped.
+
+</details>
+
+<details><summary><b>96.</b> Why is the message-definition identifier preferable to filename or sender convention for routing?</summary>
+
+Because the message-definition identifier (for example `setr.010.001.04`) is a standardised, unambiguous statement of type, variant, and version carried inside the message, whereas filenames and sender conventions are arbitrary and can change. Routing on the identifier is robust to renamed files and new counterparties. Read it from the BAH or the document namespace.
+
+</details>
+
+<details><summary><b>97.</b> A subscription order references a management company. Where might its LEI live in the message and why capture it?</summary>
+
+The management company would appear as a party block, which can carry identifiers including an LEI, so the LEI lives in that party's identification sub-element. You capture it because the LEI is the industry join key for entities and links your fund data to the GLEIF registry. Discarding it forces fragile name-based matching later.
+
+</details>
+
+<details><summary><b>98.</b> What is the safest default when you encounter an ISO 20022 element you do not yet understand during mapping?</summary>
+
+Look it up in the authoritative MDR (and the e-Repository definition) for its exact business meaning, cardinality, and any governing code set, rather than inferring from the element name. Names can be abbreviated or ambiguous, and guessing risks a wrong mapping. Confirming against the registered definition is the discipline this lesson is teaching.
+
+</details>
+
+<details><summary><b>99.</b> Why might an order-status reason in a `setr` status message be governed by an external code set, and what does that imply for storage?</summary>
+
+Reason and status codes are typically external code-set values so the list can evolve without reissuing the message schema, which means the XSD only checks the lexical token, not the live membership. The implication is that you store the raw code as received, validate it against the versioned code set as a separate step, and keep the reason text or mapping for human readability. This preserves an explainable audit trail even after a code is retired.
+
+</details>
+
+<details><summary><b>100.</b> Summarise why an architect who cannot map a subscription order onto the warehouse model is a liability.</summary>
+
+Because the mapping is what guarantees every business field the message carries has a home in the model, so nothing auditors expect to trace is dropped at ingestion. Without that skill the architect designs a model that silently loses fields, breaks lineage, and fails regulatory scrutiny. Mapping `setr.010` and listing the unmappable fields is precisely the competence this lesson certifies.
+
+</details>
+
+
+## Phase 2 · 1.12.7 EMT / EPT (FinDatEx) — 100 self-test questions
+
+<details><summary><b>1.</b> What does `FinDatEx` stand for and what is its core purpose?</summary>
+
+`FinDatEx` stands for Financial Data Exchange Templates. It is an industry body that designs and maintains standardised data-exchange templates so European fund manufacturers can pass regulatory data (MiFID, PRIIPs, ESG, Solvency II) to distributors and insurers in a machine-readable, agreed format. The point is interoperability: without a shared template every manufacturer-distributor pair would invent its own spreadsheet, and reconciliation would be impossible.
+
+</details>
+
+<details><summary><b>2.</b> What kind of organisation is `FinDatEx` — a regulator, a software vendor, or an industry consortium?</summary>
+
+It is an industry consortium, not a regulator and not a vendor. It is a joint structure of European trade associations representing asset managers, banks, insurers and distributors, so its templates are voluntary market standards rather than legally binding instruments. The underlying obligations (MiFID II, PRIIPs) come from EU law; `FinDatEx` only standardises how the data to meet them is exchanged.
+
+</details>
+
+<details><summary><b>3.</b> Name the four main template families `FinDatEx` maintains.</summary>
+
+The four families are the EMT (European MiFID Template, for MiFID II target market and costs), the EPT (European PRIIPs Template, for PRIIPs KID data), the EET (European ESG Template, for SFDR/Taxonomy ESG data) and the TPT (Tripartite Template, for Solvency II look-through). Each maps to a distinct EU regulatory regime, which is why a fund-data platform usually has to produce all of them.
+
+</details>
+
+<details><summary><b>4.</b> Which governance body inside `FinDatEx` formally endorses a new template version?</summary>
+
+The Steering Group endorses and publishes template versions and sets strategic direction. The detailed drafting happens in topic-specific working groups (MiFID, PRIIPs, ESG, Solvency II, Test IT), but a version is not official until the Steering Group signs it off and it appears on the `findatex.eu` site. This matters operationally because only published versions are safe to build pipelines against.
+
+</details>
+
+<details><summary><b>5.</b> What is the role of the `FinDatEx` working groups versus the Steering Group?</summary>
+
+Working groups (MiFID, PRIIPs, ESG, Solvency II, Test IT) do the technical drafting — they propose fields, code lists and changes and run consultations. The Steering Group provides governance, resolves cross-template issues and endorses the final version for publication. As an architect you track the working-group consultation drafts to anticipate changes, but you only ship against Steering-Group-published versions.
+
+</details>
+
+<details><summary><b>6.</b> Why does the EMT exist — which EU regulation does it serve?</summary>
+
+The EMT serves MiFID II (Directive 2014/65/EU) and its product-governance and cost-disclosure requirements. MiFID II requires manufacturers to define a product's target market and to disclose ex-ante costs and charges to distributors, and the EMT is the standard carrier of exactly that data. Without it, a manufacturer would have no agreed way to tell every distributor who the fund is suitable for and what it costs.
+
+</details>
+
+<details><summary><b>7.</b> Why does the EPT exist — which EU regulation does it serve?</summary>
+
+The EPT serves the PRIIPs Regulation, `Regulation (EU) No 1286/2014`, which mandates the Key Information Document (KID) for packaged retail and insurance-based investment products. The EPT carries the structured inputs a manufacturer must provide so that a downstream party (typically an insurer) can assemble or aggregate a KID: the SRI, performance scenarios and cost figures. It is the data feed behind the KID, not the KID itself.
+
+</details>
+
+<details><summary><b>8.</b> In one sentence, what is the difference between the EMT and the EPT in terms of what they carry?</summary>
+
+The EMT carries MiFID II target-market and costs-and-charges data for distribution suitability, while the EPT carries PRIIPs KID inputs — the summary risk indicator, performance scenarios and KID cost figures — for retail disclosure. They overlap on cost concepts but answer different regulatory questions: "who is this for and what does it cost a distributor's client" versus "what goes on the retail KID".
+
+</details>
+
+<details><summary><b>9.</b> What is the full name behind the acronym EMT?</summary>
+
+EMT stands for European MiFID Template. The "MiFID" anchors it to the Markets in Financial Instruments Directive II regime, and the "European" signals it is a pan-European industry standard rather than one national variant. Knowing the expansion helps avoid confusing it with the EET (ESG) or EPT (PRIIPs).
+
+</details>
+
+<details><summary><b>10.</b> What is the full name behind the acronym EPT?</summary>
+
+EPT stands for European PRIIPs Template. It standardises the data exchange of PRIIPs KID inputs across the European market. The expansion is worth remembering because the related CEPT (Comfort EPT) and the EET (ESG) are easily confused acronyms in the same family.
+
+</details>
+
+<details><summary><b>11.</b> What does the "C" in CEPT stand for and what is the CEPT for?</summary>
+
+The "C" stands for Comfort — CEPT is the Comfort European PRIIPs Template. It is a complementary template to the EPT used in the multi-option / fund-of-PRIIPs case, providing additional calculated figures (for example for holding periods that differ from the underlying PRIIP's recommended holding period) so a PRIIP manufacturer investing in other PRIIPs gets the numbers it needs. It complements rather than replaces the EPT.
+
+</details>
+
+<details><summary><b>12.</b> Why would a PRIIP manufacturer that invests in other PRIIPs need a CEPT rather than just an EPT?</summary>
+
+Because a manufacturer building a product on top of underlying PRIIPs needs the underlying figures recalculated for its own recommended holding period (RHP), which may differ from the underlying product's RHP. The standard EPT reports figures at the underlying's own RHP; the CEPT (and its RHP variant) supplies the extra holding-period-aligned figures so the wrapper can aggregate correctly. This is the look-through case for PRIIPs costs and risk.
+
+</details>
+
+<details><summary><b>13.</b> As of early 2026, what is the current published EMT version?</summary>
+
+As of January 2026 the current EMT version is `V4.3`, published on 15 January 2026. It follows `V4` (March 2022), `V4.1` (April 2023) and `V4.2` (April 2024). When you build a pipeline you should always confirm the exact published version on `findatex.eu` rather than assuming, because versions are released frequently.
+
+</details>
+
+<details><summary><b>14.</b> As of early 2026, what is the current published EPT version?</summary>
+
+The current EPT version is `V2.1`, published in 2022 (the spec is dated September 2022). The EPT has changed far less often than the EMT, so the version landscape is simpler, but you should still verify on `findatex.eu` before building because a new consultation can land at any time. The slow cadence reflects that PRIIPs RTS inputs change less frequently than MiFID distribution fields.
+
+</details>
+
+<details><summary><b>15.</b> True or false: when a new EMT version is published, the previous versions are immediately withdrawn.</summary>
+
+False. New EMT versions coexist with older ones — for example `V4.3` is available for use while `V4`, `V4.1` and `V4.2` remain valid in parallel. This is deliberate: distributors and manufacturers migrate on different timelines, so a pipeline must be able to read and produce more than one version simultaneously rather than assuming a hard cutover.
+
+</details>
+
+<details><summary><b>16.</b> Why is multi-version coexistence a real engineering problem rather than a footnote?</summary>
+
+Because at any moment your counterparties may be on different EMT versions, your platform must produce (and ingest) several versions concurrently and route the correct one to each distributor. That means version is a first-class dimension in your data model, not a constant — you cannot hard-code column positions. A common failure is to build one fixed schema and then silently mis-map fields when a counterparty upgrades.
+
+</details>
+
+<details><summary><b>17.</b> What are the two main content blocks of the EMT?</summary>
+
+The two main blocks are the manufacturer target market block and the costs and charges block. The target-market block describes who the product is designed for (client type, knowledge and experience, risk tolerance, investment objectives, ability to bear losses, distribution strategy); the costs block carries the ex-ante MiFID II cost figures. Together they let a distributor check suitability and disclose costs to the end client.
+
+</details>
+
+<details><summary><b>18.</b> What is the "target market" in MiFID II / EMT terms?</summary>
+
+The target market is the manufacturer's specification of the type of client a product is designed for and the type it is not. It covers dimensions such as investor type (retail, professional, eligible counterparty), knowledge and experience, financial situation including ability to bear losses, risk tolerance, client objectives and needs, and the intended distribution strategy. The EMT encodes each of these as coded fields so distributors can match products to clients systematically.
+
+</details>
+
+<details><summary><b>19.</b> What is the "negative target market" and why does the EMT capture it?</summary>
+
+The negative target market identifies the clients for whom the product is not appropriate, distinct from simply being outside the positive target market. MiFID II product governance requires manufacturers to specify it, so the EMT has fields to flag the negative target market per dimension. It matters because distributing to the negative target market is a compliance breach, so this data drives hard distribution controls, not just guidance.
+
+</details>
+
+<details><summary><b>20.</b> Which dimensions make up the MiFID II target-market assessment carried in the EMT?</summary>
+
+The standard MiFID II target-market dimensions are investor type/category, knowledge and experience, ability to bear losses, risk tolerance and compatibility of the risk/reward profile, the client's objectives and needs, and the distribution strategy. The EMT provides coded fields for each. An architect's job is to source each dimension from an authoritative upstream system rather than free text, because every dimension is a coded value with a controlled list.
+
+</details>
+
+<details><summary><b>21.</b> What broad categories of cost does the EMT costs-and-charges block disclose?</summary>
+
+It discloses the MiFID II ex-ante costs and charges: one-off costs (entry/subscription and exit/redemption), ongoing costs (the ongoing charges figure plus management and similar recurring costs), transaction costs, and any incidental costs such as performance fees. These are expressed so a distributor can aggregate product costs with its own service costs for the client-facing disclosure. The EMT also splits out distribution fees so the distributor can see what it receives.
+
+</details>
+
+<details><summary><b>22.</b> In the EMT, how are transaction costs typically expressed?</summary>
+
+Transaction costs are expressed as a percentage per annum of the average net asset value (NAV) of the fund. They include both explicit costs (such as commissions and fees) and implicit costs (such as the bid-ask spread and market-impact slippage). Because they are percentages of average NAV, getting average NAV wrong upstream feeds directly into a wrong transaction-cost figure in the EMT.
+
+</details>
+
+<details><summary><b>23.</b> What is the difference between explicit and implicit transaction costs in the EMT context?</summary>
+
+Explicit transaction costs are directly observable charges such as broker commissions, taxes and exchange fees. Implicit transaction costs are not invoiced — they are the cost of moving the market, captured chiefly through the bid-ask spread and the difference between the execution price and the arrival/mid price (the slippage methodology). Implicit costs are harder to source and are a frequent data-quality weak point because they require trade-level analytics, not just an invoice.
+
+</details>
+
+<details><summary><b>24.</b> What does the EMT mean by separating the distribution fee out of a cost figure?</summary>
+
+A cost field such as a net entry cost separates the portion of an upfront charge that is passed to or retained by the distributor from the portion retained by the manufacturer. For example a net one-off entry cost is the total upfront entry cost less the embedded upfront distribution fee, and a separate field reports the manufacturer-retained part. This split lets the distributor disclose inducements and its own remuneration transparently under MiFID II.
+
+</details>
+
+<details><summary><b>25.</b> Why did MiFID II push so much cost detail into a standard template like the EMT?</summary>
+
+Because MiFID II requires ex-ante and ex-post aggregated cost disclosure to clients, and a distributor cannot aggregate what it cannot receive in a comparable form. A free-form cost sheet per manufacturer would make consistent aggregation impossible. The EMT turns costs into a fixed set of coded, comparable fields so a distributor can sum product and service costs mechanically across hundreds of manufacturers.
+
+</details>
+
+<details><summary><b>26.</b> What three PRIIPs KID elements does the EPT primarily carry?</summary>
+
+The EPT primarily carries the Summary Risk Indicator (SRI), the performance scenarios, and the cost figures required by the PRIIPs KID. These are the quantitative heart of the KID. The EPT also carries identifying and narrative metadata, but SRI, scenarios and costs are the calculated inputs that are hardest to produce and therefore where most data-quality effort goes.
+
+</details>
+
+<details><summary><b>27.</b> What is the SRI in a PRIIPs KID, and what is its scale?</summary>
+
+The SRI is the Summary Risk Indicator, a single standardised risk number on a scale from 1 (lowest risk) to 7 (highest risk). It lets a retail investor compare risk across very different PRIIPs on one axis. The EPT carries the SRI value (and, in newer thinking, flags whether it was adjusted upward), because the KID must show it prominently.
+
+</details>
+
+<details><summary><b>28.</b> How is the PRIIPs SRI constructed from underlying risk measures?</summary>
+
+The SRI combines two components: the Market Risk Measure (MRM) and the Credit Risk Measure (CRM). The MRM captures market risk and the CRM captures issuer/counterparty credit risk; the two are combined via a standard matrix in the PRIIPs RTS to give the final 1-7 SRI. So a single KID number actually rests on two separate calculations that your data pipeline must feed.
+
+</details>
+
+<details><summary><b>29.</b> What is the MRM and what underlying metric drives it?</summary>
+
+The MRM is the Market Risk Measure, classified into seven market-risk classes. It is driven by the VaR-Equivalent Volatility (VEV) — the annualised volatility implied by the value-at-risk at a 97.5% confidence level over the recommended holding period. The higher the VEV, the higher the MRM class. This is why a clean return history (or a defensible proxy) is a hard upstream requirement.
+
+</details>
+
+<details><summary><b>30.</b> What is VaR-Equivalent Volatility (VEV) and why is it used instead of plain volatility?</summary>
+
+VEV is the volatility figure implied by a value-at-risk computation at 97.5% confidence over the recommended holding period, used because it captures tail risk better than naive standard deviation. For most linear UCITS (PRIIPs Category 2) it is derived using the Cornish-Fisher expansion, which adjusts the VaR for skewness and kurtosis in the return distribution. Plain volatility would ignore the asymmetry and fat tails that drive real downside.
+
+</details>
+
+<details><summary><b>31.</b> What is the CRM and its range?</summary>
+
+The CRM is the Credit Risk Measure, capturing the risk that the product's obligors fail to pay. It ranges from 1 (low credit risk) to 6 (high credit risk) and is generally derived from credit-quality steps / external ratings of the relevant obligors. The CRM is then combined with the MRM to produce the final SRI. For a typical equity UCITS the CRM is low, but for structured or debt products it can dominate.
+
+</details>
+
+<details><summary><b>32.</b> What are performance scenarios in the PRIIPs KID and how many are there?</summary>
+
+Performance scenarios are standardised projections of what an investor might get back, shown as four scenarios: stress, unfavourable, moderate and favourable. They are computed for prescribed time horizons up to the recommended holding period and are net of the relevant costs. The EPT carries these scenario values so the KID can display them, and they are highly sensitive to the input return history and methodology.
+
+</details>
+
+<details><summary><b>33.</b> For which time horizons are PRIIPs performance scenarios shown?</summary>
+
+Scenarios are calculated for horizons up to the recommended holding period (RHP). For products with an RHP under ten years, the retail KID typically shows values at 1 year and at the RHP; products with longer RHPs also show an intermediate horizon. The EPT must therefore carry scenario values at each required horizon, which multiplies the number of cost/value fields you have to populate correctly.
+
+</details>
+
+<details><summary><b>34.</b> What is the Recommended Holding Period (RHP) and why does it propagate through the EPT?</summary>
+
+The RHP is the period the manufacturer recommends holding the product to meet its objective, and it sets the horizon for both the performance scenarios and parts of the cost presentation. It propagates everywhere because scenarios, the VEV underlying the MRM, and the cost-over-time figures are all computed to the RHP. Get the RHP wrong and the SRI, the scenarios and the cost figures are all simultaneously wrong.
+
+</details>
+
+<details><summary><b>35.</b> What cost categories does the PRIIPs KID (and hence the EPT) require?</summary>
+
+The KID requires one-off costs (entry and exit), ongoing costs (portfolio transaction costs and other ongoing costs), and incidental costs (performance fees and carried interest where applicable). These are summarised through a reduction-in-yield-style presentation showing the impact of costs on return over time. The EPT carries each component so the KID's costs-over-time table can be assembled.
+
+</details>
+
+<details><summary><b>36.</b> How do PRIIPs costs relate to the "reduction in yield" concept?</summary>
+
+PRIIPs costs are ultimately expressed as their drag on return — historically through the Reduction in Yield (RIY), the difference between the gross return and the net return after all costs. The KID shows cost impact in money and percentage terms over the holding periods, and the EPT supplies the component costs that feed that calculation. The RIY framing forces every cost to be put on a comparable, return-impact basis.
+
+</details>
+
+<details><summary><b>37.</b> Why are EMT costs and EPT costs not simply the same numbers?</summary>
+
+Because they answer different regulatory questions and use different methodologies and presentations. EMT costs serve MiFID II ex-ante aggregation by a distributor and split out distribution fees; EPT costs serve the PRIIPs KID's costs-over-time and RIY presentation tied to the RHP. They share underlying cost data but are computed and bucketed differently, so an architect must not blindly copy one into the other — a frequent and costly mistake.
+
+</details>
+
+<details><summary><b>38.</b> What does "CEPT" add beyond the EPT for a fund-of-funds or multi-option product?</summary>
+
+CEPT supplies the comfort figures a wrapper or multi-option-product manufacturer needs when underlying PRIIPs must be re-expressed for the wrapper's own recommended holding period or aggregation logic. Where the EPT gives the underlying product's own figures, the CEPT gives the recalculated holding-period-aligned numbers so the top-level KID aggregates correctly. It is the look-through plumbing for layered PRIIPs.
+
+</details>
+
+<details><summary><b>39.</b> What is a "delta" template in the `FinDatEx` family and why is it useful?</summary>
+
+A delta (or change-only) file carries just the records that have changed since the last full file rather than the entire population. It is useful because EMT/EPT populations can be large and most fields are stable day to day, so sending only deltas reduces volume and processing time for distributors. The gotcha is that a consumer must apply deltas in order against a correct baseline, or the dataset silently drifts.
+
+</details>
+
+<details><summary><b>40.</b> What is the main risk a distributor faces when consuming delta files instead of full files?</summary>
+
+The main risk is state drift: if a delta is missed, applied out of order, or applied to the wrong baseline, the distributor's view of the population diverges from the manufacturer's with no obvious error. Because deltas only contain changes, a dropped record is invisible — nothing flags that it should have updated. Robust consumers therefore reconcile periodically against a full file to re-baseline.
+
+</details>
+
+<details><summary><b>41.</b> How does a distributor typically consume an EMT operationally?</summary>
+
+A distributor ingests the manufacturer's EMT (full or delta), validates it against the expected version and code lists, loads it into its product/suitability database, and then uses the target-market fields to gate distribution and the cost fields to feed client cost disclosures. The whole point is automation: hundreds of manufacturers' EMTs flow in and the distributor's suitability and disclosure engines run off them without manual re-keying.
+
+</details>
+
+<details><summary><b>42.</b> How does an insurer typically consume an EPT?</summary>
+
+An insurer offering a multi-option insurance product consumes the underlying funds' EPTs to obtain each option's SRI, performance scenarios and costs, then aggregates them (often using CEPT figures) to build the insurance product's own PRIIPs KID. The EPT is thus an input to the insurer's KID-production engine. If a fund's EPT is late or invalid, the insurer cannot finalise its KID — a direct downstream regulatory dependency.
+
+</details>
+
+<details><summary><b>43.</b> Why are versioning problems described as a top data-quality pain point for EMT/EPT?</summary>
+
+Because counterparties run different template versions simultaneously, and a version mismatch shifts the meaning or position of fields. If your producer assumes the consumer is on the same version, fields can be mis-read or rejected, and because templates change frequently the mismatch window is always open. The fix is to treat the template version as explicit data, validate it on ingest, and produce the version each counterparty expects.
+
+</details>
+
+<details><summary><b>44.</b> What is a "partial file" problem in the EMT/EPT context, and why is it dangerous?</summary>
+
+A partial file is one where some records or some required fields are populated and others are missing — for example a costs block that is only half complete. It is dangerous because the file looks structurally valid and loads cleanly, but a half-populated costs block means a distributor cannot produce a complete cost disclosure, so distribution silently stalls. The lesson's "Why" warns exactly that costs blocks half-populated cause stalls.
+
+</details>
+
+<details><summary><b>45.</b> Why does a half-populated costs block stall distribution rather than throwing an obvious error?</summary>
+
+Because the file passes structural validation — the columns exist and the rows parse — so nothing crashes. The failure surfaces only downstream, when the distributor tries to assemble a complete MiFID II cost disclosure and finds a required cost figure null. By then the fund appears "available" upstream but is undistributable, which is why architects must validate completeness of business-critical blocks, not just structural well-formedness.
+
+</details>
+
+<details><summary><b>46.</b> A cost figure in your EMT is reported as `2.5` but the distributor reads it as 250% — what scaling pitfall has occurred?</summary>
+
+A percentage-scaling mismatch: the EMT expects cost figures in a specific unit (for example a decimal fraction like `0.025` for 2.5%, or a percentage number, depending on the field and version), and you emitted the wrong scale, so the consumer multiplied by the wrong factor. Always confirm each numeric field's exact unit and decimal convention in the published spec for your version, because percentage-versus-fraction is a classic silent error that passes structural validation but produces absurd disclosed costs.
+
+</details>
+
+<details><summary><b>47.</b> What is a "code list" in the EMT/EPT, and why is adherence critical?</summary>
+
+A code list is the controlled set of permitted values for a coded field, such as investor-type or distribution-channel codes. Adherence is critical because consumers parse these fields by exact code, so an off-list or mis-cased value is rejected or silently mis-interpreted. A common gotcha is emitting an internal enumeration value instead of the template's official code — the file validates structurally but fails semantically at the consumer.
+
+</details>
+
+<details><summary><b>48.</b> How would you validate an EMT output "column-by-column against the spec"?</summary>
+
+You take the published `FinDatEx` spec for the exact version, and for each field check three things: the field is present and correctly positioned/named, the data type and format match (number, date, percentage scaling), and every coded value is a member of the official code list. You also assert completeness on business-critical blocks like costs. This is exactly the validation the lesson's "Do" step requires before a file is considered shippable.
+
+</details>
+
+<details><summary><b>49.</b> What does "regulatory data product" mean, using EMT as the concrete example?</summary>
+
+A regulatory data product is a managed, versioned, quality-controlled dataset whose deliverable is itself a regulatory artifact with consumers, SLAs and validation rules — not a one-off report. The EMT is the canonical example: producing a valid EMT is a deliverable with a defined schema, code lists, version, freshness expectation and downstream distributors who depend on it. Treating it as a product means owning its quality, lineage and contract, not just dumping a file.
+
+</details>
+
+<details><summary><b>50.</b> Why does the lesson frame producing a valid EMT as a "regulatory data-product deliverable"?</summary>
+
+Because the EMT is not internal analytics — it is consumed by external distributors to meet their own MiFID II obligations, so its correctness has regulatory consequences beyond your firm. That elevates it from a report to a product with a contract: agreed schema/version, code-list conformance, completeness guarantees and timeliness. Framing it as a product forces the engineering discipline (validation, monitoring, ownership) that a "just export a CSV" mindset skips.
+
+</details>
+
+<details><summary><b>51.</b> Which upstream attributes, if missing, typically block EMT completion?</summary>
+
+Completion is blocked when the costs inputs are missing or partial — ongoing charges figure, transaction costs, entry/exit and distribution-fee splits — or when target-market attributes (investor type, knowledge/experience, risk tolerance, ability to bear losses, distribution strategy) are absent or not in coded form. Any one missing required field in the costs block can stall the whole deliverable. The architect's job is to enumerate these and put hard checks on them upstream.
+
+</details>
+
+<details><summary><b>52.</b> Give a concrete example of an upstream attribute whose absence half-populates an EMT costs block.</summary>
+
+Transaction costs are a classic example: they require trade-level explicit and implicit cost analytics expressed as a percentage of average NAV, which often come from a separate analytics vendor rather than the accounting book. If that feed is late or missing, the ongoing/transaction-cost fields are null and the costs block is half-populated. The file still validates structurally, so distribution stalls silently until someone notices the missing percentage.
+
+</details>
+
+<details><summary><b>53.</b> How would you design a dbt model set to produce an EMT V4-shaped output from a fund mart?</summary>
+
+You build staging models that pull and conform the raw upstream sources (security master, costs analytics, target-market reference data), intermediate models that compute each EMT block (target market, costs/charges) with the correct code-list values and scaling, and a final mart model whose columns map one-to-one to the EMT V4 spec. You add dbt tests for not-null on required fields and accepted-values for every coded field. The final select is then exported in the EMT layout.
+
+</details>
+
+<details><summary><b>54.</b> What dbt tests would you attach to an EMT model to catch the typical failures?</summary>
+
+At minimum: `not_null` tests on every required field, especially the costs block, to catch partial files; `accepted_values` tests on every coded field to enforce code-list conformance; `unique` on the row key (for example share-class identifier) to catch duplicates; and a relationship/freshness test on upstream cost sources. These directly target the lesson's named pain points — partial files, code lists and versioning — before the file ever leaves the platform.
+
+</details>
+
+<details><summary><b>55.</b> Which join key typically identifies a row in an EMT or EPT?</summary>
+
+The row is keyed at the share-class level, identified by the share class ISIN (the instrument-level identifier), because target market and costs differ by share class, not just by fund. So your EMT model's grain is one row per distributable share class, and the ISIN is the natural join key to the security master. Getting the grain wrong — producing one row per fund instead of per share class — is a common modelling error.
+
+</details>
+
+<details><summary><b>56.</b> How does an ISIN relate to the EMT/EPT, given a fund has multiple share classes?</summary>
+
+Each distributable share class has its own ISIN, and the EMT/EPT carries one row per share class keyed by that ISIN. This is because costs (different fee structures) and sometimes target market differ between, say, a retail and an institutional share class of the same fund. Your security master must therefore expose share-class-level ISINs, not just a fund-level identifier, or you cannot produce a correctly grained template.
+
+</details>
+
+<details><summary><b>57.</b> Why is the ISIN a critical join key when assembling a `FinDatEx` template, and what is the lifecycle gotcha?</summary>
+
+The ISIN is the agreed instrument identifier that links your internal share-class data to the manufacturer/distributor exchange, so it must be present and correct on every row. The lifecycle gotcha is that corporate actions can rename or retire an ISIN; if your security master treats ISIN as an immutable primary key, such an event can split one share class into two and break continuity of the template history. Carry an internal surrogate alongside the ISIN to preserve continuity.
+
+</details>
+
+<details><summary><b>58.</b> A distributor rejects your EMT saying an "invalid code" was found — what is the first thing to check?</summary>
+
+First check the coded field values against the exact code list for the EMT version the distributor expects, because the most common cause is emitting an off-list or wrongly-cased value, or a code that was valid in a different version. Confirm both the value and the version: a code valid in `V4.2` may have changed in `V4.3`. This is precisely the code-list-plus-versioning intersection the lesson flags.
+
+</details>
+
+<details><summary><b>59.</b> Your EMT loads fine at the distributor but they cannot produce cost disclosures — first thing to check?</summary>
+
+Check completeness of the costs-and-charges block: the file likely passed structural validation but has a half-populated costs block with one or more required cost figures null. Trace which cost field is missing (commonly transaction costs or the ongoing charges figure) and which upstream feed should have supplied it. This is the canonical "partial file stalls distribution" scenario, where nothing errored but the deliverable is incomplete.
+
+</details>
+
+<details><summary><b>60.</b> A counterparty says your EMT "won't parse" after they upgraded systems — what is the likely cause?</summary>
+
+The likely cause is a version mismatch: they now expect a newer EMT version with different fields or layout while you are still producing the old one (or vice versa). Confirm which version each side is on, since EMT versions coexist and change frequently. The fix is to make the produced version configurable per counterparty and to validate the declared version on both ends rather than assuming alignment.
+
+</details>
+
+<details><summary><b>61.</b> How do you decide which EMT version to send a given distributor?</summary>
+
+You treat the version as part of the data contract with that distributor: you record the version they have agreed to consume and your pipeline produces that version specifically, validating against its spec and code lists. Because versions coexist, different distributors may simultaneously require different versions, so the producer must be multi-version-capable. Hard-coding a single version is the classic mistake that breaks the first time a counterparty upgrades.
+
+</details>
+
+<details><summary><b>62.</b> Why must template version be modelled as data rather than as a constant in code?</summary>
+
+Because you must produce and consume multiple versions concurrently and route the right one per counterparty, the version cannot be a single compile-time constant. Modelling it as data lets one pipeline emit `V4.2` for one distributor and `V4.3` for another, validate each against the correct spec, and migrate counterparties independently. A constant forces a risky big-bang cutover and silent mis-mapping during the transition.
+
+</details>
+
+<details><summary><b>63.</b> What is the relationship between the EPT and the actual PRIIPs KID document?</summary>
+
+The EPT is the structured data feed of the inputs (SRI, performance scenarios, costs, RHP, identifiers); the KID is the human-readable disclosure document assembled from those inputs. The EPT is machine-to-machine between manufacturer and (typically) insurer; the KID is the retail-facing artifact. Confusing the two leads to building the wrong deliverable — the EPT is data, the KID is a formatted document.
+
+</details>
+
+<details><summary><b>64.</b> Why is the EPT especially sensitive to the quality of the underlying return history?</summary>
+
+Because both the SRI (via the VEV-driven MRM) and the performance scenarios are computed from the product's historical returns, a gap, error or wrong proxy in that history distorts the risk class and every scenario value simultaneously. There is no field-level redundancy: one bad return series corrupts multiple headline KID numbers. That is why return-history governance is an upstream control for any EPT pipeline.
+
+</details>
+
+<details><summary><b>65.</b> For a UCITS fund classified as PRIIPs Category 2, which calculation produces the VEV?</summary>
+
+For Category 2 PRIIPs (those with linear exposure and sufficient return history, which covers most plain UCITS), the VEV is derived using the Cornish-Fisher expansion of the value-at-risk. This formula adjusts the VaR for skewness and kurtosis so the resulting volatility-equivalent reflects tail behaviour, not just standard deviation. The MRM class then follows from where that VEV falls in the prescribed bands.
+
+</details>
+
+<details><summary><b>66.</b> What confidence level and what horizon underlie the PRIIPs VaR used for the MRM?</summary>
+
+The PRIIPs VaR is taken at a 97.5% confidence level over the recommended holding period. The annualised volatility implied by that VaR is the VEV that determines the MRM class. Both parameters are fixed by the PRIIPs RTS, so they are not tunable — which is helpful for reproducibility but means the inputs (returns, RHP) must be exactly right.
+
+</details>
+
+<details><summary><b>67.</b> Why is the recommended holding period (RHP) effectively an upstream attribute that can block an EPT?</summary>
+
+Because the RHP sets the horizon for the VEV, the SRI, the performance scenarios and the cost-over-time figures, a missing or wrong RHP makes all of those uncomputable or wrong at once. It is a single attribute with system-wide effect on the EPT. So your EPT pipeline must source an authoritative RHP per share class and validate it before any downstream calculation runs.
+
+</details>
+
+<details><summary><b>68.</b> What is the EET and why might it be confused with the EPT or EMT?</summary>
+
+The EET is the European ESG Template, the `FinDatEx` template for SFDR and EU Taxonomy ESG data exchange. It is confused with the EPT and EMT because they share the European/Template naming and the same governance body, but it serves a different regime (sustainability disclosure) and carries ESG attributes, not MiFID costs or PRIIPs risk. An architect on a fund platform typically has to produce all three, so keeping the regimes straight matters.
+
+</details>
+
+<details><summary><b>69.</b> Where do you obtain the authoritative, current EMT and EPT specifications?</summary>
+
+From the official `FinDatEx` website, `https://findatex.eu/`, which publishes the current EMT and EPT specifications as free downloads along with their version and date. Because versions change frequently and unofficial copies circulate, the primary source is the only safe basis for building a pipeline. The lesson's first "Do" step is literally to download the current EMT spec from `FinDatEx` and read the target-market and costs blocks.
+
+</details>
+
+<details><summary><b>70.</b> Why should you not rely on a third-party PDF of the EMT spec found via a search engine?</summary>
+
+Because third-party copies may be an older version, may be partial, or may have been re-typeset with transcription errors, and the EMT changes often enough that a stale copy will mis-map fields or carry an outdated code list. The authoritative spec and version are on `findatex.eu`. Building against anything else risks producing files that fail validation at counterparties running the current version.
+
+</details>
+
+<details><summary><b>71.</b> How does PRIIPs Regulation `(EU) No 1286/2014` relate to the EPT?</summary>
+
+`Regulation (EU) No 1286/2014` is the PRIIPs Regulation that created the legal requirement for a KID and defined what it must contain — the SRI, performance scenarios and cost disclosures. The EPT is the industry's standard data template for exchanging exactly those KID inputs. So the regulation is the "why" and the legal content; the EPT is the agreed "how" of moving that content between firms.
+
+</details>
+
+<details><summary><b>72.</b> In a Luxembourg fund-administration context, why are EMT/EPT files described as produced and consumed "every day"?</summary>
+
+Because a Luxembourg fund-data platform sits between manufacturers and a wide European distribution network, it must continuously emit EMTs and EPTs for every distributable share class and ingest counterparties' files, refreshing as costs, NAV-derived figures and target markets change. Funds are added, share classes launch, and cost figures update on regular cycles, so the templates are operational daily deliverables, not annual filings. That cadence is what makes pipeline reliability a regulatory concern.
+
+</details>
+
+<details><summary><b>73.</b> How does the daily NAV relate to figures that ultimately appear in an EMT?</summary>
+
+Several EMT cost figures, notably transaction costs, are expressed as a percentage of the average NAV, so the NAV time series feeds the cost analytics that populate those fields. If NAV production is wrong or late, the percentage cost figures derived from average NAV are wrong or unavailable, which can leave the costs block incomplete. This links the core fund-accounting deliverable (NAV) directly to the regulatory template deliverable (EMT).
+
+</details>
+
+<details><summary><b>74.</b> What is the consequence of treating EMT production as an "afterthought" according to the lesson?</summary>
+
+The lesson warns that treating EMT/EPT as afterthoughts leads to distribution stalls, because a costs block ends up half-populated and the file, while structurally valid, cannot support a complete disclosure downstream. The artifact looks done but is not usable, and the failure only surfaces at the distributor. The remedy is to engineer it as a first-class regulatory data product with completeness and code-list validation built in.
+
+</details>
+
+<details><summary><b>75.</b> Why is "structurally valid but semantically incomplete" the dominant failure mode for these templates?</summary>
+
+Because the templates are wide, mostly-coded flat files, a missing business value (a null cost, an off-list code) does not break parsing — the row still has the right shape. Validation that only checks structure therefore passes files that are unusable downstream. The dominant failure mode is thus semantic: completeness and code-list conformance must be asserted explicitly, since structural checks alone give false confidence.
+
+</details>
+
+<details><summary><b>76.</b> What kind of validation, beyond schema checks, must an EMT pipeline include?</summary>
+
+Beyond schema/type checks it must include completeness checks on business-critical blocks (costs especially), code-list / accepted-values checks on every coded field, version conformance to the target spec, and ideally cross-field consistency (for example net entry cost reconciling with gross and distribution-fee fields). These catch the partial-file, code-list and version pain points the lesson names. Schema checks alone would pass all of those failures.
+
+</details>
+
+<details><summary><b>77.</b> How would you list the upstream attributes that block EMT completion in practice?</summary>
+
+You enumerate every required EMT field, trace each to its authoritative upstream source, and flag those that are (a) required by the spec and (b) not guaranteed present — typically the costs inputs (OCF, transaction costs, fee splits) and the coded target-market dimensions. The output is a dependency list mapping each blocking attribute to its source system and its check. The lesson's fourth "Do" step is exactly this enumeration.
+
+</details>
+
+<details><summary><b>78.</b> Why is enumerating blocking attributes a design deliverable rather than a one-off check?</summary>
+
+Because the set of required fields and their upstream sources is part of the data contract: it tells you which upstream feeds are on the critical path for a regulatory deliverable and therefore need SLAs, monitoring and ownership. Treated as a one-off check it rots as the spec and sources change; treated as a maintained artifact it drives where you put hard data-quality gates. It is the map from regulatory requirement to engineering control.
+
+</details>
+
+<details><summary><b>79.</b> What does it mean that the EMT splits costs so a distributor can separate inducements from its own remuneration?</summary>
+
+It means cost fields distinguish the manufacturer-retained portion from the portion paid to or retained by the distributor (the distribution fee), so the distributor can transparently disclose what it earns and identify inducements under MiFID II. Without this split the distributor could not meet its inducement-disclosure obligations from the file. So the granularity is regulatory, not cosmetic — it exists to make downstream compliance possible.
+
+</details>
+
+<details><summary><b>80.</b> Why might the same fund produce different EMT cost rows for two of its share classes?</summary>
+
+Because share classes carry different fee structures — for example a retail class with higher management and distribution fees versus a clean institutional class — so the ongoing charges, distribution-fee split and entry/exit costs differ per share class. Since the EMT is grained per share class (per ISIN), each class gets its own cost row. Modelling at fund grain would wrongly collapse these distinct cost profiles into one.
+
+</details>
+
+<details><summary><b>81.</b> What is the danger of copying EPT cost figures into an EMT (or vice versa) to save effort?</summary>
+
+The danger is that the two regimes bucket and compute costs differently — EPT costs are KID/RIY figures tied to the RHP, while EMT costs are MiFID ex-ante figures with a distribution-fee split — so the numbers are not interchangeable. Copying them produces figures that look plausible but are methodologically wrong for the target regime, and they will fail expert review or mislead disclosures. Each template must be computed from the shared underlying data on its own methodology.
+
+</details>
+
+<details><summary><b>82.</b> How do you handle a coded field whose internal value has no direct equivalent in the EMT code list?</summary>
+
+You build an explicit mapping (a seed/lookup) from your internal enumeration to the official EMT code, and you fail the build if any internal value is unmapped rather than passing it through. Never emit the raw internal code, because the consumer parses against the official list and will reject or mis-read it. The mapping table is part of the EMT model and should itself be code-reviewed when the spec's code list changes.
+
+</details>
+
+<details><summary><b>83.</b> Why is an `accepted_values` test more valuable than a regex on EMT coded fields?</summary>
+
+Because the requirement is exact membership of a controlled list, not a format pattern; a regex might accept a syntactically plausible but non-existent code, whereas `accepted_values` enforces the precise enumerated set from the spec. This directly prevents the off-list-code failure that distributors reject. When the spec's code list changes between versions, you update the accepted-values set, which also gives you a clear, reviewable record of the change.
+
+</details>
+
+<details><summary><b>84.</b> What freshness/SLA considerations apply to EMT/EPT as data products?</summary>
+
+Because distributors and insurers depend on the files to distribute products and finalise KIDs, the files have implied freshness deadlines tied to distribution and disclosure cycles, and late or stale files can stall sales or block a KID. So you monitor upstream feed freshness (costs, NAV, return history), assert it before producing, and alert on misses. Treating freshness as part of the contract is part of what makes the EMT a regulatory data product, not a casual export.
+
+</details>
+
+<details><summary><b>85.</b> How does the LEI fit into the broader `FinDatEx` template ecosystem, even if EMT/EPT are instrument-centric?</summary>
+
+While EMT/EPT are keyed at the share-class/ISIN level, the manufacturer and other legal entities involved are identified by their Legal Entity Identifier (LEI), the GLEIF-registered entity key. Entity identity (who manufactures, who distributes) is part of the surrounding data quality, and consistent LEIs let the ecosystem link instruments to their responsible entities. So instrument identifiers (ISIN) and entity identifiers (LEI) together underpin a clean template feed.
+
+</details>
+
+<details><summary><b>86.</b> Why is a `FinDatEx` template a good example of a "data contract" between two firms?</summary>
+
+Because it fixes, in advance and in a published spec, the schema, field meanings, code lists, version and (by agreement) the delivery cadence between a manufacturer and a consumer — exactly the elements of a data contract. Both sides build to the same contract, so changes are governed (new versions) rather than ad hoc. It is a real-world, regulator-adjacent example of why data contracts and versioning discipline matter.
+
+</details>
+
+<details><summary><b>87.</b> What happens downstream at an insurer if one underlying fund's EPT is invalid or late?</summary>
+
+The insurer cannot finalise the PRIIPs KID for any multi-option product that includes that fund, because it lacks the SRI, scenario and cost inputs for that option, so the whole KID is blocked. This is a hard regulatory dependency: one missing EPT can hold up an insurer's retail disclosure. It illustrates why EPT timeliness and validity are external obligations, not internal niceties.
+
+</details>
+
+<details><summary><b>88.</b> Why does a delta EMT require a known, agreed baseline between producer and consumer?</summary>
+
+Because a delta only carries changed records, both sides must agree on the full-file baseline the deltas are applied to and on the sequence; otherwise the consumer cannot reconstruct the correct current state. If the baseline differs or a delta is skipped, the consumer's population silently diverges. That is why delta exchange usually pairs with periodic full-file re-baselining and explicit sequence/version markers.
+
+</details>
+
+<details><summary><b>89.</b> How would you detect that a consumer has silently missed a delta file?</summary>
+
+You include sequence numbers or as-of timestamps so the consumer can detect a gap, and you periodically send a full file so both sides can reconcile record counts and key fields against the baseline. A mismatch in reconciled counts or in a checksum over key fields reveals the missed delta. Without such reconciliation, a dropped delta produces a divergence with no error — the defining hazard of change-only feeds.
+
+</details>
+
+<details><summary><b>90.</b> What is the difference between the positive and negative target market when encoded in the EMT, in modelling terms?</summary>
+
+They are distinct sets of coded fields: the positive target market expresses the suitability profile (for whom the product is designed) and the negative target market expresses explicit unsuitability per dimension. In modelling terms you must source and validate both, because they are not simple complements — a client can be outside the positive target market without being in the negative one. Conflating them would either over-restrict or wrongly permit distribution.
+
+</details>
+
+<details><summary><b>91.</b> Why must distribution-strategy fields in the EMT be coded values rather than free text?</summary>
+
+Because distributors automate channel-eligibility decisions (advised, non-advised, execution-only, portfolio management) directly from these fields, so they must be exact coded values the consumer can parse. Free text cannot drive an automated distribution gate and would require manual interpretation, defeating the EMT's purpose. This is another instance where an off-list or free-text value silently breaks downstream automation.
+
+</details>
+
+<details><summary><b>92.</b> What is the practical meaning of "ex-ante" costs in the EMT?</summary>
+
+Ex-ante means the costs are estimated and disclosed before the investment is made, so a distributor can present expected costs to a client at the point of sale, as MiFID II requires. The EMT carries these forward-looking figures (often based on the latest available actuals as estimates). The contrast is ex-post (actual) cost reporting, which is a separate disclosure; the EMT's costs block is principally the ex-ante feed.
+
+</details>
+
+<details><summary><b>93.</b> If transaction-cost figures look implausibly low or negative in an EMT, what should you suspect?</summary>
+
+Suspect an implicit-cost calculation problem, because implicit transaction costs use a slippage methodology (execution price versus an arrival/mid reference) that can legitimately or erroneously produce very small or negative values when the spread methodology or reference price is wrong. Verify the average-NAV denominator and the slippage inputs from the analytics source. It is a known pain point precisely because implicit costs are harder to source and easy to compute incorrectly.
+
+</details>
+
+<details><summary><b>94.</b> Why is the security master a critical upstream for EMT/EPT production?</summary>
+
+Because the templates are keyed by share-class ISIN and need stable identity, the security master supplies the ISIN, the internal surrogate key, the fund/share-class hierarchy and identity continuity across corporate actions. If the security master is wrong, rows are mis-keyed or split, and history breaks across an ISIN change. A clean, surrogate-backed security master is therefore the foundation the whole template feed sits on.
+
+</details>
+
+<details><summary><b>95.</b> How would a corporate action that changes a share class's ISIN affect an EMT feed, and how do you protect against it?</summary>
+
+If your model keys EMT rows solely on ISIN, an ISIN change makes the share class appear as a brand-new instrument, breaking continuity of its EMT history and possibly producing duplicate or orphaned rows. You protect against it by keying internally on a stable surrogate that persists across ISIN changes, mapping old and new ISINs to the same surrogate. The EMT still emits the current ISIN, but your lineage and history stay intact.
+
+</details>
+
+<details><summary><b>96.</b> Why is column position fragility a hazard when producing fixed-layout EMT files?</summary>
+
+Because some `FinDatEx` exchange layouts are positional, an inserted, removed or reordered field between versions shifts every subsequent column, so a producer pinned to the wrong version writes values into the wrong fields without any parse error. The consumer then mis-reads the data. The defence is to generate the layout from the version's published field list rather than hand-maintaining positions, and to validate against the exact version.
+
+</details>
+
+<details><summary><b>97.</b> What is the value of running the `FinDatEx` Test IT working group's validation concepts in your pipeline?</summary>
+
+The Test IT working group concerns interoperability and validation of the templates, so aligning your pipeline's checks with that mindset means validating files the way counterparties will — against the published spec, code lists and version. Building those checks in before sending catches rejections internally rather than at the distributor. It embodies the principle that a regulatory data product validates itself before delivery.
+
+</details>
+
+<details><summary><b>98.</b> How do you keep a dbt EMT model resilient when `FinDatEx` publishes a new version?</summary>
+
+You parameterise the version, keep per-version field lists and code-list seeds, add the new version's accepted-values and required-field tests alongside the old, and only migrate a counterparty once both you and they are ready. Because versions coexist, you do not delete the old version's logic on day one. This lets the platform produce `V4.2` and `V4.3` concurrently and migrate distributors independently without a risky big-bang.
+
+</details>
+
+<details><summary><b>99.</b> Why is "Done when: you can explain which upstream attributes block EMT completion" a meaningful competency check?</summary>
+
+Because it tests whether you understand the EMT as a dependency graph rooted in real source systems, not just a file format — the costs and target-market inputs that, if missing, leave the deliverable incomplete. Being able to name them (and why each blocks) shows you can place hard data-quality gates where they matter. It is the difference between formatting a file and owning a regulatory data product end to end.
+
+</details>
+
+<details><summary><b>100.</b> Summarise the chain from a missing transaction-cost feed to a stalled fund distribution.</summary>
+
+A missing or late transaction-cost analytics feed leaves the EMT's transaction-cost field null, so the costs-and-charges block is half-populated; the file still validates structurally and loads at the distributor, but the distributor cannot assemble a complete MiFID II cost disclosure, so the product cannot be sold through that channel. Nothing errored — the fund just silently becomes undistributable. This is the lesson's central cautionary chain, and the reason completeness validation and upstream SLAs are essential.
+
+</details>
+
+
+## Phase 2 · 1.12.2 + 1.12.3 LEI & ISIN (entity and instrument identity) — 100 self-test questions
+
+<details><summary><b>1.</b> What is an ISIN and which ISO standard defines it?</summary>
+
+An ISIN (International Securities Identification Number) is a 12-character alphanumeric code that uniquely identifies a security, defined by ISO 6166. It is the global identifier for a fungible instrument such as a fund share class, bond, or equity. In a fund platform it is the join key that lets you tie a NAV, a holding, and an order to the same instrument across systems.
+
+</details>
+
+<details><summary><b>2.</b> How many characters does an ISIN contain and how are they laid out?</summary>
+
+An ISIN is exactly 12 characters: a 2-letter ISO 3166 country (prefix) code, then a 9-character NSIN (National Securities Identifying Number), then a single check digit. For example `LU1234567890` would be a Luxembourg-domiciled instrument with `1234567890` split as a 9-char NSIN plus a trailing check digit. The fixed width and structure make it easy to validate length before any check-digit math.
+
+</details>
+
+<details><summary><b>3.</b> What does the two-letter prefix of an ISIN represent?</summary>
+
+The first two characters are an ISO 3166 alpha-2 country code that identifies the National Numbering Agency's jurisdiction, not necessarily where the security trades. Many Luxembourg fund share classes carry the `LU` prefix because the Luxembourg NNA allocated them, even though they may be distributed and traded across Europe. The prefix tells you who assigned the ISIN, which is a common source of confusion when people assume it means the listing country.
+
+</details>
+
+<details><summary><b>4.</b> What is the NSIN portion of an ISIN?</summary>
+
+The NSIN (National Securities Identifying Number) is the middle 9 characters of an ISIN, allocated by the country's National Numbering Agency. It often wraps an existing national code — for example a US ISIN embeds the 9-character CUSIP, and a UK ISIN embeds the 7-character SEDOL padded with leading zeros. The NSIN is what actually distinguishes one instrument from another within a country's namespace.
+
+</details>
+
+<details><summary><b>5.</b> Who allocates ISINs and how is allocation coordinated globally?</summary>
+
+ISINs are allocated by National Numbering Agencies (NNAs), with generally one NNA per country, coordinated by ANNA (the Association of National Numbering Agencies). ANNA acts as the ISO 6166 Registration Authority and operates the ANNA Service Bureau that consolidates ISIN data globally. This federated model is why you cannot mint an ISIN yourself — you request one from the relevant NNA.
+
+</details>
+
+<details><summary><b>6.</b> Which numbering agency typically allocates ISINs for Luxembourg-domiciled funds?</summary>
+
+For Luxembourg-domiciled instruments the relevant National Numbering Agency allocates `LU`-prefixed ISINs, historically handled through the Luxembourg numbering body associated with the central securities depository. Each new fund share class gets its own ISIN from that NNA. This matters because a single fund umbrella can spawn dozens of `LU` ISINs as new share classes are launched.
+
+</details>
+
+<details><summary><b>7.</b> Why is it said that "ISIN ≠ listing"?</summary>
+
+An ISIN identifies the instrument itself, but the same ISIN can be listed and traded on many venues, so the ISIN alone cannot tell you where a trade occurred or at what venue-level price. Venue-level identity needs a different identifier such as a MIC for the market and FIGI for the listing line. Treating an ISIN as if it were a venue identifier silently collapses multiple listings into one and loses price-formation detail.
+
+</details>
+
+<details><summary><b>8.</b> What is a MIC and how does it relate to an ISIN?</summary>
+
+A MIC (Market Identifier Code, ISO 10383) is a 4-character code identifying a trading venue or market segment, such as `XLUX` for the Luxembourg Stock Exchange. While the ISIN says which instrument, the MIC says which market. You combine ISIN plus MIC when you need to know which specific exchange a quote, trade, or listing belongs to.
+
+</details>
+
+<details><summary><b>9.</b> What is a FIGI and why is it the venue-level complement to ISIN?</summary>
+
+A FIGI (Financial Instrument Global Identifier) is an open, 12-character identifier from the Object Management Group and Bloomberg's OpenFIGI that can identify instruments down to the individual listing on a specific venue. Because one ISIN can have many venue listings, FIGI provides distinct identifiers per listing where ISIN does not. It is the answer when you need a stable key for a specific exchange line rather than the instrument as a whole.
+
+</details>
+
+<details><summary><b>10.</b> Why is treating an ISIN as a unique key for "where it trades" a modeling mistake?</summary>
+
+Because an ISIN identifies the instrument, not the listing, the same ISIN appears across multiple exchanges, each with its own MIC, currency, and microstructure. If your model uses ISIN as the venue key you will double-count or merge venue-distinct rows. The correct design keys instrument-level facts on ISIN and venue-level facts on ISIN plus MIC (or a FIGI).
+
+</details>
+
+<details><summary><b>11.</b> What algorithm computes the ISIN check digit?</summary>
+
+The ISIN check digit is computed with the Luhn algorithm (modulus 10) after converting every letter to a number. Each letter is replaced by its position-derived value where `A`=10, `B`=11, through `Z`=35, producing a long digit string. The Luhn mod-10 process then yields the single check digit that makes the whole 12-character string valid.
+
+</details>
+
+<details><summary><b>12.</b> Walk through the steps to validate an ISIN check digit.</summary>
+
+First convert each letter to two digits using `A`=10 … `Z`=35, leaving digits as-is, to get a numeric string from the first 11 characters. Then apply the Luhn algorithm: starting from the rightmost digit of that string, double every second digit, sum the digits of any result over 9, and add everything up. The check digit is the amount needed to bring the total to the next multiple of 10, i.e. `(10 - (sum mod 10)) mod 10`.
+
+</details>
+
+<details><summary><b>13.</b> In ISIN letter-to-digit conversion, what numeric value does the letter `A` take?</summary>
+
+In ISIN check-digit calculation `A` is converted to `10`, `B` to `11`, and so on up to `Z` = `35`. This is the same scheme used by CUSIP-style alphanumeric Luhn checks. So a country prefix like `LU` becomes `21` `30` before the Luhn pass, because `L`=21 and `U`=30.
+
+</details>
+
+<details><summary><b>14.</b> Why does an ISIN carry a check digit at all?</summary>
+
+The check digit is a self-validation mechanism that catches the most common manual-entry errors — single-digit typos and most adjacent transpositions — before the identifier is trusted as a key. In a fund pipeline this lets you reject a malformed ISIN at ingestion rather than discovering a phantom instrument downstream. It is cheap insurance: a length check plus one Luhn computation rejects a large fraction of corrupted identifiers.
+
+</details>
+
+<details><summary><b>15.</b> Does a valid ISIN check digit prove the security actually exists?</summary>
+
+No — the check digit only proves the string is internally consistent (correct length and a Luhn-valid trailing digit), not that any NNA ever issued that ISIN. A randomly constructed code with a correct check digit will still pass validation while referencing nothing real. To confirm existence you must look the ISIN up against an authoritative reference source such as an NNA or vendor security master.
+
+</details>
+
+<details><summary><b>16.</b> An ingested ISIN passes a length check but fails check-digit validation — what is the likely cause?</summary>
+
+A length-valid but check-digit-invalid ISIN almost always means a transcription or transformation error: a transposed pair, a dropped leading zero in the NSIN, or a letter-case or character-set mangling during a CSV/Excel round-trip. The first thing to check is whether a spreadsheet stripped leading zeros or coerced the value to a number. Re-pull the raw source and compare byte-for-byte before assuming the source itself is wrong.
+
+</details>
+
+<details><summary><b>17.</b> What is an LEI and which standard defines it?</summary>
+
+An LEI (Legal Entity Identifier) is a 20-character alphanumeric code that uniquely identifies a legal entity participating in financial transactions, defined by ISO 17442. Unlike an ISIN, which identifies an instrument, an LEI identifies an organisation — for example a fund's management company or a counterparty. It is the global "who" key that complements the instrument-level "what" key.
+
+</details>
+
+<details><summary><b>18.</b> How many characters does an LEI have and what is its segment structure?</summary>
+
+An LEI is exactly 20 characters: a 4-character LOU prefix, two reserved characters that are always `00`, a 12-character entity-specific part, and two trailing check digits. So the layout is positions 1–4 (LOU), 5–6 (`00`), 7–18 (entity), 19–20 (check digits). The reserved `00` is a fixed feature of the format that you can use as a quick structural sanity check.
+
+</details>
+
+<details><summary><b>19.</b> What is the LOU prefix in an LEI?</summary>
+
+The first four characters of an LEI identify the LOU (Local Operating Unit) — the issuing organisation that allocated that LEI under GLEIF accreditation. It ensures globally unique allocation by partitioning the namespace per issuer. Knowing the prefix tells you which registrar minted the code but says nothing about the entity's industry or country.
+
+</details>
+
+<details><summary><b>20.</b> What occupies characters 5 and 6 of an LEI?</summary>
+
+Characters 5 and 6 of an LEI are reserved and are always set to `00` in the current ISO 17442 format. They carry no information today and exist as reserved positions in the standard. A quick way to flag an obviously malformed LEI is to check that positions 5–6 are `00`.
+
+</details>
+
+<details><summary><b>21.</b> How is the LEI check digit computed?</summary>
+
+The final two characters of an LEI are check digits computed using the ISO/IEC 7064, MOD 97-10 scheme — the same family as IBAN validation. Letters in the first 18 characters are converted to numbers (`A`=10 … `Z`=35), the two check positions are treated as appended, and the whole number must satisfy `mod 97 == 1`. This two-digit checksum catches more errors than a single Luhn digit, which is appropriate for a 20-character identifier.
+
+</details>
+
+<details><summary><b>22.</b> How do you verify an LEI's check digits in practice?</summary>
+
+Take the 20-character LEI, move nothing (the check digits are already at the end), convert all letters to digits with `A`=10 … `Z`=35, and interpret the result as one large integer. The LEI is valid if that integer modulo 97 equals 1. If you are generating a check digit instead, you append `00`, compute `98 - (n mod 97)`, and zero-pad to two digits.
+
+</details>
+
+<details><summary><b>23.</b> Why does an LEI use two check digits while an ISIN uses only one?</summary>
+
+The LEI uses ISO 7064 MOD 97-10, which yields two check digits and detects essentially all single-character errors and transpositions, whereas the ISIN's single Luhn digit catches most but not all such errors. The stronger scheme reflects the LEI's role as a regulatory identity key where a misidentified counterparty has serious consequences. The trade-off is two characters of overhead for materially better error detection.
+
+</details>
+
+<details><summary><b>24.</b> What is GLEIF and what role does it play?</summary>
+
+GLEIF (the Global Legal Entity Identifier Foundation) is the not-for-profit body that oversees the Global LEI System, maintains the central registry, and accredits the LOUs that issue LEIs. It does not issue LEIs directly to most entities; instead it governs the system and publishes the consolidated reference data. GLEIF is the authoritative source you reconcile against when validating that an LEI is real and current.
+
+</details>
+
+<details><summary><b>25.</b> What is the GLEIF golden copy?</summary>
+
+The GLEIF golden copy is the consolidated, de-duplicated reference dataset that GLEIF publishes combining all LEI records ever issued by all LOUs into a single authoritative file set. It removes technical duplicates and guarantees completeness across issuers, which the raw per-issuer files do not. For a lakehouse it is the ideal free dataset to land in bronze as your entity reference source.
+
+</details>
+
+<details><summary><b>26.</b> In what formats and how often is the GLEIF golden copy published?</summary>
+
+The golden copy is published in XML, CSV, and JSON, three times a day at fixed UTC times (02:00, 10:00, and 18:00), with the underlying index updated up to ten times daily. GLEIF also publishes delta files containing only newly issued or revised LEIs so you can apply incremental updates. Choosing CSV or JSON over XML often simplifies loading into a columnar bronze table.
+
+</details>
+
+<details><summary><b>27.</b> What are GLEIF delta files and why use them?</summary>
+
+Delta files contain only the LEIs that were newly issued or revised since a prior golden-copy release, rather than the full dataset. Loading deltas lets you keep your bronze entity table current with a small daily download instead of re-ingesting the entire registry each cycle. The gotcha is that you must track which baseline version your deltas apply to, or you risk gaps and out-of-order application.
+
+</details>
+
+<details><summary><b>28.</b> What is "Level 1" data in the Global LEI System?</summary>
+
+Level 1 data is the "who is who" reference data: the foundational attributes of each legal entity tied to its LEI, such as legal name, registered and headquarters address, jurisdiction, registration status, and registration authority details. GLEIF enriches it with normalized addresses and geocoding. It answers identity questions about a single entity in isolation.
+
+</details>
+
+<details><summary><b>29.</b> What is "Level 2" data in the Global LEI System?</summary>
+
+Level 2 data is the "who owns whom" relationship data: records that link an entity's LEI to its direct parent and ultimate parent entities, enabling reconstruction of corporate hierarchies. It is captured as relationship records rather than flat attributes on one entity. This is what lets you roll exposures up an ownership tree across the global LEI population.
+
+</details>
+
+<details><summary><b>30.</b> Distinguish what Level 1 versus Level 2 data each enable.</summary>
+
+Level 1 enables you to identify and describe a single entity — confirm its legal name, country, and status from its LEI. Level 2 enables you to traverse ownership, answering "which group ultimately owns this management company?" by following direct- and ultimate-parent relationship records. In practice Level 1 powers entity master data and Level 2 powers group-level aggregation and concentration analysis.
+
+</details>
+
+<details><summary><b>31.</b> In Level 2 data, what is the difference between a direct parent and an ultimate parent?</summary>
+
+The direct parent is the immediate accounting-consolidating parent one level up, while the ultimate parent is the entity at the very top of the consolidation chain. An entity can have a direct parent that is itself owned by a different ultimate parent several levels higher. Modeling both lets you answer immediate-owner questions and top-of-house exposure questions separately.
+
+</details>
+
+<details><summary><b>32.</b> Why might a legal entity have no parent relationship recorded in Level 2 data?</summary>
+
+An entity may report that it has no parent (it is the ultimate parent itself) or may report a reason why parent information is not provided, such as legal obstacles or consent constraints. GLEIF captures these "reporting exceptions" explicitly rather than leaving a silent gap. When building hierarchies you must handle these exception codes, or you will mistake a deliberate non-disclosure for missing data.
+
+</details>
+
+<details><summary><b>33.</b> How does an LEI relate to an ISIN conceptually?</summary>
+
+An LEI identifies a legal entity (the issuer, management company, or counterparty), while an ISIN identifies a specific instrument that entity may issue or manage. They operate at different levels: one entity (one LEI) can be associated with many instruments (many ISINs). In a security master you link the instrument's ISIN to the issuing or managing entity's LEI to connect the "what" to the "who".
+
+</details>
+
+<details><summary><b>34.</b> In the study task, what does "link your Faker funds to real LEIs of their management companies" achieve?</summary>
+
+It teaches you to attach a real, validatable entity identifier (the LEI of a management company) to your synthetic fund records, so the entity side of your model is anchored to GLEIF-validatable identity even though the fund itself is fictional. This mirrors production, where fund records reference real ManCo LEIs. It also forces you to handle the join between an instrument-level fund and an entity-level LEI cleanly.
+
+</details>
+
+<details><summary><b>35.</b> Why does a security master need both an ISIN and an internal surrogate key?</summary>
+
+The ISIN is a meaningful external identifier, but it can change or be retired over an instrument's life due to corporate actions, so it is unstable as a permanent primary key. An internal surrogate key is a system-generated value that never changes, preserving continuity and history even when the ISIN does change. Keeping both lets you join to external feeds on ISIN while maintaining stable internal lineage on the surrogate.
+
+</details>
+
+<details><summary><b>36.</b> What is a surrogate key in the context of a security master?</summary>
+
+A surrogate key is an internally generated, business-meaningless identifier (such as a sequence or hash) assigned to each instrument and never reused or altered. Unlike the ISIN, it is under your control and immune to external lifecycle events. It becomes the true primary key for all internal facts and relationships, with the ISIN stored as a mutable attribute alongside it.
+
+</details>
+
+<details><summary><b>37.</b> What is an "identifier lifecycle event" for an ISIN?</summary>
+
+An identifier lifecycle event is any change to an instrument's ISIN over time — issuance, reassignment, or retirement — typically driven by corporate actions such as mergers, redenominations, or share-class restructurings. The instrument may persist economically while its ISIN changes, or an ISIN may be retired and a new one issued. Your model must treat the ISIN as a time-bounded attribute, not an immortal key.
+
+</details>
+
+<details><summary><b>38.</b> Give an example of a corporate action that causes an ISIN to change.</summary>
+
+A reverse stock split, a redomiciliation, or a merger can cause the issuer to retire one ISIN and have a new ISIN allocated for the resulting instrument, even though holders' economic position continues. For a fund, a share-class restructuring or currency redenomination can trigger a new ISIN. The continuity is economic and legal, but the external identifier breaks.
+
+</details>
+
+<details><summary><b>39.</b> How does a surrogate key preserve continuity when an ISIN changes?</summary>
+
+Because the surrogate key never changes, all historical facts (NAVs, holdings, transactions) stay attached to the same surrogate even as the ISIN attribute is updated from old to new. You record the ISIN change as a time-bounded mapping (old ISIN valid until date X, new ISIN valid from date X) keyed on the surrogate. This keeps one continuous instrument record instead of splitting it into two unrelated rows.
+
+</details>
+
+<details><summary><b>40.</b> What goes wrong if you use the ISIN itself as the primary key and the ISIN later changes?</summary>
+
+Using the ISIN as the primary key means a corporate-action ISIN change creates what looks like a brand-new instrument, silently splitting one economic instrument's history into two disconnected records. NAV series and holdings before and after the change no longer join, breaking time-series continuity and performance calculations. This is the classic "one instrument becomes two in the warehouse" failure the surrogate key prevents.
+
+</details>
+
+<details><summary><b>41.</b> How would you model the old-to-new ISIN relationship during a corporate action?</summary>
+
+Store the ISIN as a slowly changing attribute on the instrument's surrogate, with validity dates, and keep a separate cross-reference table mapping old ISIN to new ISIN with the effective date and the corporate-action reason. Internal facts key on the surrogate, so they are unaffected; only the external-identifier lookup changes. This lets feeds arriving under either the old or new ISIN resolve to the same surrogate.
+
+</details>
+
+<details><summary><b>42.</b> A NAV time series shows a gap exactly on a corporate-action date — what is the first thing to check?</summary>
+
+First check whether the instrument's ISIN changed on that date and whether your join is keyed on ISIN rather than a stable surrogate, because an ISIN change keyed on ISIN will sever the series. Confirm by looking up the corporate action and the old/new ISIN mapping for that instrument. If the surrogate is intact but the feed switched ISINs, the fix is to map the new ISIN to the existing surrogate rather than create a new record.
+
+</details>
+
+<details><summary><b>43.</b> Why is ANNA the right authority to consult for ISIN allocation and structure questions?</summary>
+
+ANNA is the ISO-designated Registration Authority for ISO 6166 (ISIN) and coordinates the National Numbering Agencies that allocate ISINs, so it is the canonical source for structure, allocation rules, and check-digit definition. Vendor descriptions can be approximate, whereas ANNA's standards pages reflect the normative rules. When a flag or rule is uncertain, ANNA's standards documentation is the reference of record.
+
+</details>
+
+<details><summary><b>44.</b> Why is GLEIF the right authority to consult for LEI questions?</summary>
+
+GLEIF governs the Global LEI System, accredits the issuing LOUs, and publishes the authoritative consolidated reference data, so it defines what an LEI means, how it is structured, and what current data is available. Third-party LEI lookup sites resell or mirror GLEIF data and can lag or differ. For structure (ISO 17442), validation, and golden-copy access, GLEIF is the primary source.
+
+</details>
+
+<details><summary><b>45.</b> What regulatory driver makes the LEI mandatory in EU financial reporting?</summary>
+
+EU regimes such as MiFID II / MiFIR transaction reporting and EMIR require counterparties and issuers to be identified by LEI, under the principle "no LEI, no trade" for in-scope reporting. This regulatory mandate is why LEIs are pervasive in fund operations and why your entity master must store and validate them. The LEI thus functions as a compliance-grade identity key, not merely a convenience.
+
+</details>
+
+<details><summary><b>46.</b> Under DORA and similar regimes, why does identifier discipline matter for a fund platform?</summary>
+
+Regulations like DORA emphasise operational resilience and accurate, traceable data, and consistent identifiers (LEI for entities, ISIN for instruments) are the backbone of traceable, auditable records. If identifiers drift or split, regulators cannot reconcile your reported exposures to reality. Strong identifier governance — surrogate keys, validation, lifecycle handling — is therefore part of regulatory data integrity, not just engineering hygiene.
+
+</details>
+
+<details><summary><b>47.</b> How do ISIN and LEI relate to an EMT (European MiFID Template) file?</summary>
+
+An EMT carries instrument-level reference and cost data for distribution, keyed on the share-class ISIN, while the LEI identifies the manufacturer or management company entity behind it. So an EMT row joins the instrument identity (ISIN) to entity identity (LEI) plus regulatory cost fields. Correctly resolving both identifiers is essential so that the EMT's ISIN and any embedded LEI match your security master.
+
+</details>
+
+<details><summary><b>48.</b> In transfer agency, why are stable instrument identifiers critical?</summary>
+
+Transfer agency processes subscriptions, redemptions, and switches against specific fund share classes, each identified by an ISIN, so an unstable or mismatched ISIN can route an investor's order to the wrong share class. A surrogate-backed master ensures that even across an ISIN change the register stays attached to the right instrument. Errors here directly affect investor holdings and NAV allocation.
+
+</details>
+
+<details><summary><b>49.</b> What is the relationship between a CSD and ISIN allocation in markets like Luxembourg?</summary>
+
+In several markets the National Numbering Agency function sits with or alongside the Central Securities Depository, which both allocates ISINs and settles the instruments. This couples identity allocation with settlement infrastructure, so a Luxembourg `LU` ISIN is closely tied to the local CSD's records. For an architect it means the authoritative source for `LU` ISINs is that CSD/NNA, not a generic vendor feed.
+
+</details>
+
+<details><summary><b>50.</b> Why can two different securities never share the same valid ISIN?</summary>
+
+ISINs are allocated to be unique per instrument by the NNA within its country namespace, and the global federation of NNAs partitions the space by country prefix so allocations cannot collide. Therefore a correctly issued ISIN maps to exactly one instrument at a point in time. The only ambiguity comes from lifecycle reuse over time, which is why time-bounding the ISIN attribute matters.
+
+</details>
+
+<details><summary><b>51.</b> Can an ISIN ever be reassigned to a different instrument over time?</summary>
+
+In principle an ISIN should not be reused, but lifecycle events and historical practice mean you should not assume an ISIN is eternally bound to one economic instrument; treat it as valid for a time window. This is precisely why the surrogate key, not the ISIN, anchors your records. Always store effective-from/effective-to dates on the ISIN attribute so historical joins resolve to the correct instrument-as-of-then.
+
+</details>
+
+<details><summary><b>52.</b> What is the difference between an instrument identifier and an entity identifier?</summary>
+
+An instrument identifier (ISIN, FIGI) names a tradable thing, while an entity identifier (LEI) names a legal organisation. They answer different questions: "what is being traded?" versus "who is the legal party?". Conflating them — for example trying to key a fund's NAV on a ManCo LEI — produces nonsense joins, so your model must keep the two levels distinct.
+
+</details>
+
+<details><summary><b>53.</b> Why is FIGI considered "open" and how does that contrast with some other identifiers?</summary>
+
+FIGI is an open standard with freely available identifiers and no licensing fee for use, administered through OpenFIGI, in contrast to some national codes (like CUSIP) that carry licensing restrictions. Openness makes FIGI attractive as a venue-level key you can use and redistribute freely. For a free-tooling study stack this matters because you can ingest FIGI mappings without licensing friction.
+
+</details>
+
+<details><summary><b>54.</b> What is a CFI code and how does it complement an ISIN?</summary>
+
+A CFI (Classification of Financial Instruments, ISO 10962) is a 6-character code that classifies an instrument's type and attributes — for example whether it is an equity, debt, or fund and its key features. It complements the ISIN, which identifies but does not describe the instrument. Carrying both means you know which instrument it is (ISIN) and what kind of instrument it is (CFI) in your reference data.
+
+</details>
+
+<details><summary><b>55.</b> Why is it risky to infer an instrument's type purely from its ISIN?</summary>
+
+The ISIN encodes country and a national number plus a check digit, but it does not reliably encode instrument type, so parsing the ISIN to guess "this is a bond" or "this is a fund" is unsafe. The correct field for type is the CFI code or your own classification attribute. Inferring type from ISIN substrings is a brittle hack that breaks across NNAs.
+
+</details>
+
+<details><summary><b>56.</b> When loading the GLEIF golden copy to bronze, why keep it raw and unmodified?</summary>
+
+Bronze is the landing layer whose job is to preserve the source exactly as received, so you can re-derive everything downstream and audit against the original. Keeping the golden copy raw means a later mapping bug can be fixed by reprocessing without re-downloading. It also gives you a defensible, regulator-friendly record of exactly what GLEIF published and when.
+
+</details>
+
+<details><summary><b>57.</b> What validation would you apply to LEIs after loading the golden copy?</summary>
+
+At minimum confirm each LEI is 20 characters, that positions 5–6 are `00`, that all characters are in the allowed uppercase-alphanumeric set, and that the ISO 7064 MOD 97-10 check digits pass. You would also flag entities whose registration status is lapsed or retired. These checks turn a raw dump into a trustworthy entity reference table.
+
+</details>
+
+<details><summary><b>58.</b> What does it mean for an LEI's registration status to be "lapsed"?</summary>
+
+A lapsed LEI is one whose registration has not been renewed by the annual deadline, so its reference data is no longer being maintained and may be stale. The LEI string remains structurally valid, but its Level 1 data is unverified. In risk and compliance contexts a lapsed status is a flag, because counterparties are generally expected to keep their LEI in good standing.
+
+</details>
+
+<details><summary><b>59.</b> Why must LEIs be renewed periodically?</summary>
+
+GLEIF requires annual renewal so that an entity's Level 1 reference data (name, address, status) is re-validated against an authoritative registration source and kept current. Without renewal the data drifts as entities move, rename, or restructure. For your platform this means LEI validity has a time dimension: a once-valid record can become stale, so store and monitor the status field.
+
+</details>
+
+<details><summary><b>60.</b> How would you handle a fund record whose management company's LEI is not found in the golden copy?</summary>
+
+First confirm you loaded the correct, current golden-copy version and applied any deltas, since a very recently issued LEI might only appear in a delta file. Then re-validate the LEI string's structure and check digits to rule out a transcription error. If it is genuinely absent, treat it as an unresolved entity reference and quarantine the record rather than silently joining to nothing.
+
+</details>
+
+<details><summary><b>61.</b> What is the practical reason to convert letters to digits before the Luhn step in ISIN validation?</summary>
+
+Luhn arithmetic operates on decimal digits, but ISINs contain letters in the country prefix and often the NSIN, so the letters must first be expanded to their numeric values (`A`=10 … `Z`=35) to produce a pure digit string. Skipping this step or using ASCII codes gives a wrong checksum. The expansion is the bridge that lets a numeric checksum cover an alphanumeric identifier.
+
+</details>
+
+<details><summary><b>62.</b> For the ISIN `US0378331005`, what national identifier is embedded in the NSIN?</summary>
+
+For a US ISIN the 9-character NSIN is the CUSIP, so `037833100` in `US0378331005` is the CUSIP for that security, with `5` as the ISIN check digit. This illustrates how ISINs wrap pre-existing national codes rather than inventing new ones. Recognising this lets you cross-reference a US ISIN to its CUSIP-keyed data sources.
+
+</details>
+
+<details><summary><b>63.</b> Why might the same instrument have different national identifiers embedded across countries' ISINs?</summary>
+
+Because each NNA wraps its own national numbering scheme (CUSIP in the US, SEDOL in the UK, WKN-derived codes in Germany) into the NSIN, the embedded national code differs by jurisdiction even for economically similar instruments. The ISIN harmonises these into one format, but the inner NSIN still reflects local conventions. This is why you should map on the full ISIN, not on a presumed-universal inner code.
+
+</details>
+
+<details><summary><b>64.</b> What is the danger of storing an ISIN in a spreadsheet column without text formatting?</summary>
+
+Spreadsheets may interpret an all-numeric NSIN or a code with leading zeros as a number, stripping leading zeros or applying scientific notation, which corrupts the ISIN. For example a leading-zero NSIN can lose its first character, breaking both length and check-digit validation. Always import and store ISINs as text, and validate length and check digit immediately after ingestion.
+
+</details>
+
+<details><summary><b>65.</b> How does the LEI's MOD 97-10 scheme relate to IBAN validation?</summary>
+
+Both LEI and IBAN use the ISO/IEC 7064 MOD 97-10 check-character system, so the underlying arithmetic — convert letters to digits, interpret as a big integer, test against 97 — is essentially the same. Recognising this lets you reuse a single validation routine for both identifier types. The familiar IBAN "mod 97 equals 1" test is exactly the LEI test once the check digits are in place.
+
+</details>
+
+<details><summary><b>66.</b> If an LEI's positions 5–6 are not `00`, what should you conclude?</summary>
+
+Under the current ISO 17442 format, characters 5 and 6 are reserved and must be `00`, so a non-`00` value means the string is not a validly formatted LEI — likely a typo, truncation, or a non-LEI value placed in the LEI field. It is a fast structural red flag you can apply before the full check-digit computation. Quarantine such rows rather than attempting to join them.
+
+</details>
+
+<details><summary><b>67.</b> Why is a single LEI insufficient to understand a fund's group-level exposure?</summary>
+
+A single LEI gives you one entity's identity (Level 1) but not its place in an ownership hierarchy, so to aggregate exposure to a whole group you must traverse Level 2 direct- and ultimate-parent relationships. Without Level 2 you would treat each subsidiary as independent and undercount group concentration. Level 2 is what turns a flat list of entities into a navigable corporate tree.
+
+</details>
+
+<details><summary><b>68.</b> How would you use Level 2 data to answer "how much do we hold across one corporate group?"</summary>
+
+You resolve each holding's issuer LEI, then walk the Level 2 ultimate-parent relationships to map every issuer to its top-of-house entity, and finally aggregate exposures by ultimate parent. This collapses many subsidiary issuers into one group total. The accuracy depends on Level 2 completeness, so you must account for entities that report parent exceptions.
+
+</details>
+
+<details><summary><b>69.</b> What is the risk of building a parent hierarchy and ignoring GLEIF reporting exceptions?</summary>
+
+Reporting exceptions (entity declares no parent, or cites a legal/consent reason for not reporting one) are not the same as a missing edge, and treating them as missing can either truncate a real hierarchy or fabricate one. Ignoring them produces an inaccurate ownership tree and wrong group aggregations. You must branch on the exception reason and decide explicitly how to treat each case.
+
+</details>
+
+<details><summary><b>70.</b> Why is the GLEIF golden copy preferred over individual LOU files for loading to bronze?</summary>
+
+The golden copy consolidates and de-duplicates records from all LOUs and guarantees completeness — every LEI ever published in that version is present — whereas individual LOU files are partial and may contain technical duplicates. Loading the golden copy gives you one authoritative, complete snapshot rather than stitching many partial feeds. That simplicity and completeness is exactly what a reference dataset needs.
+
+</details>
+
+<details><summary><b>71.</b> At what UTC times does GLEIF publish golden-copy files, and why does that matter for scheduling?</summary>
+
+GLEIF publishes golden-copy file sets at 02:00, 10:00, and 18:00 UTC. Knowing the publish cadence lets you schedule your ingestion job just after a release rather than polling blindly, and to pick the release that aligns with your downstream cutoffs. Aligning your pipeline to these fixed times avoids fetching a half-updated dataset.
+
+</details>
+
+<details><summary><b>72.</b> How does using a stable surrogate key help with auditability in a regulated fund platform?</summary>
+
+A surrogate key gives every internal fact a permanent, unchanging anchor, so an auditor can follow an instrument's full history even across ISIN changes without the trail breaking. External identifiers can be shown as time-bounded attributes mapped to that anchor. This continuous lineage is exactly what regulators expect when they ask you to reconstruct an instrument's record over time.
+
+</details>
+
+<details><summary><b>73.</b> When ingesting both ISIN and LEI, why validate before joining rather than after?</summary>
+
+Validating identifiers (length, structure, check digits) at ingestion stops malformed values from creating phantom dimension rows or silently failing joins downstream. A single invalid ISIN that slips through can spawn an orphaned instrument or merge two real ones. Catching it at the boundary keeps the silver/gold layers clean and your joins trustworthy.
+
+</details>
+
+<details><summary><b>74.</b> What is the consequence of an ISIN-to-surrogate mapping that is not time-bounded?</summary>
+
+Without effective-from/effective-to dates, a reused or changed ISIN will map ambiguously to more than one surrogate, and a point-in-time join cannot tell which instrument was meant on a given date. This produces incorrect historical NAVs and holdings. Time-bounding the mapping makes "ISIN X as of date D" resolve to exactly one surrogate.
+
+</details>
+
+<details><summary><b>75.</b> Why is the LEI described as a "join key of the industry" alongside the ISIN?</summary>
+
+Together the LEI (entities) and ISIN (instruments) let disparate systems and firms reconcile the same parties and securities without bilateral mappings, which is the foundation of industry-wide data integration. They are the shared vocabulary that makes a feed from one firm joinable to another's. Where these keys are clean, integration is straightforward; where they drift, you get a data swamp.
+
+</details>
+
+<details><summary><b>76.</b> How would you detect that two warehouse rows are actually the same instrument split by an ISIN change?</summary>
+
+You would look for two surrogate records (or two ISINs) sharing the same underlying attributes — issuer LEI, name, currency, and a corporate-action event linking an old ISIN to a new one on a specific date. A cross-reference of old-to-new ISINs from corporate-action data confirms the split. Once confirmed, you merge them under one surrogate and time-bound the two ISINs.
+
+</details>
+
+<details><summary><b>77.</b> Why is `persist`-ing the ISIN as a mutable attribute, rather than as the key, the safer schema choice?</summary>
+
+Storing the ISIN as an attribute means a lifecycle change is a simple update or a new validity-dated row, leaving all foreign keys (which point to the surrogate) untouched. If the ISIN were the key, every referencing table would have to cascade an update on each corporate action, which is fragile and history-destroying. The attribute approach localises change to one column and preserves referential continuity.
+
+</details>
+
+<details><summary><b>78.</b> What minimum fields would you keep in a security master to satisfy this lesson's "done when" criteria?</summary>
+
+At least an internal surrogate primary key, the current ISIN with validity dates, the CFI or instrument-type, the issuing/managing entity's LEI, and a cross-reference of historical ISINs to the surrogate. This lets you join external feeds on ISIN, aggregate by entity on LEI, and preserve continuity across ISIN changes. It directly supports explaining a corporate-action scenario and distinguishing the two identifier levels.
+
+</details>
+
+<details><summary><b>79.</b> Why is it incorrect to assume a fund's `LU` ISIN means the fund only trades in Luxembourg?</summary>
+
+The `LU` prefix only records that the Luxembourg NNA allocated the ISIN, reflecting the fund's domicile, not its distribution or trading footprint, which can span many countries and venues. Cross-border-distributed UCITS routinely carry `LU` ISINs while being sold across the EU. Confusing allocation country with trading venue leads to wrong assumptions about market data and venue identifiers.
+
+</details>
+
+<details><summary><b>80.</b> How do MIC and FIGI together cover what an ISIN cannot at the venue level?</summary>
+
+The MIC names the venue (which market a listing belongs to) and the FIGI provides a distinct identifier for each venue-level listing line, so together they pin down "this instrument on this venue", which a single ISIN cannot. ISIN stays at the instrument level. Your model therefore layers venue-level keys (ISIN + MIC, or FIGI) on top of the instrument-level ISIN.
+
+</details>
+
+<details><summary><b>81.</b> What would you check first if a freshly downloaded golden-copy CSV fails to parse?</summary>
+
+First confirm you downloaded the intended format and a complete, non-truncated file, since the golden copy is large and an interrupted download is common; verify the file size and any provided checksum. Then check delimiter and encoding assumptions, because LEI reference data includes non-ASCII names and embedded delimiters that need proper quoting. A parser configured for naive comma-splitting will choke on quoted, accented entity names.
+
+</details>
+
+<details><summary><b>82.</b> Why is character encoding a concern when loading LEI Level 1 data?</summary>
+
+Legal entity names in Level 1 data are global and include accented and non-Latin characters, so loading them with the wrong encoding (e.g. assuming Latin-1 instead of UTF-8) mangles names. Mangled names then fail downstream matching and reconciliation. Always load LEI reference data as UTF-8 and verify a few known multi-byte names after ingestion.
+
+</details>
+
+<details><summary><b>83.</b> How does an LEI improve counterparty identification compared with using a free-text name?</summary>
+
+An LEI is a globally unique, validatable code, whereas a legal name varies in spelling, language, abbreviation, and over time, making name-based matching unreliable. Using the LEI as the join key eliminates the fuzzy-matching guesswork and ties directly to GLEIF-maintained reference data. This is why regulators mandate LEIs rather than names for counterparty identification.
+
+</details>
+
+<details><summary><b>84.</b> What is the relationship between an LEI and the entities required in EMT/EPT distribution data?</summary>
+
+EMT and EPT templates carry identifiers for the parties involved in manufacturing and distributing a fund, where the LEI is the standard way to identify the management company or manufacturer entity. The instrument is identified by ISIN, the entity by LEI. Correctly populating and validating the LEI in these templates is part of producing compliant distribution data.
+
+</details>
+
+<details><summary><b>85.</b> Why might you keep historical Level 1 attributes rather than only the current ones?</summary>
+
+An entity's name, address, or status changes over time, and reconstructing a past report or audit requires knowing the attributes as they stood then, not just now. Keeping versioned Level 1 history lets you answer "what was this entity called on the trade date?". Overwriting in place destroys the as-of view that regulated reporting often needs.
+
+</details>
+
+<details><summary><b>86.</b> How would you reconcile a vendor security master against the GLEIF golden copy?</summary>
+
+You join the vendor's entity LEIs to the golden copy on the LEI, then compare Level 1 attributes (name, country, status) and flag mismatches, missing LEIs, and lapsed registrations. The golden copy acts as the authoritative reference, so discrepancies usually indicate vendor staleness. This reconciliation surfaces silent drift before it contaminates downstream reporting.
+
+</details>
+
+<details><summary><b>87.</b> Why is it dangerous to silently drop rows that fail ISIN check-digit validation?</summary>
+
+Silently dropping rows hides data-quality problems and can omit real instruments whose ISINs were merely mis-transcribed upstream, leading to understated holdings or NAV coverage. The right behaviour is to quarantine and alert, so a human can investigate the source. Visibility of rejects is itself a governance requirement in a regulated platform.
+
+</details>
+
+<details><summary><b>88.</b> What is the role of effective dating when an instrument moves from one ISIN to another?</summary>
+
+Effective dating records that the old ISIN was valid up to a cutover date and the new ISIN from that date forward, both pointing to the same surrogate. This lets any historical query resolve the correct ISIN as of any date and lets feeds under either ISIN find the right instrument. Without it, you cannot answer "which ISIN was active on date D?" deterministically.
+
+</details>
+
+<details><summary><b>89.</b> Why does the architect, not the analyst, own the identifier-lifecycle design?</summary>
+
+Lifecycle handling — surrogate keys, time-bounded identifiers, corporate-action cross-references — is a foundational data-architecture decision that shapes every downstream model, so it must be designed centrally and consistently. If left to ad hoc analyst fixes, different teams will handle ISIN changes differently and history will fragment. Owning it centrally is what keeps the platform a coherent master rather than a swamp.
+
+</details>
+
+<details><summary><b>90.</b> How can you quickly sanity-check a 20-character string before treating it as an LEI?</summary>
+
+Verify it is exactly 20 uppercase-alphanumeric characters, that positions 5–6 are `00`, and only then run the ISO 7064 MOD 97-10 check. The cheap structural checks reject most bad inputs before the more expensive checksum. This layered validation is fast at ingestion scale and gives a clear reason code for each rejection.
+
+</details>
+
+<details><summary><b>91.</b> Why is the ISIN check digit alone an insufficient guarantee of data quality at ingestion?</summary>
+
+A valid check digit only proves internal consistency of the string, not that the ISIN is current, correctly mapped to your surrogate, or even issued, so you still need reference lookups and lifecycle handling on top. Relying on the check digit as your sole gate lets well-formed but nonexistent or stale ISINs through. It is a necessary first filter, not a sufficient one.
+
+</details>
+
+<details><summary><b>92.</b> In what way is FIGI's per-listing granularity useful for fund trade reconciliation?</summary>
+
+When the same fund or instrument is traded on multiple venues, FIGI gives each venue listing its own identifier, so you can reconcile executions to the exact listing rather than collapsing them under one ISIN. This preserves venue-specific price and microstructure context. Where reconciliation must distinguish venues, FIGI (with MIC) is the appropriate key.
+
+</details>
+
+<details><summary><b>93.</b> How does the principle "docs/identifiers that drift are worse than none" apply to a security master?</summary>
+
+If your ISIN-to-surrogate mappings or entity references silently go stale, downstream consumers trust wrong joins and make decisions on corrupted lineage, which is more harmful than having no mapping and knowing it. Drift creates false confidence. The mitigation is validation, reconciliation against authoritative sources like the golden copy, and explicit lifecycle handling rather than passive reuse.
+
+</details>
+
+<details><summary><b>94.</b> Why must you map a Faker-generated fund to a real LEI rather than a fake one?</summary>
+
+Using a real, GLEIF-validatable LEI exercises the actual validation and golden-copy reconciliation path, proving your entity side works against authoritative data, whereas a fabricated LEI would pass structure checks but fail any lookup. It mirrors production where fund records reference real management-company LEIs. The synthetic fund stays fake, but the entity identity is anchored to reality.
+
+</details>
+
+<details><summary><b>95.</b> What distinguishes the "who is who" question from the "who owns whom" question operationally?</summary>
+
+"Who is who" (Level 1) is answered by an entity's own reference attributes and is used for identification, naming, and KYC-style checks, while "who owns whom" (Level 2) is answered by relationship records and is used for hierarchy, consolidation, and group-risk aggregation. They are stored and queried differently. Knowing which question you are answering tells you which dataset and which joins to use.
+
+</details>
+
+<details><summary><b>96.</b> How would you design ingestion so that a late-arriving LEI (only in a delta) does not break a fund-to-LEI join?</summary>
+
+Apply golden-copy deltas before resolving fund-to-LEI joins, and if a referenced LEI is still unresolved, hold the fund record in a pending/quarantine state rather than dropping or hard-failing it. Re-resolve on the next delta load. This way a newly issued ManCo LEI that has not yet reached your baseline is recovered automatically once the delta lands.
+
+</details>
+
+<details><summary><b>97.</b> Why is it important that the internal surrogate key be opaque and carry no business meaning?</summary>
+
+An opaque surrogate has nothing to "go stale" — it never needs to change because it never encoded a fact that could change, so it remains a permanent anchor. If you embedded meaning (like an ISIN or a date) into the key, a lifecycle event would tempt you to change it, reintroducing the instability you were avoiding. Opacity is precisely what guarantees the key's stability.
+
+</details>
+
+<details><summary><b>98.</b> What single design decision most directly prevents "one instrument becoming two" after a corporate action?</summary>
+
+Keying all internal facts on a stable internal surrogate while treating the ISIN as a time-bounded attribute is the decision that prevents the split, because an ISIN change updates an attribute instead of creating a new key. Combined with an old-to-new ISIN cross-reference, it keeps one continuous instrument record. This is the core "done when" the lesson asks you to be able to explain and demonstrate.
+
+</details>
+
+<details><summary><b>99.</b> When during a new fund share class's life is its ISIN typically allocated, and why does that timing matter?</summary>
+
+An ISIN is allocated by the relevant National Numbering Agency at or before the instrument's launch, so it must exist before the share class can be distributed, traded, or reported. For your pipeline this means you may receive setup data referencing a brand-new `LU` ISIN that is genuinely valid even though it is absent from older vendor snapshots. The fix is to source ISINs from the authoritative NNA/CSD feed rather than relying solely on a possibly-stale vendor master.
+
+</details>
+
+<details><summary><b>100.</b> How does the LEI appear in SWIFT and ISO 20022 messaging, and why is that relevant to a fund data architect?</summary>
+
+ISO 20022 (MX) messages and increasingly SWIFT flows carry the LEI as the standard structured identifier for parties such as the issuer, management company, or counterparty, while instruments are carried by ISIN. As an architect you map these inbound LEIs and ISINs to your surrogate-backed master so that a message resolves cleanly to known entities and instruments. A common gotcha is a message carrying a lapsed or newly issued LEI, which you must validate against the GLEIF golden copy rather than trust blindly.
+
+</details>
+
+
+## Phase 2 · 1.12.8 SWIFT MT / MX — 100 self-test questions
+
+<details><summary><b>1.</b> What does "SWIFT" refer to in the context of fund and securities messaging?</summary>
+
+SWIFT (Society for Worldwide Interbank Financial Telecommunication) is a member-owned cooperative that operates a secure global network and defines the message standards financial institutions use to exchange instructions. In fund operations it carries transfer-agency orders, custody statements, and settlement messages between counterparties. It is both the network operator and the standards body, which is why "SWIFT message" can mean either the format or the transport.
+
+</details>
+
+<details><summary><b>2.</b> What are the two message-standard families SWIFT carries that this lesson contrasts?</summary>
+
+The two families are MT (the legacy ISO 15022 / FIN message types like `MT535`) and MX (ISO 20022 XML messages like `semt.002`). MT is the older tag-based format dating from the 1970s, while MX is the modern XML schema-based standard. The lesson focuses on reading both because they coexist for a long migration period.
+
+</details>
+
+<details><summary><b>3.</b> What does "MT" stand for and what is its underlying standard?</summary>
+
+"MT" stands for Message Type, the SWIFT FIN message format standardised under ISO 15022. Each MT is identified by a three-digit number such as `MT535`, where the format is rigidly fixed by SWIFT's standards. It is a compact, tag-delimited text format rather than XML.
+
+</details>
+
+<details><summary><b>4.</b> What does "MX" stand for and what is its underlying standard?</summary>
+
+"MX" is SWIFT's term for ISO 20022 messages carried over its network, where "X" reflects the XML syntax. Each MX message has a four-part identifier like `semt.002.001.07` (business area, message number, variant, version). MX messages are defined by XML schemas with far richer, more structured data than the equivalent MT.
+
+</details>
+
+<details><summary><b>5.</b> How many blocks make up a SWIFT MT message and what are they?</summary>
+
+An MT message has five blocks: `{1:}` basic header, `{2:}` application header, `{3:}` user header, `{4:}` text block (the actual business content), and `{5:}` trailer. The headers and trailer handle routing, type, priority, and integrity, while block 4 carries the fund-relevant fields. When hand-reading an MT, you focus almost entirely on block 4.
+
+</details>
+
+<details><summary><b>6.</b> What does block 1, the basic header, of an MT message contain?</summary>
+
+Block `{1:}` carries the application ID, service ID, the logical terminal address (the sender's BIC plus a terminal code), and the session and sequence numbers. It identifies who is sending on the network and the session context. It is infrastructure metadata, not business data, so you rarely map any of it into a fund model.
+
+</details>
+
+<details><summary><b>7.</b> What does block 2, the application header, of an MT message contain?</summary>
+
+Block `{2:}` carries the message type (e.g. `535`), the direction (input `I` or output `O`), the receiver/sender address, priority, and delivery monitoring flags. The direction matters because an input header (institution to SWIFT) and an output header (SWIFT to institution) have different layouts. This block tells you which MT you are about to parse.
+
+</details>
+
+<details><summary><b>8.</b> What is block 3 (the user header) of an MT message used for?</summary>
+
+Block `{3:}` is the optional user header carrying reference fields such as the message user reference (`108:`) and, importantly, the field `119:` service identifier that can flag ISO 20022 coexistence or specific service flavours. It is where end-to-end references and routing hints live. Not every MT includes a block 3.
+
+</details>
+
+<details><summary><b>9.</b> What lives in block 4, the text block, of an MT message?</summary>
+
+Block `{4:}` holds the actual business message — the tagged fields that carry account, instrument, quantity, price, and date information. For an `MT535` this is where the holdings sub-balances and instrument identifiers sit. This is the block you hand-translate into your model field by field.
+
+</details>
+
+<details><summary><b>10.</b> What is block 5, the trailer, of an MT message for?</summary>
+
+Block `{5:}` is the trailer carrying integrity and control information such as the message authentication code (`MAC:`) and checksum (`CHK:`), plus flags like `PDE:` for possible duplicate emission. It protects and de-duplicates the message in transit. You do not map trailer content into a data model; it is transport assurance.
+
+</details>
+
+<details><summary><b>11.</b> What is the structure of a field tag inside an MT block 4, expressed as `:nna:`?</summary>
+
+A block-4 field tag has the form `:nna:` where `nn` is a two-digit number identifying the field and `a` is an optional single letter (the qualifier/option) such as `A`, `B`, or `F`. For example `:35B:` carries an instrument identifier and `:93B:` carries a balance. The optional letter selects which variant of a multi-format field is being used.
+
+</details>
+
+<details><summary><b>12.</b> In an `MT535`, what does the field `:35B:` typically carry?</summary>
+
+Field `:35B:` carries the identification of the financial instrument — commonly an ISIN line followed by a free-text description, e.g. `ISIN LU0123456789` then the security name. It is the anchor for joining the holdings line to your instrument reference data. Because the description is free text, only the ISIN portion is reliably machine-usable.
+
+</details>
+
+<details><summary><b>13.</b> In an `MT535`, what does a `:93B:` or `:93C:` field represent?</summary>
+
+The `:93x:` fields carry balance quantities — `:93B:` for an aggregate/sub-balance quantity and `:93C:` for a supplementary balance, expressed as a face amount or units with a quantity-type qualifier. They are the actual holding figures you translate into a position quantity. The qualifier (e.g. `AGGR` for aggregate) tells you which balance type the number represents.
+
+</details>
+
+<details><summary><b>14.</b> What is the SWIFT message category numbered 5, and why does it matter here?</summary>
+
+Category 5 is Securities Markets — all MT5xx messages cover securities trades, settlement, corporate actions, and reporting. The fund-relevant set in this lesson (`MT502`, `MT509`, `MT515`, `MT535`, `MT536`) all live in category 5. Knowing the category narrows down what an unfamiliar MT number is likely about.
+
+</details>
+
+<details><summary><b>15.</b> What is an `MT502` and where does it appear in fund operations?</summary>
+
+`MT502` is "Order to Buy or Sell", used to instruct a securities or fund order between parties such as a distributor and a transfer agent. In a funds context (e.g. order routing through Vestima) it conveys a subscription or redemption order. It is one of the order-side messages, distinct from the statement messages.
+
+</details>
+
+<details><summary><b>16.</b> What is an `MT509` and what does it report?</summary>
+
+`MT509` is the "Trade Status Message", used to report the status of a previously sent order or instruction — for example acknowledged, matched, rejected, or settled. In fund order routing it tells the originator how their `MT502` is progressing. It is a status/lifecycle message rather than a data-bearing statement.
+
+</details>
+
+<details><summary><b>17.</b> What is an `MT515` and what does it confirm?</summary>
+
+`MT515` is the "Client Confirmation of Purchase or Sale", confirming the executed terms of a trade or fund deal back to the client. In funds it confirms a subscription or redemption — units, price, and amount as executed. It closes the order loop that `MT502` opened.
+
+</details>
+
+<details><summary><b>18.</b> What is an `MT535` and what business event does it report?</summary>
+
+`MT535` is the "Statement of Holdings", a custody/position report listing the securities held in an account at a point in time. It carries one or more holding lines, each with an instrument identifier and balance quantities. It is a snapshot, not a transaction feed, so it tells you positions but not how they changed.
+
+</details>
+
+<details><summary><b>19.</b> What is an `MT536` and how does it differ from `MT535`?</summary>
+
+`MT536` is the "Statement of Transactions", listing the movements (postings) on a securities account over a period. Where `MT535` gives you a balance snapshot, `MT536` gives you the flow of transactions that produced changes. You typically reconcile the two: opening holdings plus transactions should equal closing holdings.
+
+</details>
+
+<details><summary><b>20.</b> Why does the lesson say MT messages "still flow through fund operations" despite ISO 20022 existing?</summary>
+
+Because the migration from MT to MX is a long, staged coexistence — counterparties, CSDs, and transfer agents upgrade on different timelines, so legacy MT traffic persists for years. Custody and transfer-agency chains include parties who have not yet moved to MX. An architect must read both worlds during this period rather than assuming everything is ISO 20022.
+
+</details>
+
+<details><summary><b>21.</b> What does it mean that an `MT535` maps "lossily" onto a richer data model?</summary>
+
+It means the MT format carries fewer or coarser fields than your model can hold, so translating MT-to-model loses precision or context, and translating model-to-MT would drop attributes. For example free-text instrument descriptions and fixed sub-balance qualifiers cannot capture every nuance your model represents. Knowing where the loss is prevents silent data gaps at the boundary.
+
+</details>
+
+<details><summary><b>22.</b> Why is identifying lossy fields a deliverable an architect specifically owns?</summary>
+
+Because lossiness at a format boundary is where silent data corruption or omission happens, and the architect is the one who understands both the source format and the target model. Documenting which MT fields under-carry (or over-constrain) versus the model lets downstream teams know what cannot be trusted from MT alone. It is a governance and data-quality safeguard, not a coding detail.
+
+</details>
+
+<details><summary><b>23.</b> What is ISO 20022 at its core, beyond "the standard MX uses"?</summary>
+
+ISO 20022 is a methodology and a central repository of standardised financial business concepts and message definitions, expressed in XML (and increasingly other syntaxes). It separates business meaning from physical format, so the same concept (e.g. a balance) is defined once and reused across messages. SWIFT's "MX" is simply ISO 20022 messages transported over SWIFT.
+
+</details>
+
+<details><summary><b>24.</b> How is a full ISO 20022 message identifier such as `semt.002.001.07` structured?</summary>
+
+It has four dot-separated parts: business area (`semt` = securities management), message number (`002`), variant (`001`), and version (`07`). So `semt.002.001.07` is version 7 of the securities balance custody report. The version number increments as the standard is maintained, which matters when matching a sample to its schema.
+
+</details>
+
+<details><summary><b>25.</b> What does the business-area prefix `semt` indicate in an ISO 20022 message name?</summary>
+
+`semt` stands for Securities Management, the business area covering custody statements and reporting messages — for example `semt.002` (balance custody report) and `semt.017` (transaction posting report). The prefix lets you guess a message's domain before reading it. Other securities prefixes include `sese` (settlement) and `setr` (trade/order).
+
+</details>
+
+<details><summary><b>26.</b> What does the business-area prefix `setr` indicate, and why is it fund-relevant?</summary>
+
+`setr` stands for Securities Trade, the area covering fund order and confirmation messages such as `setr.010` (subscription order) and `setr.012` (subscription order confirmation). It is the MX home of the fund-order lifecycle that MT carried via `MT502`/`MT515`. Transfer-agency order routing migrates into `setr` messages.
+
+</details>
+
+<details><summary><b>27.</b> Which ISO 20022 (MX) message replaces the `MT535` Statement of Holdings?</summary>
+
+`MT535` maps to `semt.002` (SecuritiesBalanceCustodyReport), with `semt.003` (SecuritiesBalanceAccountingReport) as the accounting-basis equivalent. So the holdings snapshot becomes a `semt.002.001.xx` XML message. This is the specific mapping the lesson's "Do" step asks you to identify.
+
+</details>
+
+<details><summary><b>28.</b> What is the full name of the `semt.002` message that replaces `MT535`?</summary>
+
+`semt.002` is the SecuritiesBalanceCustodyReport — it reports the securities balances held in custody for a safekeeping account. It is the ISO 20022 counterpart of the `MT535` Statement of Holdings on a custody basis. The parallel `semt.003` SecuritiesBalanceAccountingReport gives the accounting view of the same positions.
+
+</details>
+
+<details><summary><b>29.</b> Which MX message replaces the `MT536` Statement of Transactions?</summary>
+
+`MT536` maps to `semt.017`, the SecuritiesTransactionPostingReport, which lists the postings/movements on a securities account. It is the transaction-flow counterpart to the `semt.002`/`semt.003` balance snapshots. CSDs have been enriching `semt.017` beyond what `MT536` could carry, illustrating the richer-model point.
+
+</details>
+
+<details><summary><b>30.</b> Which MX messages correspond to the `MT502` order in a funds context?</summary>
+
+For fund orders, `MT502` maps to `setr` order messages — `setr.010` for a subscription order and `setr.004` for a redemption order, depending on the order type. The single `MT502` splits into purpose-specific MX messages. This split is itself an example of MX being more explicit than the multipurpose MT.
+
+</details>
+
+<details><summary><b>31.</b> Which MX messages correspond to the `MT515` client confirmation in funds?</summary>
+
+`MT515` maps to `setr.012` (SubscriptionOrderConfirmation) for subscriptions and `setr.006` (RedemptionOrderConfirmation) for redemptions. As with `MT502`, the one MT confirmation message becomes two MX messages distinguished by order direction. The confirmation closes the loop opened by the matching order message.
+
+</details>
+
+<details><summary><b>32.</b> Which MX message corresponds to the `MT509` trade status message?</summary>
+
+`MT509` maps to `setr.016` (OrderInstructionStatusReport) in the funds order context, conveying the status of a previously sent order. It is the MX status/lifecycle report. As with the others, the precise mapping depends on whether you are in the funds order domain or the general settlement domain.
+
+</details>
+
+<details><summary><b>33.</b> Why does one MT message often map to several MX messages rather than one-to-one?</summary>
+
+Because MT messages are frequently multipurpose, distinguishing intent only through internal qualifiers, while ISO 20022 defines a separate, explicitly named message per business purpose. So `MT502` (order to buy or sell) splits into distinct subscription and redemption order messages. The mapping is therefore many-to-many and intent-dependent, not a simple rename.
+
+</details>
+
+<details><summary><b>34.</b> Where is the authoritative catalogue of ISO 20022 message definitions to confirm a mapping?</summary>
+
+The authoritative source is the ISO 20022 message-definitions catalogue at `iso20022.org/iso-20022-message-definitions`, which lists every registered MX message with its identifier, name, and schema. SWIFT's standards landing at `swift.com/standards` covers the MT (category 5) and MX coexistence side. You consult these rather than guessing a mapping, since versions and equivalences change.
+
+</details>
+
+<details><summary><b>35.</b> What does "MX coexistence" mean operationally during the migration?</summary>
+
+Coexistence means MT and MX messages run in parallel on the network for the same business flows, with some counterparties on MT and others on MX, often bridged by translation. Institutions must be able to send, receive, and translate both for years. The practical consequence is that your boundary code and reconciliation must handle either format.
+
+</details>
+
+<details><summary><b>36.</b> What is "translation" in the MT/MX coexistence context, and what is its risk?</summary>
+
+Translation is the automated conversion between an MT message and its MX equivalent (or vice versa) so a counterparty on the other format can still process the flow. Its main risk is lossiness: MX-to-MT translation can drop the richer fields MT cannot hold, truncating data. Round-tripping is therefore not guaranteed to be reversible, which is exactly the boundary hazard this lesson warns about.
+
+</details>
+
+<details><summary><b>37.</b> When an `MT535` is received instead of an MX `semt.002`, what should an architect immediately suspect about the data?</summary>
+
+That you are getting the lower-fidelity view — the MT carries coarser identifiers (often just ISIN plus free text), fixed sub-balance qualifiers, and fewer structured attributes than `semt.002` would. The first thing to check is which holding attributes your model needs that the MT simply cannot supply. Those become known gaps to source elsewhere or flag as unavailable.
+
+</details>
+
+<details><summary><b>38.</b> What does "SWIFT network membership" mean operationally for an institution?</summary>
+
+Membership means the institution is registered with SWIFT, holds a BIC, connects to the SWIFTNet network (typically via an interface like Alliance Access or a service bureau), and can send/receive FIN (MT) and InterAct/FileAct (MX) traffic. It implies bound obligations around security (CSP), reachability, and standards compliance. Without membership and a BIC, a party cannot originate SWIFT traffic directly.
+
+</details>
+
+<details><summary><b>39.</b> What is a BIC and how does it relate to SWIFT membership?</summary>
+
+A BIC (Business Identifier Code, ISO 9362) is the 8- or 11-character code identifying a financial institution on the SWIFT network, e.g. the first 4 characters are the institution code. It is how messages are addressed to and from a member. A BIC in an MT header's logical terminal address tells you which institution sent or received the message.
+
+</details>
+
+<details><summary><b>40.</b> How does a BIC differ from an LEI, both of which can appear in fund data?</summary>
+
+A BIC (ISO 9362) is a SWIFT-network addressing/identification code, while an LEI (ISO 17442) is a 20-character global legal-entity identifier used for regulatory reporting. A BIC routes a message; an LEI identifies the legal entity for transparency regimes. ISO 20022 messages increasingly carry LEIs as structured fields, whereas legacy MT rarely did, which is another lossy-boundary example.
+
+</details>
+
+<details><summary><b>41.</b> Why can an MX `semt.002` carry an LEI cleanly where an `MT535` typically cannot?</summary>
+
+Because ISO 20022 defines structured party-identification elements with a dedicated LEI field, whereas the older MT format has no standard tag for an LEI and would at best cram it into free text. So entity identity that is machine-readable in MX is often missing or unreliable in MT. This is a concrete instance of the MT-to-model translation losing regulatory-grade identifiers.
+
+</details>
+
+<details><summary><b>42.</b> In a transfer-agency flow, which MT messages typically carry the subscription/redemption order lifecycle?</summary>
+
+The order is sent as an `MT502` (order to buy or sell), its status is reported via `MT509` (trade status), and the executed deal is confirmed with `MT515` (client confirmation). Together they form the order-to-confirmation lifecycle between distributor and transfer agent. Their MX successors are the `setr.*` funds messages.
+
+</details>
+
+<details><summary><b>43.</b> A Luxembourg transfer agent sends you positions only as `MT535` — what is the first data-quality concern?</summary>
+
+That instrument identity beyond the ISIN may be unreliable: `:35B:` gives ISIN plus free text, so sub-fund or share-class nuance and richer instrument attributes are not structured. The first check is whether the ISIN alone resolves uniquely to the share class you need, since Luxembourg umbrella funds have many share classes per umbrella. If not, you need a richer source than the MT.
+
+</details>
+
+<details><summary><b>44.</b> Why is the ISIN inside an `MT535` `:35B:` field the most load-bearing token to extract?</summary>
+
+Because the ISIN (ISO 6166) is the only reliably structured, globally unique instrument key in that field — the accompanying description is free text and not machine-trustworthy. You join holdings lines to your instrument reference data on the ISIN. Getting the ISIN parse right is the difference between correctly resolved positions and orphaned holding lines.
+
+</details>
+
+<details><summary><b>45.</b> When hand-translating an `MT535` to your model "field by field", what is a sensible first step?</summary>
+
+Open the SWIFT category-5 specification for `MT535` alongside a sample, then walk block 4 tag by tag, recording for each `:nn x:` field what it means and which model attribute it feeds. You note the account (`:97a:`), instrument (`:35B:`), and balances (`:93x:`) first because they are the spine of a position. Doing it with the spec open is the point — you do not memorise tags, you read them.
+
+</details>
+
+<details><summary><b>46.</b> What does the field `:97a:` (e.g. `:97A:`) typically carry in a securities MT statement?</summary>
+
+The `:97a:` field carries the account identification — the safekeeping or securities account the statement pertains to. The option letter (e.g. `A`) selects the account format. It is the key you use to attribute the whole statement (and its holding lines) to the correct account in your model.
+
+</details>
+
+<details><summary><b>47.</b> In MT block 4, what do the colon-delimited qualifiers like `:22F::SFRE//DAIL` mean?</summary>
+
+This is a generic field where `22F` is the field number, `SFRE` is the qualifier identifying the data element (here statement frequency), and `DAIL` is the coded value (daily). ISO 15022 uses this qualifier//value pattern heavily so one field number can carry many distinct data elements. You read the qualifier to know what the value actually represents.
+
+</details>
+
+<details><summary><b>48.</b> Why does the lesson frame the architect as "the one who explains which MX message replaces each MT"?</summary>
+
+Because mapping decisions drive integration design — whether to ingest MT, MX, or both, and where to translate — and only someone who understands both formats and the business flow can make that call. Downstream teams rely on the architect to say "this `MT535` becomes `semt.002`, here is what changes". It is an architecture and governance responsibility, not a clerical lookup.
+
+</details>
+
+<details><summary><b>49.</b> What is the practical difference between reading an MT and an MX when you have the spec open?</summary>
+
+For an MT you parse fixed tag positions and decode terse qualifiers against the category-5 standard; for an MX you read self-describing XML elements against an XSD schema. MX is more verbose but more self-explanatory, while MT is compact but requires the qualifier dictionary. The lesson's "Done when" is being able to read either with its spec open.
+
+</details>
+
+<details><summary><b>50.</b> What is the file-type difference between how MT and MX are typically transported on SWIFT?</summary>
+
+MT messages travel as FIN store-and-forward messages over SWIFTNet FIN, while MX (ISO 20022) messages travel as XML over SWIFTNet InterAct (real-time/message) or FileAct (bulk file) services. So the transport service, not just the syntax, differs between the two. This matters when you set up connectivity, because MX bulk reporting often arrives via FileAct.
+
+</details>
+
+<details><summary><b>51.</b> Why is an `MT535` called a "snapshot" and what reconciliation does that imply?</summary>
+
+It reports balances as of a stated date/time, so it is a point-in-time position list with no inherent history of movements. To validate it you reconcile opening holdings plus the `MT536` transactions against the new `MT535` closing holdings. A snapshot alone cannot explain a change; you need the transaction statement for that.
+
+</details>
+
+<details><summary><b>52.</b> If your model needs trade-level provenance but you only receive `MT535`, what is the gap?</summary>
+
+`MT535` gives you positions, not the transactions that created them, so trade-level provenance (when, how, at what price each lot was acquired) is absent. You would need `MT536` (transactions) or the underlying order/confirmation messages. Recognising that the holdings statement cannot answer provenance questions is part of knowing the format's limits.
+
+</details>
+
+<details><summary><b>53.</b> What does it mean that ISO 20022 is "syntax-flexible" while MX over SWIFT is XML?</summary>
+
+ISO 20022 defines messages at a logical model level that can be rendered in different physical syntaxes; SWIFT's MX implementation renders them as XML. So the same `semt.002` logical message could in principle be serialised differently elsewhere, but on SWIFT it is XML. This separation of model from syntax is a core ISO 20022 design principle.
+
+</details>
+
+<details><summary><b>54.</b> Why might an `MT502` (single order message) be harder to map than a statement message?</summary>
+
+Because `MT502` is multipurpose — it can be a subscription, redemption, buy, or sell distinguished by internal qualifiers — so it does not map to one MX message but to several `setr.*` messages by intent. You must read the qualifiers to decide the correct MX target. Statement messages like `MT535` are more single-purpose and map more directly.
+
+</details>
+
+<details><summary><b>55.</b> What is the role of the `:16R:`/`:16S:` fields in an MT securities message?</summary>
+
+`:16R:` (start of block) and `:16S:` (end of block) delimit logical sequences within the message, e.g. a general information sequence then a financial-instrument sub-balance sequence. They give MT a nested, repeating structure despite being flat text. When parsing `MT535`, you use these markers to know which holding line a given `:35B:`/`:93x:` belongs to.
+
+</details>
+
+<details><summary><b>56.</b> How does ISO 20022's nesting compare to MT's `:16R:`/`:16S:` sequences?</summary>
+
+ISO 20022 expresses nesting natively through XML element hierarchy, so a holding and its sub-balances are parent/child elements. MT simulates the same nesting with `:16R:`/`:16S:` block markers around flat tagged lines. The MX version is therefore easier to parse with standard XML tooling, while MT needs sequence-aware parsing.
+
+</details>
+
+<details><summary><b>57.</b> A counterparty insists they sent an `MT535` but your parser sees `{2:O535...}` — what does the `O` confirm?</summary>
+
+The `O` in `{2:O535...}` confirms it is an output application header — the message as delivered by SWIFT to the receiver — and `535` confirms the message type. So both the direction and the type are validated from block 2. If you expected an input message or a different type, this is where the mismatch shows up first.
+
+</details>
+
+<details><summary><b>58.</b> Why is "knowing which MX replaces which MT" described as preventing "silent data loss at the boundary"?</summary>
+
+Because if you ingest MT and treat it as equivalent to the richer MX without noting the lost fields, downstream consumers assume completeness that is not there. The loss is silent — no error is raised, the data is just thinner. Documenting the mapping and its lossy fields turns a silent gap into a known, managed limitation.
+
+</details>
+
+<details><summary><b>59.</b> What is the relationship between ISO 15022 and ISO 20022 for securities messages?</summary>
+
+ISO 15022 is the standard behind the legacy MT securities messages, and ISO 20022 is its successor with a central data dictionary and XML syntax. The securities community maintains equivalence tables between the two (e.g. `MT535` ↔ `semt.002`). The migration is essentially moving securities flows from ISO 15022 to ISO 20022.
+
+</details>
+
+<details><summary><b>60.</b> Why does SWIFT publish an equivalence table between ISO 15022 and ISO 20022 securities messages?</summary>
+
+To guide institutions through coexistence by showing, message by message, which MX corresponds to each MT and where the data models differ. It is the authoritative basis for translation engines and for architects deciding mappings. You consult it rather than inferring equivalence, because some MTs split into multiple MX messages or have no direct equivalent.
+
+</details>
+
+<details><summary><b>61.</b> In an MT, what is the significance of field `:20C:` with a qualifier like `SEME`?</summary>
+
+`:20C:` is a reference field; with the `SEME` qualifier it carries the sender's message reference, a unique ID for that message. References like `SEME` let you correlate a message with its acknowledgements and statuses (e.g. an `MT509` referring back to an `MT502`). Capturing them is essential for lifecycle reconciliation across the order chain.
+
+</details>
+
+<details><summary><b>62.</b> How would you approach obtaining a sample `MT535` if you cannot get real production data?</summary>
+
+Use the documented field layout from the SWIFT category-5 standard or a published user handbook, which gives the exact tags and qualifiers, and construct or study a sample message from it. The "Do" step explicitly allows a documented field layout instead of live data. Working from the spec is actually preferable for learning because every field is annotated.
+
+</details>
+
+<details><summary><b>63.</b> Why is free text in an MT `:35B:` description considered untrustworthy for joins?</summary>
+
+Because it is unstructured and inconsistently formatted across senders — abbreviations, languages, and ordering vary — so string-matching on it is unreliable. Only the structured ISIN portion is a dependable join key. Treating the description as a display hint rather than a key avoids mismatched or duplicated instrument joins.
+
+</details>
+
+<details><summary><b>64.</b> What MX business area would you look in to find the replacement for a custody holdings statement?</summary>
+
+The `semt` (securities management) business area, which contains balance and transaction reporting messages including `semt.002` (custody balance report) and `semt.017` (transaction posting report). Knowing the prefix narrows the catalogue search immediately. For order-side messages you would instead look in `setr`.
+
+</details>
+
+<details><summary><b>65.</b> What does it mean that MX messages are "schema-validated" and why does it help at the boundary?</summary>
+
+MX XML messages are validated against an XSD schema that constrains structure, data types, and code lists, so malformed or out-of-range data is rejected at parse time. This gives stronger up-front guarantees than MT, where validation rules live in the standard but are not enforced by a schema. At a data boundary, schema validation catches errors MT would let through silently.
+
+</details>
+
+<details><summary><b>66.</b> A NAV-supporting position load fails because an `MT535` holding line has no `:35B:` ISIN — what is the likely cause and fix?</summary>
+
+The likely cause is a holding identified by a non-ISIN scheme (e.g. an internal code) or a `:35B:` carrying only free text, so your ISIN-keyed join finds nothing. The fix is to handle the alternative identifier (or flag the line for manual mapping) rather than dropping it, since a missing position would understate or misstate the NAV inputs. Never silently discard an unparseable holding line in a NAV chain.
+
+</details>
+
+<details><summary><b>67.</b> Why must an architect be careful that MT-to-MX translation does not become the system of record?</summary>
+
+Because a translated message is a lossy derivative — translating MX-to-MT and back can drop fields — so trusting the translated copy as authoritative bakes in data loss. Wherever possible the richer-format original (usually MX) should be the source of truth, with translation used only for reachability. Treating a downgraded copy as canonical undermines lineage and regulatory traceability.
+
+</details>
+
+<details><summary><b>68.</b> How does the coexistence period affect your ingestion architecture design?</summary>
+
+It forces you to support both MT and MX inputs for the same business flows, normalising them into a single internal model while recording which format each record came from. You design a format-agnostic target model and per-format adapters. Recording the source format is essential because the MT-sourced records carry known gaps the MX-sourced ones do not.
+
+</details>
+
+<details><summary><b>69.</b> What is SWIFTNet FIN and how does it relate to MT messages?</summary>
+
+SWIFTNet FIN is the store-and-forward messaging service that carries the traditional MT (FIN) messages over the SWIFT network. Each MT is a discrete FIN message routed by BIC. MX messages by contrast use SWIFTNet InterAct and FileAct rather than FIN, which is why the migration is sometimes described as moving traffic off FIN.
+
+</details>
+
+<details><summary><b>70.</b> Why might a fund administrator receive holdings as `MT535` from a custodian but send orders as `MT502`?</summary>
+
+Because the two sit in different relationships and message families: the custodian reports positions back via the statement message `MT535`, while the administrator instructs the transfer agent or broker via the order message `MT502`. Reporting and instructing are distinct flows with distinct MTs. They migrate to `semt` (reporting) and `setr` (orders) respectively in MX.
+
+</details>
+
+<details><summary><b>71.</b> What does the `:93B::AGGR//UNIT/1000,` style value in an `MT535` convey?</summary>
+
+It is a balance field where `AGGR` qualifies it as the aggregate balance, `UNIT` says the quantity is expressed in units (not face amount), and `1000,` is the quantity. So this line holds an aggregate position of 1000 units. Reading the quantity-type qualifier is essential because the same number means different things for units versus nominal/face amounts.
+
+</details>
+
+<details><summary><b>72.</b> For a fund holding expressed as a nominal/face amount rather than units, how does the `MT535` signal that?</summary>
+
+The `:93x:` balance field carries a quantity-type qualifier such as `FAMT` (face amount) instead of `UNIT`, telling you the figure is a nominal amount in the instrument's currency rather than a count of shares. Misreading `FAMT` as units would grossly misstate the position. The qualifier, not the number, tells you the unit of measure.
+
+</details>
+
+<details><summary><b>73.</b> Why is it risky to assume every securities `MT5xx` message has a single clean MX replacement?</summary>
+
+Because some MTs split into several MX messages by purpose, some MX messages consolidate concepts from multiple MTs, and a few MTs have no direct ISO 20022 equivalent yet. The mapping is genuinely many-to-many. Assuming one-to-one leads to mis-routing or to inventing equivalences that do not exist — hence the rule to verify against the catalogue.
+
+</details>
+
+<details><summary><b>74.</b> What is the difference between `semt.002` and `semt.003`, both linked to `MT535`?</summary>
+
+`semt.002` is the SecuritiesBalanceCustodyReport (custody basis — what is held in safekeeping), while `semt.003` is the SecuritiesBalanceAccountingReport (accounting basis — the booked position). `MT535` can correspond to either depending on whether the statement is a custody or accounting view. You pick the MX target based on which view the original report represented.
+
+</details>
+
+<details><summary><b>75.</b> When validating an MX `semt.002` you fetched, why does the version suffix like `.07` matter?</summary>
+
+Because the schema (XSD), code lists, and available fields differ between versions, so `semt.002.001.07` validates against a different schema than `semt.002.001.04`. Parsing or validating against the wrong version produces spurious errors or missed fields. You match the message instance's declared version to the corresponding schema from the catalogue.
+
+</details>
+
+<details><summary><b>76.</b> How would you confirm the current MX equivalent of `MT535` rather than relying on memory?</summary>
+
+Look it up in the ISO 20022 message-definitions catalogue at `iso20022.org/iso-20022-message-definitions` and cross-check SWIFT's standards equivalence material at `swift.com/standards`. These are the authoritative, maintained sources. The lesson explicitly warns not to guess mappings, because equivalences and versions are maintained over time.
+
+</details>
+
+<details><summary><b>77.</b> Why is the `MT536` transaction statement important for reconciliation in a fund accounting context?</summary>
+
+Because NAV and position accuracy depend on explaining every movement, and `MT536` is the message that itemises securities account postings over the period. Reconciling `MT536` flows against successive `MT535` snapshots validates that no movement was missed. Its MX successor `semt.017` carries the same flow with richer structure.
+
+</details>
+
+<details><summary><b>78.</b> What does "richer model" mean when comparing your data model to an incoming MT?</summary>
+
+It means your internal model can represent more attributes, finer granularity, or stronger identifiers (like LEIs and structured share-class identity) than the MT format provides. The MT therefore under-fills your model, leaving attributes null that you must source elsewhere or mark unavailable. The mismatch is structural, not a parsing bug.
+
+</details>
+
+<details><summary><b>79.</b> If an MX `semt.002` carries a structured place-of-safekeeping that `MT535` lacked, how does that change your model?</summary>
+
+It means migrating to MX lets you populate a previously empty or free-text attribute with a structured, validated value, improving lineage and reporting. You would design the model to accept the structured field now and backfill or flag MT-sourced records that lack it. It is an example of MX enabling data you simply could not get cleanly from MT.
+
+</details>
+
+<details><summary><b>80.</b> What operational obligation does SWIFT membership impose around security?</summary>
+
+Members must comply with SWIFT's Customer Security Programme (CSP) and attest to its Customer Security Controls Framework annually. This is a precondition for staying connected, not optional. So membership is an ongoing security-compliance commitment, which is part of what "network membership means operationally".
+
+</details>
+
+<details><summary><b>81.</b> Why does a service bureau matter to a smaller fund administrator's SWIFT connectivity?</summary>
+
+A service bureau is a third party that provides SWIFTNet connectivity and message handling on behalf of institutions that do not want to run their own SWIFT interface. It lets a smaller administrator send/receive MT and MX without operating Alliance infrastructure directly. Operationally it changes who holds the connection but not the message standards in play.
+
+</details>
+
+<details><summary><b>82.</b> In the order lifecycle, how do `MT502`, `MT509`, and `MT515` reference each other?</summary>
+
+They are correlated by reference fields — the original order (`MT502`) carries a sender's reference (e.g. `:20C::SEME`), and the status (`MT509`) and confirmation (`MT515`) carry related-reference qualifiers pointing back to it. This lets you stitch the lifecycle from order to status to confirmation. Capturing those references is what makes cross-message reconciliation possible.
+
+</details>
+
+<details><summary><b>83.</b> Why might an EMT or downstream regulatory file need richer identity than an `MT535` can supply?</summary>
+
+Because regulatory outputs increasingly require structured legal-entity identifiers (LEI) and precise share-class identification that the MT format cannot carry cleanly, only free text or ISIN. So an `MT535`-sourced position may lack fields a regulatory file demands. You then source those identifiers from reference data or from the MX message, not the MT.
+
+</details>
+
+<details><summary><b>84.</b> What is the danger of mapping an MT free-text field directly into a structured model column?</summary>
+
+You import unvalidated, inconsistent text into a field that downstream systems treat as structured and trustworthy, propagating noise (typos, varied formats, language differences). Consumers then make decisions on unreliable data without knowing it is free text. The safer pattern is to parse out the structured token (e.g. ISIN) and keep the rest as a clearly-labelled description.
+
+</details>
+
+<details><summary><b>85.</b> How does the existence of `:16R:`/`:16S:` repeating sequences affect a naive line-by-line MT parser?</summary>
+
+A naive parser that reads tags sequentially without tracking the open `:16R:` block will mis-associate fields — e.g. attach a `:93B:` balance to the wrong holding or the wrong sub-balance. You must maintain block context as you parse. Ignoring the sequence markers is a classic source of wrongly attributed positions in `MT535` parsing.
+
+</details>
+
+<details><summary><b>86.</b> When you "note the lossy fields" in an `MT535`-to-model translation, what kinds of loss should you list?</summary>
+
+List fields your model has that the MT cannot fill (e.g. LEI, structured place of safekeeping, granular share-class identity), fields the MT carries only as free text (the `:35B:` description), and any coarse qualifiers that collapse distinctions your model keeps separate. Each entry says what is missing or degraded and why. That list is the deliverable the "Done when" criterion asks for.
+
+</details>
+
+<details><summary><b>87.</b> Why is `MT535` likely to under-represent a Luxembourg umbrella fund's share-class detail?</summary>
+
+Because the holding line identifies the instrument mainly by ISIN plus free text, and while each share class has its own ISIN, any sub-fund/umbrella relationship or class-feature nuance is not carried structurally. Your model may need the umbrella, sub-fund, and class hierarchy that the MT does not express. You resolve that hierarchy from reference data keyed on the ISIN.
+
+</details>
+
+<details><summary><b>88.</b> What is the first thing to check if an MX `semt.002` XML message fails schema validation on ingest?</summary>
+
+Confirm you are validating against the exact declared version's XSD (e.g. the `.07` schema for a `semt.002.001.07` instance), since a version mismatch is the most common cause of spurious validation failures. Then check namespace declarations and code-list values. Only after ruling out a schema/version mismatch do you suspect genuinely malformed content.
+
+</details>
+
+<details><summary><b>89.</b> Why does the lesson place SWIFT MT/MX at the boundary of fund operations rather than at the core?</summary>
+
+Because MT/MX are interchange formats used to exchange data with custodians, transfer agents, and counterparties, not the internal model where you do your modelling. They arrive and leave at the integration boundary, where translation and lossiness happen. The architect's job is to translate them faithfully into the richer internal model and back.
+
+</details>
+
+<details><summary><b>90.</b> How do you decide whether to ingest the MT or the MX version when both are available for a flow?</summary>
+
+Prefer the MX version because it is richer, schema-validated, and carries structured identifiers (LEI, granular party data) the MT lacks, reducing downstream gaps. Ingest MT only when a counterparty cannot yet send MX. Recording which you used preserves lineage about data fidelity for each record.
+
+</details>
+
+<details><summary><b>91.</b> What does it mean operationally that MX uses InterAct versus FileAct?</summary>
+
+InterAct carries individual ISO 20022 messages, suited to real-time, message-by-message exchange, while FileAct carries files (often bulk batches of messages), suited to large reporting deliveries. A custodian might push a bulk overnight holdings file via FileAct. Knowing which service a flow uses shapes how you schedule and ingest it.
+
+</details>
+
+<details><summary><b>92.</b> Why is it wrong to assume a `MT509` (trade status) carries position or holdings data?</summary>
+
+Because `MT509` is purely a status/lifecycle message reporting the state of a referenced order or instruction — accepted, rejected, matched — not balances or transactions. Looking to it for positions would yield nothing useful. Holdings come from `MT535` and movements from `MT536`; statuses come from `MT509`.
+
+</details>
+
+<details><summary><b>93.</b> In coexistence, how can the same business event arrive twice in different formats, and what must you guard against?</summary>
+
+A counterparty mid-migration (or a translation gateway) might emit both an MT and its MX equivalent for the same event, risking double-counting if you ingest both as distinct. You guard against it by de-duplicating on business references and recording format provenance. Treating the MT and MX of one event as two events would corrupt positions and reconciliations.
+
+</details>
+
+<details><summary><b>94.</b> What is the safest assumption about field completeness when reading any MT versus its MX successor?</summary>
+
+Assume the MT is the lower bound on available data — anything richer than its fixed tag set is unavailable from it, so attributes present in the MX successor may be absent in the MT. Verify each needed field against the MT's actual tags with the spec open. This conservative stance prevents you from assuming data that the format never carried.
+
+</details>
+
+<details><summary><b>95.</b> Why is being able to "read an MT message with the spec open" the realistic competency target rather than memorising tags?</summary>
+
+Because the securities MT standard has hundreds of fields, options, and qualifiers that change across yearly standards releases, so memorisation is neither feasible nor durable. The durable skill is navigating the category-5 specification to decode any tag and knowing where each maps in your model. The "Done when" criterion deliberately allows the spec to be open.
+
+</details>
+
+<details><summary><b>96.</b> What does the SWIFT category-5 (securities) standards landing at `swift.com/standards` give you that a third-party blog cannot?</summary>
+
+It is the primary, authoritative source for the MT message reference (exact tags, options, and qualifiers for `MT535`, `MT536`, etc.) and the official MT/MX coexistence guidance. Third-party summaries can be stale or wrong on a field option or a mapping, whereas the standard is maintained per yearly release. The lesson directs you there precisely so you verify rather than trust secondhand descriptions.
+
+</details>
+
+<details><summary><b>97.</b> Why might a yearly SWIFT Standards Release force you to revisit your MT parsing or MT-to-MX mapping?</summary>
+
+SWIFT publishes annual Standards Releases that can add, change, or retire fields, qualifiers, and even whole messages, and ISO 20022 maintenance can shift equivalences or bump versions. A parser hard-coded to one release can silently mis-read a changed field after the cutover. You therefore re-check the category-5 spec and the ISO 20022 catalogue around each release rather than assuming last year's layout holds.
+
+</details>
+
+<details><summary><b>98.</b> How does an `MT536` (or its `semt.017` successor) help explain a NAV movement that an `MT535` snapshot alone cannot?</summary>
+
+NAV moves when positions change, and `MT536`/`semt.017` itemise the postings — buys, sells, corporate-action bookings — that produced those changes, whereas the `MT535` snapshot only shows the resulting balance. To attribute a NAV change you reconcile the prior holdings, the period's transactions, and the new holdings. The transaction report is the audit trail; the holdings statement is just the endpoint.
+
+</details>
+
+<details><summary><b>99.</b> If a counterparty sends a translated `MT535` derived from an original `semt.002`, what should you ask before trusting it?</summary>
+
+Ask whether the richer `semt.002` original is also available, because the `MT535` is a downgraded translation that may have dropped LEIs, structured place-of-safekeeping, and other fields the MX carried. If the MX original exists, prefer it as the source of truth and use the MT only for reachability. Trusting the translated MT as canonical would bake the translation's data loss into your platform.
+
+</details>
+
+<details><summary><b>100.</b> Summarising the lesson, what one-sentence principle governs working at the MT/MX boundary?</summary>
+
+Read both MT and MX against their specs, map each MT to its correct (often non-one-to-one) MX successor via the authoritative catalogues, and document every field where the format carries less than your richer model so the loss is managed rather than silent. That principle protects fund-data fidelity through the long coexistence period. It is exactly the competency the "Done when" criteria check.
+
+</details>
+
+
+## Phase 2 · 9.6.2 Data documentation — 100 self-test questions
+
+<details><summary><b>1.</b> In one sentence, what is the core deliverable of dbt's documentation feature?</summary>
+
+dbt generates an always-current, browsable docs site from the descriptions you write in YAML plus the metadata it already knows (lineage, schema, tests, columns), so the documentation is produced from the same code that builds the models. Because it is generated rather than hand-maintained in a separate wiki, it stays in sync with the project as long as the YAML is kept up to date. This is why the lesson frames docs as a governance deliverable: traceability that a business analyst can self-serve.
+
+</details>
+
+<details><summary><b>2.</b> Which command generates the dbt documentation artifacts?</summary>
+
+`dbt docs generate` produces the documentation artifacts in the `target/` directory. It compiles the project, runs a metadata query against the warehouse, and writes `manifest.json`, `catalog.json`, and `index.html`. A common follow-up is `dbt docs serve`, which starts a local web server so you can browse the generated site.
+
+</details>
+
+<details><summary><b>3.</b> What three primary files does `dbt docs generate` write into the `target/` directory?</summary>
+
+It writes `manifest.json` (the full project graph, nodes, descriptions, and lineage), `catalog.json` (column-level metadata and statistics pulled from the warehouse), and `index.html` (the static single-page app that reads those two JSON files). The browser app loads `manifest.json` and `catalog.json` at runtime to render the lineage graph and model pages. Knowing this split matters when you publish docs: you must ship all the artifacts, not just the HTML.
+
+</details>
+
+<details><summary><b>4.</b> Why does `dbt docs generate` need a live connection to the warehouse?</summary>
+
+To build `catalog.json` it issues a metadata query against the warehouse's information schema (or equivalent) to collect each relation's actual columns, data types, and stats. Without that connection it cannot populate the catalog, so column-level details and the "approximate row count" style stats would be missing. You can skip part of this with flags, but the catalog enrichment is the reason a warehouse round-trip happens at generate time.
+
+</details>
+
+<details><summary><b>5.</b> What does the `dbt docs serve` command do, and on what default port?</summary>
+
+`dbt docs serve` starts a lightweight local HTTP server that hosts the generated `index.html` plus the JSON artifacts so you can browse the docs in a browser. By default it serves on port `8080`; you can change it with `--port`. It is a convenience for local viewing only — it is not meant to be your production hosting solution, which is why the lesson plans to publish the static site from CI instead.
+
+</details>
+
+<details><summary><b>6.</b> Why can you not just open `target/index.html` directly with a `file://` URL in some browsers?</summary>
+
+The docs page is a JavaScript app that fetches `manifest.json` and `catalog.json` at runtime, and many browsers block those local `fetch` requests under the `file://` scheme for security (CORS/same-origin restrictions). Serving the directory over HTTP, for example via `dbt docs serve` or any static web server, lets the app load its JSON. This is the usual first thing to check when the docs page renders blank.
+
+</details>
+
+<details><summary><b>7.</b> What is the purpose of the `--no-compile` flag on `dbt docs generate`?</summary>
+
+`dbt docs generate --no-compile` tells dbt to skip recompiling the project and instead reuse the existing compiled artifacts, only performing the catalog metadata query and writing the docs. It is useful in CI when a previous step already ran `dbt build` or `dbt compile`, so you avoid redundant compilation. The trade-off is that your artifacts must already be fresh, or the docs will reflect a stale graph.
+
+</details>
+
+<details><summary><b>8.</b> What does the `--static` flag on `dbt docs generate` produce?</summary>
+
+`dbt docs generate --static` embeds the `manifest.json` and `catalog.json` data inside a single self-contained file named `static_index.html` in `target/`. Because everything is inlined, you can host or share that one file with no separate JSON artifacts and no web server logic, which is ideal for dropping into object storage or emailing a snapshot. The regular `index.html` by contrast still fetches the JSON at runtime.
+
+</details>
+
+<details><summary><b>9.</b> A colleague shares `index.html` from your docs build but it loads blank for them — what is the likely cause?</summary>
+
+The plain `index.html` is not self-contained: it expects to fetch `manifest.json` and `catalog.json` from the same directory, and the colleague only received the HTML. Either send all the artifacts together and serve them over HTTP, or regenerate with `dbt docs generate --static` to produce a single `static_index.html` that inlines the data. The static build is the right tool when you need to share one portable file.
+
+</details>
+
+<details><summary><b>10.</b> How do you attach a description to a model in dbt?</summary>
+
+You add a `description:` key under the model entry in a properties YAML file, typically `models/<something>.yml`, for example a model named `fct_nav` gets `description: Daily NAV per share class`. dbt reads this at parse time and surfaces it on the model's docs page and in `manifest.json`. The description lives alongside the model definition so it is reviewed and versioned with the SQL.
+
+</details>
+
+<details><summary><b>11.</b> How do you document an individual column in a dbt model's YAML?</summary>
+
+Under the model's `columns:` list, each entry has a `name:` and an optional `description:`, so you can write a sentence per column such as documenting that `isin` is the 12-character ISO 6166 instrument identifier. dbt matches the `name` to the actual column from the catalog and shows the description on the model page. Columns without descriptions still appear (from the catalog) but show as undocumented.
+
+</details>
+
+<details><summary><b>12.</b> What is a dbt "docs block" and how is it defined?</summary>
+
+A docs block is a reusable chunk of Markdown defined with the Jinja tag pair `{% docs some_name %} ... {% enddocs %}`, placed in a `.md` file inside your project. It lets you write a longer, formatted description once and reference it from many places. This keeps verbose explanations out of the YAML and avoids copy-pasting the same wording across models.
+
+</details>
+
+<details><summary><b>13.</b> How do you reference a docs block from a model or column description?</summary>
+
+You set the description to a Jinja call to the `doc()` function, for example `description: "{{ doc('emt_field_overview') }}"`, where the string passed matches the docs-block name. dbt resolves the block's Markdown at parse time and renders it as that resource's description. This indirection is how you share one canonical paragraph across the EMT-related models.
+
+</details>
+
+<details><summary><b>14.</b> Why would you prefer a docs block over inlining a long description in YAML?</summary>
+
+Docs blocks let you write rich, multi-paragraph Markdown (lists, links, code) that would be awkward to embed in a YAML scalar, and you can reuse the same block across several models or columns so wording stays consistent. They also keep the YAML compact and readable in PR diffs. The trade-off is a small indirection — the reader of the YAML has to open the `.md` file to see the full text.
+
+</details>
+
+<details><summary><b>15.</b> In YAML, what is the difference between the `>` and `|` block scalar styles for a description?</summary>
+
+`>` is a folded scalar that joins interior line breaks into spaces, producing a single flowing paragraph, while `|` is a literal scalar that preserves the line breaks exactly as written. Use `>` for one long sentence wrapped across lines for readability, and `|` when you need real multi-line structure. Picking the wrong one is a common reason a description renders with unexpected or missing line breaks.
+
+</details>
+
+<details><summary><b>16.</b> What does the `persist_docs` config do?</summary>
+
+`persist_docs` pushes your YAML descriptions out of dbt and into the warehouse itself as native relation and column comments, so tools and analysts querying the database directly see the same documentation. It turns dbt descriptions into `COMMENT`/`COMMENT ON` metadata on the actual tables and columns. This is the bridge from "docs in dbt" to "docs in the warehouse" that downstream BI catalogs can read.
+
+</details>
+
+<details><summary><b>17.</b> What is the exact shape of the `persist_docs` config value?</summary>
+
+It is a dictionary with two boolean sub-keys, `relation` and `columns`, for example `persist_docs: {"relation": true, "columns": true}`. `relation: true` persists the table/view description, and `columns: true` persists each column's description. You can enable one without the other, and both default to off.
+
+</details>
+
+<details><summary><b>18.</b> Where can you set `persist_docs`?</summary>
+
+You can set it in `dbt_project.yml` under the `models:` (or `seeds:`/`snapshots:`) path using the `+persist_docs:` prefix, or per resource in a model `{{ config(persist_docs={...}) }}` block, or in a snapshot's config. Setting it project-wide is the usual approach so every model gets database comments by default. Per-model config is handy when only some relations should be commented.
+
+</details>
+
+<details><summary><b>19.</b> During which dbt command are the `persist_docs` comments actually written to the warehouse?</summary>
+
+The comments are applied during `dbt run` (and `dbt build`), as part of materializing each model, not during `dbt docs generate`. dbt issues the appropriate `COMMENT` statement against the relation after creating it. A frequent gotcha: people enable `persist_docs`, run `dbt docs generate`, and wonder why the warehouse has no comments — you must re-run the models.
+
+</details>
+
+<details><summary><b>20.</b> You enabled `persist_docs` but the table comments in the warehouse are stale — first thing to check?</summary>
+
+Confirm you actually re-ran the models with `dbt run`/`dbt build` after changing the descriptions, because comments are written at materialization time, not at docs-generate time. Also check that the change was to a description that maps to a real column name and that the adapter supports the comment type you enabled. For incremental models, verify the run actually touched the relation rather than no-op'ing.
+
+</details>
+
+<details><summary><b>21.</b> Name several adapters that support `persist_docs`.</summary>
+
+`persist_docs` is implemented for Postgres, Redshift, Snowflake, BigQuery, Databricks, and Apache Spark, among others. Each maps the description to that platform's native comment mechanism, such as `COMMENT ON COLUMN` in Postgres or column descriptions in BigQuery. Support and exact behaviour can vary by adapter, so check the adapter docs before relying on it for a given warehouse.
+
+</details>
+
+<details><summary><b>22.</b> Does `persist_docs` work for dbt sources?</summary>
+
+No — `persist_docs` is not implemented for sources, since dbt does not own or create the source tables and therefore will not write comments onto objects it did not materialize. You can still document sources in YAML and have those descriptions appear in the dbt docs site; they just will not be pushed into the database. If you need source-table comments in the warehouse, that has to be done by whatever process owns those tables.
+
+</details>
+
+<details><summary><b>23.</b> For a regulated fund warehouse, why is `persist_docs` a useful governance lever specifically?</summary>
+
+Pushing descriptions into the warehouse means an analyst or a downstream catalog reading the database directly sees the same authoritative definition for, say, a `nav_per_share` column, without having to open the dbt docs site. This reduces the chance that two tools show conflicting definitions of a regulated figure. It anchors the meaning of sensitive fields like NAV or ISIN at the database layer where audits often look.
+
+</details>
+
+<details><summary><b>24.</b> What is a dbt exposure?</summary>
+
+An exposure is a node you declare in dbt to represent a downstream consumer of your project — a dashboard, a report, an application, an ML pipeline — that depends on specific models. It makes the consumer a first-class part of the DAG so lineage extends past the warehouse into "who actually uses this". The lesson's key use is declaring the EMT output's consumer so its dependency is explicit.
+
+</details>
+
+<details><summary><b>25.</b> In which file and under which top-level key are exposures declared?</summary>
+
+Exposures are declared in a `.yml` properties file (often a dedicated `models/exposures.yml`) under the top-level `exposures:` key, as a list of entries. Each entry describes one downstream consumer with its name, type, owner, and dependencies. Putting them in YAML means they are reviewed and versioned exactly like model definitions.
+
+</details>
+
+<details><summary><b>26.</b> Which properties are required on an exposure?</summary>
+
+An exposure requires `name`, `type`, and `owner`, where `owner` must include at least a `name` or an `email`. Without these dbt cannot parse the exposure. Everything else — `depends_on`, `url`, `maturity`, `description`, `label`, `tags`, `meta` — is optional but usually worth filling in.
+
+</details>
+
+<details><summary><b>27.</b> What are the valid values for an exposure's `type`?</summary>
+
+The valid `type` values are `dashboard`, `notebook`, `analysis`, `ml`, and `application`. They categorize the kind of downstream consumer and control the icon/label dbt shows in the docs. For a regulatory file feed like the EMT output, `application` is the natural fit since it is a generated deliverable consumed by another system.
+
+</details>
+
+<details><summary><b>28.</b> How does an exposure declare the models it depends on?</summary>
+
+Through the `depends_on:` list, which holds refable nodes expressed as `ref('model_name')`, `source('schema','table')`, or `metric('metric_name')`. For example the EMT exposure would list `ref('emt_output')`. dbt uses these to wire the exposure into the lineage graph and to enable selection by exposure.
+
+</details>
+
+<details><summary><b>29.</b> What does the `owner` field on an exposure capture and what does it need?</summary>
+
+`owner` records who is accountable for the downstream consumer and must contain a `name` and/or an `email`. This is the human contact a business analyst or auditor reaches when they have a question about the EMT report, and it shows on the exposure's docs page. Filling in a real distribution-list email is better than an individual so the ownership survives staff changes.
+
+</details>
+
+<details><summary><b>30.</b> What is the `maturity` property on an exposure and what values can it take?</summary>
+
+`maturity` signals how production-ready or trusted the downstream consumer is, taking one of `high`, `medium`, or `low`. It is informational metadata shown in the docs, useful for telling consumers whether a dashboard is battle-tested or experimental. For a regulator-facing EMT feed you would typically mark it `high` once it is the official output.
+
+</details>
+
+<details><summary><b>31.</b> What does the optional `url` property add to an exposure?</summary>
+
+Setting `url:` to the live location of the consumer (for example the BI dashboard link or the report endpoint) activates a "View this exposure" link on its docs page. This lets an analyst jump straight from the lineage graph to the actual artifact. It is the small touch that makes the docs genuinely navigable rather than just descriptive.
+
+</details>
+
+<details><summary><b>32.</b> How do you select an exposure and its upstream models on the command line?</summary>
+
+You use the `exposure:` selector, and prefixing with `+` pulls in upstream dependencies, for example `dbt build -s +exposure:emt_daily_feed` runs everything the EMT exposure depends on. This is the operational payoff of declaring exposures: you can test or rebuild exactly the graph that feeds a given consumer. Without the `+`, you would select only the exposure node itself, which is rarely what you want.
+
+</details>
+
+<details><summary><b>33.</b> How does an exposure appear in the dbt lineage graph?</summary>
+
+An exposure renders as a distinct node in the DAG, drawn downstream of the models it depends on, with an "EXP" indicator that visually separates it from models and sources. This is what lets a viewer trace lineage all the way to the consuming dashboard or feed. It is the visual proof that "this EMT report comes from these specific gold models".
+
+</details>
+
+<details><summary><b>34.</b> Declare a minimal exposure for the EMT output naming its consumer — what entries are essential?</summary>
+
+At minimum you write `name: emt_daily_feed`, `type: application`, `owner:` with an `email`, and `depends_on: [ref('emt_output')]`; adding `description`, `url`, and `maturity: high` makes it complete. The `type: application` reflects that EMT is a generated file consumed by a distributor or data vendor. Naming the consumer in the `description`/`label` is what satisfies the Done-when criterion for this lesson.
+
+</details>
+
+<details><summary><b>35.</b> Why does declaring the EMT output as an exposure satisfy a fund-platform governance goal?</summary>
+
+It makes the regulatory deliverable an explicit, owned node in the lineage so anyone can trace which gold models feed the EMT file and who is responsible for it, without asking the data engineer. That answers "where does this EMT field come from?" through self-service, which the lesson calls a regulatory expectation rather than a nicety. It also lets you rebuild and test exactly the EMT dependency chain via the `exposure:` selector.
+
+</details>
+
+<details><summary><b>36.</b> What is the difference between what belongs in dbt model YAML versus the enterprise catalog?</summary>
+
+dbt YAML is the right home for technical, model-local documentation maintained by engineers — column meanings, tests, lineage within the warehouse — versioned next to the SQL. The enterprise catalog is the broader, organization-wide layer for business glossary terms, data ownership across systems, classification, and policies that span far beyond one dbt project. The rule of thumb: model-specific truth lives in dbt; cross-system business and governance metadata lives in the catalog.
+
+</details>
+
+<details><summary><b>37.</b> Why not try to put the entire enterprise business glossary into dbt model descriptions?</summary>
+
+dbt descriptions are scoped to a single project and are best at explaining how a specific model and its columns work; an enterprise glossary needs to span every system, be owned by business stewards, and outlive any one dbt project. Cramming glossary-wide definitions into dbt creates duplication and drift when the same term appears in many projects. The catalog is built to be the single canonical glossary, and dbt docs can link to or feed it.
+
+</details>
+
+<details><summary><b>38.</b> How do dbt docs and an enterprise catalog typically relate in a mature platform?</summary>
+
+dbt docs is the generated, engineer-maintained source of model and column truth, which a catalog (Phase 6 territory, or a tool like Purview) ingests via dbt's `manifest.json`/`catalog.json` artifacts to enrich the broader business metadata graph. So dbt feeds the catalog rather than competing with it. The lesson explicitly calls dbt docs "the gateway drug before the Phase 6 catalogs".
+
+</details>
+
+<details><summary><b>39.</b> Which dbt artifact would an enterprise catalog most likely consume to import your model documentation?</summary>
+
+It would consume `manifest.json`, which contains the full graph of nodes, their descriptions, columns, tests, and lineage edges, often supplemented by `catalog.json` for physical column metadata. These machine-readable JSON files are the integration point that lets a catalog ingest dbt's documentation automatically. This is why keeping descriptions in dbt pays off twice: the docs site and the catalog feed.
+
+</details>
+
+<details><summary><b>40.</b> What is the "docs-as-code" review flow this lesson advocates?</summary>
+
+Docs-as-code means model and column descriptions live in the same versioned YAML as the SQL, so every documentation change goes through the same pull-request review as code — a reviewer sees the description diff next to the model diff. This keeps docs from drifting because they cannot be merged without review, and they ship in the same commit as the logic they describe. It is the discipline that makes generated docs trustworthy.
+
+</details>
+
+<details><summary><b>41.</b> Why is reviewing descriptions in the same PR as the SQL change important?</summary>
+
+When you change a model's logic, the meaning of its columns can change too; reviewing the description alongside the SQL forces the author to update the docs in the same breath and lets the reviewer catch a description that no longer matches the code. If docs lived in a separate wiki, they would routinely lag behind merged code. Co-locating them is the structural fix for documentation drift.
+
+</details>
+
+<details><summary><b>42.</b> Why does the lesson say "docs that drift from the models are worse than none"?</summary>
+
+Because people trust generated docs and act on them; a confidently wrong description of, say, how `nav_per_share` is calculated can mislead an analyst or auditor more dangerously than an obvious gap they would investigate. Missing docs prompt a question; wrong docs end the question with a false answer. This is why the review discipline that keeps docs current is treated as part of the deliverable, not optional polish.
+
+</details>
+
+<details><summary><b>43.</b> How can you enforce in CI that new models do not ship without descriptions?</summary>
+
+You can run a check that inspects `manifest.json` (or use a package/test that flags undocumented models and columns) and fails the build when a model or column lacks a `description`. dbt itself does not block on missing descriptions by default, so the gate is something you add. Wiring this into the PR pipeline turns "every model documented" from a hope into an enforced rule.
+
+</details>
+
+<details><summary><b>44.</b> A reviewer approves a PR that changes a model's SQL but leaves the column description unchanged and now inaccurate — what process gap does this reveal?</summary>
+
+It reveals that the team is not treating descriptions as part of the reviewable diff: the reviewer focused on SQL and skipped the docs even though they were in the same file. The fix is a review checklist or a CI doc-coverage check that forces description updates when logic changes. This is exactly the drift the docs-as-code flow exists to prevent.
+
+</details>
+
+<details><summary><b>45.</b> What is the practical Done-when test for this lesson regarding a business analyst?</summary>
+
+The bar is that a business analyst can answer "where does this EMT field come from?" entirely on their own, by browsing the generated docs and lineage, without interrupting the engineer. That requires complete model and column descriptions, an EMT exposure naming its consumer, and a browsable lineage graph. If they still have to ask you, the documentation is not yet a real governance deliverable.
+
+</details>
+
+<details><summary><b>46.</b> Where in the dbt docs site would an analyst trace the full path of an EMT field?</summary>
+
+In the lineage graph (the DAG view), they can click the EMT output node or exposure and walk the edges upstream through the gold, silver, and source nodes that feed it, opening each model's page to read column descriptions. The graph is the visual answer to "where does this field come from". Generating it with up-to-date `manifest.json` is precisely what `dbt docs generate` provides.
+
+</details>
+
+<details><summary><b>47.</b> What does `dbt docs generate` use the `manifest.json` for versus `catalog.json`?</summary>
+
+`manifest.json` holds dbt's own knowledge — the node graph, descriptions, tests, configs, and lineage edges — assembled from your project files at parse time. `catalog.json` holds the physical reality from the warehouse — actual columns, data types, and stats — gathered by the metadata query. The docs site overlays the two so you see both "what dbt intends" and "what the database actually has".
+
+</details>
+
+<details><summary><b>48.</b> A column shows in the docs catalog but has no description — what does that tell you?</summary>
+
+It means the physical column exists in the warehouse (so `catalog.json` picked it up) but you never wrote a `description` for it in the model YAML, so `manifest.json` has nothing to render. The fix is to add a `columns:` entry with that exact `name` and a `description`. Doc-coverage tooling exists precisely to surface these undocumented-but-present columns.
+
+</details>
+
+<details><summary><b>49.</b> You added a column description in YAML but it does not appear in the docs — first things to check?</summary>
+
+Check that the column `name` in YAML exactly matches the real column name (including case/quoting), that you regenerated docs with `dbt docs generate` after the change, and that you are viewing the freshly served artifacts rather than a cached old page. A mismatched name is the most common cause: dbt cannot associate the description with a column it cannot find. Quoting and case sensitivity matter on some warehouses.
+
+</details>
+
+<details><summary><b>50.</b> How does the `quote: true` column property interact with documentation on case-sensitive warehouses?</summary>
+
+Setting `quote: true` on a column tells dbt to treat the column name literally with quoting, which matters when the warehouse preserves case or the name has special characters, so the description maps to the right physical column. Without it, the name may be folded to a different case and fail to match the catalog. This is a subtle reason a description silently fails to show up.
+
+</details>
+
+<details><summary><b>51.</b> Why are dbt tests relevant to documentation quality even though they are not descriptions?</summary>
+
+Tests like `not_null` and `unique` declared in the same YAML appear on the model's docs page, so a reader sees not just what a column means but what guarantees hold for it — a documented `isin` column that is also tested `unique` and `not_null` is far more trustworthy. Documentation plus tests together communicate intent and enforcement. The co-location in YAML means both are reviewed in the same PR.
+
+</details>
+
+<details><summary><b>52.</b> When publishing dbt docs from CI later, what must the pipeline produce and where would it go?</summary>
+
+The pipeline runs `dbt docs generate` to produce the artifacts (or `--static` for a single `static_index.html`) and then publishes them to a static host — object storage with web hosting, GitHub Pages, or similar. Because the plain build needs `manifest.json` and `catalog.json` alongside `index.html`, the publish step must upload all of them unless you used the static build. This is the Phase 3 plan referenced in the Do list.
+
+</details>
+
+<details><summary><b>53.</b> Why might `dbt docs generate --static` be the better choice for hosting docs from cheap object storage?</summary>
+
+The `--static` build inlines all metadata into one `static_index.html`, so you can drop a single file into a bucket and share it directly without exposing the JSON artifacts or running a server. Hosting a single self-contained file is simpler to secure and permission than a bucket of files that the page must fetch. The non-static build needs the bucket to serve the JSON, which complicates access control.
+
+</details>
+
+<details><summary><b>54.</b> What is the risk of letting a model's `description` and its actual transformation logic disagree in a regulated fund context?</summary>
+
+A description that misstates how a regulated figure such as NAV or a holdings weight is computed can lead an analyst or auditor to certify or report a number on a false understanding, which in fund administration can have compliance consequences. Generated docs are trusted, so the wrong words carry real weight. This is why the lesson ties documentation accuracy to regulatory traceability, not cosmetics.
+
+</details>
+
+<details><summary><b>55.</b> How would you document a source table's freshness expectation so analysts understand data timeliness?</summary>
+
+You document the source in YAML with a `description` and configure `freshness` (with `loaded_at_field` and `warn_after`/`error_after`) so dbt can report staleness; the description explains the expectation in words and the config enforces it. The docs page then shows both the meaning and the freshness policy. For a daily NAV feed, stating "expected by 06:00 CET each business day" in the description gives analysts a concrete timeliness anchor.
+
+</details>
+
+<details><summary><b>56.</b> What metadata can you attach to a model with the `meta` config, and how does it help governance?</summary>
+
+The `meta` config holds an arbitrary key-value dictionary — for example `meta: {contains_pii: true, regulatory: EMT}` — which surfaces in `manifest.json` and the docs and can be consumed by downstream catalogs or policy tooling. It lets you tag models with governance attributes that dbt has no built-in field for. In a fund platform you might mark which models feed regulated outputs so the catalog can apply controls.
+
+</details>
+
+<details><summary><b>57.</b> How are dbt `tags` useful for documentation and selection together?</summary>
+
+`tags` label models, exposures, and other resources with free-form categories that show in the docs and double as selectors, so `dbt build -s tag:emt` rebuilds everything tagged for the EMT pipeline. They give a lightweight grouping that complements descriptions. A reader browsing docs can filter by tag to find all regulatory-output models quickly.
+
+</details>
+
+<details><summary><b>58.</b> An exposure references `ref('emt_output')` but `dbt parse` errors that the node is not found — what is wrong?</summary>
+
+The string inside `ref()` must exactly match an existing model's name; the error means there is no model called `emt_output` in the project (typo, wrong name, or the model is disabled). Check the actual file name/`name:` of your EMT model and fix the `depends_on` entry. Exposures are validated against the graph at parse time, so a bad `ref` fails fast.
+
+</details>
+
+<details><summary><b>59.</b> Why should an exposure's `owner` ideally be a team or distribution-list email rather than a single person?</summary>
+
+Ownership recorded as one individual's email rots the moment that person changes roles or leaves, breaking the contact path an auditor relies on for the EMT feed. A team distribution list keeps the ownership pointer valid across staff changes. The exposure's whole point is durable accountability, so durability of the contact matters.
+
+</details>
+
+<details><summary><b>60.</b> What does it mean that dbt docs are "generated" rather than "authored"?</summary>
+
+The site itself — its structure, lineage graph, column lists, and stats — is assembled automatically by dbt from your project and the warehouse; you author only the prose descriptions in YAML and docs blocks. So you maintain small textual inputs and dbt produces the full document each time. This is what makes the docs cheap to keep current and resistant to the drift that plagues hand-written wikis.
+
+</details>
+
+<details><summary><b>61.</b> How do you make a longer, multi-paragraph model description with proper formatting?</summary>
+
+Define the text in a docs block, `{% docs my_model_overview %} ...rich Markdown... {% enddocs %}` in a `.md` file, and set the model's `description: "{{ doc('my_model_overview') }}"`. The block supports Markdown lists, links, and code that a YAML scalar handles awkwardly. This is the idiomatic way to give an important model like the EMT output a thorough write-up.
+
+</details>
+
+<details><summary><b>62.</b> What happens to columns that exist physically but are absent from the model's YAML `columns:` list?</summary>
+
+They still appear on the docs page because `catalog.json` captured them from the warehouse, but they show with no description and no tests since dbt has no YAML entry for them. They are effectively undocumented columns flagged by their blank descriptions. Listing them in YAML — even just to add a description — is how you bring them under documentation.
+
+</details>
+
+<details><summary><b>63.</b> Why is it valuable that the lineage graph extends to exposures rather than stopping at the last model?</summary>
+
+Stopping at the final model answers "what did we build" but not "who consumes it"; extending the graph to exposures answers "what breaks downstream if this model changes" and "where does this regulatory feed terminate". That downstream visibility is essential for impact analysis and for the self-service traceability the lesson requires. It closes the lineage loop from raw source to consuming application.
+
+</details>
+
+<details><summary><b>64.</b> In dbt, what is the relationship between a model's `description` and the warehouse column comment when `persist_docs` is on?</summary>
+
+With `persist_docs: {relation: true, columns: true}`, dbt copies the YAML `description` into the warehouse as the relation's table comment and each column's comment when the model is run. So the YAML remains the single source of truth and the warehouse comment is a generated projection of it. Editing the description and re-running keeps both in sync; editing the comment directly in the warehouse would be overwritten on the next run.
+
+</details>
+
+<details><summary><b>65.</b> If two BI tools show conflicting definitions of `nav_per_share`, how does this lesson's tooling reduce that?</summary>
+
+By keeping the canonical definition in the dbt model YAML and pushing it to the warehouse via `persist_docs`, both tools that read database comments see the same authoritative text. Combined with feeding the enterprise catalog from `manifest.json`, you collapse multiple definition sources into one upstream truth. The conflict usually stems from each tool maintaining its own description; sourcing from dbt removes that divergence.
+
+</details>
+
+<details><summary><b>66.</b> What is the danger of documenting a model in a separate Confluence/wiki page instead of in dbt YAML?</summary>
+
+A separate wiki is not coupled to the code, so it is updated by a different person at a different time (or never) and silently drifts from the model it describes. There is no PR gate forcing the wiki to change when the SQL changes. dbt's docs-as-code approach exists specifically to bind the description to the code path so they move together.
+
+</details>
+
+<details><summary><b>67.</b> How does `dbt build` relate to documentation compared to `dbt docs generate`?</summary>
+
+`dbt build` runs and tests your models and, with `persist_docs` enabled, writes the database comments — but it does not produce the docs website. `dbt docs generate` is the separate step that compiles the browsable docs artifacts. A complete docs pipeline usually runs `dbt build` then `dbt docs generate`, sometimes with `--no-compile` on the latter to avoid recompiling.
+
+</details>
+
+<details><summary><b>68.</b> Why does the acceptance criterion for Capstone 2 say "dbt build green with tests + docs published" — what does each half prove?</summary>
+
+"Tests green" proves the data is correct and the models behave as documented, while "docs published" proves the always-current documentation deliverable actually reaches consumers, not just exists in `target/`. Together they show both correctness and traceability. A pipeline that builds but never publishes docs would fail the self-service test this lesson demands.
+
+</details>
+
+<details><summary><b>69.</b> How would you document the EMT output model so an analyst understands each EMT field's provenance?</summary>
+
+Give the model a thorough `description` (ideally via a docs block) explaining the FinDatEx EMT context, then add a `columns:` entry per EMT field with a `description` that states the source column and any transformation. Pair it with the EMT exposure so lineage shows the upstream gold models. Then a browsing analyst can read each field's meaning and trace it upstream without asking you.
+
+</details>
+
+<details><summary><b>70.</b> What is the difference between `label` and `name` on an exposure?</summary>
+
+`name` is the unique snake_case identifier used in selectors and the graph (for example `emt_daily_feed`), while `label` is an optional human-friendly display string that may contain spaces and capitals (for example "EMT Daily Feed"). The docs site shows the `label` when present, falling back to the `name`. Use `label` to make the exposure read nicely without sacrificing a clean machine identifier.
+
+</details>
+
+<details><summary><b>71.</b> Which exposure `type` best fits a generated regulatory file like the EMT output, and why?</summary>
+
+`application` fits best, because the EMT output is a generated artifact consumed programmatically by another system (a distributor or vendor ingestion), not a human-browsed dashboard or notebook. The `type` mostly affects categorization and the icon in docs, but choosing it accurately helps readers understand the nature of the consumer. A reporting dashboard built on the same data would instead use `dashboard`.
+
+</details>
+
+<details><summary><b>72.</b> What happens if you run `dbt docs generate` without a warehouse connection?</summary>
+
+The compile step can still run from your project files, but the catalog metadata query that builds `catalog.json` cannot, so column-level physical metadata and stats will be missing or the command can fail at that step. The lineage and descriptions from `manifest.json` may still render, but the catalog enrichment is absent. This is why CI docs jobs need warehouse credentials, not just the repo.
+
+</details>
+
+<details><summary><b>73.</b> How can `description` content from a docs block help avoid inconsistent definitions across many EMT-related models?</summary>
+
+By writing the shared concept once in a docs block and referencing it with `{{ doc(...) }}` from every related model and column, you guarantee they all show identical, single-sourced wording. If the definition changes, you edit one block and every reference updates on the next docs build. This is the documentation equivalent of DRY and is ideal for a recurring regulatory concept.
+
+</details>
+
+<details><summary><b>74.</b> Why is column-level lineage particularly valuable for the question "where does this EMT field come from?"</summary>
+
+Model-level lineage tells you which models feed the EMT output, but the analyst's real question is often about a single field, and column-level tracing pinpoints which upstream column maps into that EMT field through each transformation. The closer the lineage gets to the column, the less the analyst has to infer. Even where dbt's native graph is model-level, thorough column descriptions plus the DAG together carry the analyst to the answer.
+
+</details>
+
+<details><summary><b>75.</b> What is the consequence of leaving the EMT exposure undeclared in terms of self-service traceability?</summary>
+
+Without the exposure, the lineage graph stops at the last gold model and never shows that the EMT file is the consumer, nor who owns it, so an analyst cannot self-serve the "where does this go / who do I ask" half of traceability. They would have to interrupt the engineer — exactly what the Done-when criterion forbids. Declaring the exposure closes that gap and names the responsible party.
+
+</details>
+
+<details><summary><b>76.</b> How do you ensure the published docs reflect the latest merged changes rather than a developer's local state?</summary>
+
+Generate and publish docs from CI on the main branch after a merge, so the artifacts always come from reviewed, merged code rather than someone's laptop. This guarantees the served `manifest.json` matches what is in production. Publishing from a local `dbt docs serve` session is fine for development but must not be the source of truth shared with analysts.
+
+</details>
+
+<details><summary><b>77.</b> A model's docs page shows an old description even after you edited the YAML — what is the likely cause?</summary>
+
+Most likely you are viewing a previously generated `index.html`/`manifest.json` and did not re-run `dbt docs generate`, or the browser cached the old JSON. Regenerate the docs and hard-refresh the page. If publishing via CI, confirm the latest pipeline actually ran after your merge rather than serving a stale build.
+
+</details>
+
+<details><summary><b>78.</b> Why does putting tests and descriptions in the same YAML file help the docs-as-code review?</summary>
+
+Because a single PR diff then shows the logic intent (tests), the meaning (descriptions), and often the model file nearby, the reviewer evaluates correctness and documentation together in one place. This reduces the chance of approving a logic change while overlooking a now-wrong description. Co-location is the structural enabler of meaningful docs review.
+
+</details>
+
+<details><summary><b>79.</b> What does it mean that an exposure can be selected but not "run" as a model?</summary>
+
+An exposure is a documentation/graph node, not an executable model, so `dbt run -s exposure:x` does not build the exposure itself but is used to select and operate on the upstream models it depends on (typically with the `+` prefix). The exposure has no SQL to materialize. Its value is metadata and graph connectivity, not computation.
+
+</details>
+
+<details><summary><b>80.</b> How would `meta` on the EMT exposure help a downstream catalog apply controls?</summary>
+
+You can attach governance attributes in `meta`, such as `meta: {regulatory_regime: PRIIPs, criticality: high}`, which flow into `manifest.json` and can be ingested by a catalog to drive policies like access restrictions or required approvals. It lets you encode regulatory context where the catalog can act on it. This turns the exposure into a policy-bearing node, not just a label.
+
+</details>
+
+<details><summary><b>81.</b> Why is "every model and column has a description" a concrete acceptance bar rather than a vague aspiration?</summary>
+
+It is mechanically checkable — you can scan `manifest.json` and fail CI if any model or column lacks a non-empty `description` — so "documented" becomes pass/fail rather than subjective. This converts documentation from good intentions into an enforced gate. The lesson sets it as a Done-when checkbox precisely because it can be verified objectively.
+
+</details>
+
+<details><summary><b>82.</b> How does generated dbt documentation reduce the bus-factor risk on a fund data platform?</summary>
+
+Because the knowledge of what each model and column means lives in versioned YAML and is rendered into a browsable site, that understanding survives independently of any one engineer's memory. A new joiner or an auditor can self-serve the lineage and definitions of regulated outputs. The documentation becomes an institutional asset rather than tribal knowledge.
+
+</details>
+
+<details><summary><b>83.</b> What is the relationship between `dbt docs serve --port` and running multiple docs sites locally?</summary>
+
+`dbt docs serve --port 8081` lets you serve on a non-default port, which is how you view two projects' docs simultaneously without the second clashing on the default `8080`. Each server reads the artifacts in its own `target/` directory. It is a small operational convenience, not a deployment mechanism.
+
+</details>
+
+<details><summary><b>84.</b> Why should the EMT exposure's `description` explicitly name the consumer rather than just say "EMT file"?</summary>
+
+Naming the actual consumer — for example "Consumed by the distributor's PRIIPs ingestion service" — answers the analyst's downstream question and gives an auditor the real endpoint and responsible party. A generic "EMT file" leaves the trail incomplete. The Done-when criterion specifically requires the consumer to be named, so the description must carry that detail.
+
+</details>
+
+<details><summary><b>85.</b> How can you tell from the docs site whether a model is a source, a model, or an exposure?</summary>
+
+The lineage graph and node styling distinguish them: sources, models, and exposures each render differently, with exposures carrying an "EXP" marker that sets them apart from upstream nodes. The node type is also shown on each entity's page. This visual typing is what lets a reader follow lineage across the boundary from data into consumers.
+
+</details>
+
+<details><summary><b>86.</b> What is a sensible CI ordering for build, test, docs, and publish steps?</summary>
+
+A common order is `dbt build` (which runs and tests models, and with `persist_docs` writes warehouse comments), then `dbt docs generate` to produce artifacts, then a publish step uploading the artifacts to the static host. Running generate after build means the docs reflect freshly built models. The publish step gates on the build and tests passing so you never publish docs for a red build.
+
+</details>
+
+<details><summary><b>87.</b> Why is `persist_docs` complementary to, not a replacement for, `dbt docs generate`?</summary>
+
+`persist_docs` pushes descriptions into the warehouse for tools and people querying the database directly, while `dbt docs generate` produces the rich browsable site with the lineage graph and exposures. They serve different audiences and surfaces. A complete documentation story uses both: comments in the warehouse plus the generated docs portal.
+
+</details>
+
+<details><summary><b>88.</b> How do exposures help with impact analysis before changing a gold model?</summary>
+
+By tracing downstream from the model to any exposures that `depends_on` it, you can see immediately which consumers — dashboards, the EMT feed — would be affected, and you can rebuild and test exactly that set with `+exposure:`. This turns a risky change into a scoped, testable one. Without exposures, the downstream blast radius beyond the warehouse is invisible.
+
+</details>
+
+<details><summary><b>89.</b> What belongs in dbt YAML: the business glossary term "Net Asset Value" or the column note "computed as assets minus liabilities divided by shares for this share class"?</summary>
+
+The column-specific computation note belongs in dbt YAML because it describes how this particular model's column is derived; the enterprise-wide glossary term "Net Asset Value" belongs in the catalog where it is owned by business stewards and reused across systems. dbt can reference or align with the glossary, but the canonical cross-system definition lives in the catalog. Mixing the two leads to duplicated, drifting definitions.
+
+</details>
+
+<details><summary><b>90.</b> Why is it risky to document a regulated field only inside an individual analyst's spreadsheet?</summary>
+
+A spreadsheet is unversioned, unreviewed, and invisible to the lineage graph, so its definition cannot be trusted, traced, or kept current, and it does not satisfy the self-service traceability regulators expect. If that analyst leaves, the definition leaves too. The docs-as-code approach puts the definition where it is reviewed, versioned, and generated into a shared site instead.
+
+</details>
+
+<details><summary><b>91.</b> How does declaring exposures change the `dbt build` selection ergonomics for a release?</summary>
+
+With exposures declared, a release that must guarantee a specific consumer works can target it directly via `dbt build -s +exposure:emt_daily_feed`, building and testing precisely the dependency chain that feeds the EMT output. This is more precise and safer than rebuilding everything or guessing the model set by hand. It operationalizes the documentation as a runnable selection.
+
+</details>
+
+<details><summary><b>92.</b> What does a blank or default model `description` of an empty string signal to a doc-coverage check?</summary>
+
+An empty-string `description` typically counts as undocumented to a strict coverage check because it carries no information, even though the key technically exists. The check should treat empty or whitespace-only descriptions as failures, not passes. This prevents teams from gaming "every model has a description" by filling in blanks.
+
+</details>
+
+<details><summary><b>93.</b> Why is generated lineage more reliable than a manually drawn architecture diagram for answering provenance questions?</summary>
+
+Generated lineage is derived from the actual `ref()`/`source()` dependencies in the code, so it cannot silently disagree with reality the way a hand-drawn diagram does as the project evolves. It updates every time you regenerate docs. A manual diagram is a snapshot that ages; the generated DAG is the living truth, which is exactly what provenance questions demand.
+
+</details>
+
+<details><summary><b>94.</b> How can docs blocks be organized in a project to stay maintainable?</summary>
+
+Keep docs blocks in dedicated `.md` files (for example one per domain, like `emt.md` or `nav.md`) so related definitions are grouped and easy to find, and reference them from the YAML via `doc()`. This separates verbose prose from terse YAML structure and avoids scattering long text. It also makes the prose itself diffable and reviewable in PRs.
+
+</details>
+
+<details><summary><b>95.</b> What is the first thing to verify if `dbt docs serve` starts but the lineage graph is empty?</summary>
+
+Verify that `dbt docs generate` actually completed and wrote a current `manifest.json` into `target/`, since `serve` only hosts whatever artifacts already exist. An empty or stale graph usually means generate was skipped or failed. Re-run `dbt docs generate`, confirm the artifacts updated, then serve again.
+
+</details>
+
+<details><summary><b>96.</b> Why does the lesson treat dbt docs as a stepping stone to Phase 6 catalogs rather than the final answer?</summary>
+
+dbt docs covers documentation and lineage within a single dbt project, but an enterprise needs cross-system cataloging, business glossaries, stewardship, and policy that span far beyond dbt — which is the Phase 6 catalog layer. dbt docs gets you the discipline and the machine-readable artifacts that those catalogs ingest. It is the gateway: necessary, valuable, but scoped to the project, not the enterprise.
+
+</details>
+
+<details><summary><b>97.</b> How would you handle documentation for a column that is sensitive PII, such as an investor identifier?</summary>
+
+Document its meaning in the `description`, and use `meta` (and/or `tags`) to mark it as PII, for example `meta: {contains_pii: true}`, so downstream catalogs and policy tools can apply masking or access controls. Avoid putting actual sensitive values in descriptions or docs blocks. The metadata flag travels through `manifest.json` to wherever governance enforcement happens.
+
+</details>
+
+<details><summary><b>98.</b> Why is it important that exposures, descriptions, and tests are all parsed from the same project at `dbt docs generate` time?</summary>
+
+Because they are parsed together, the generated docs present a single consistent picture — the same graph drives lineage, the same descriptions appear on pages, and the same tests are listed — with no possibility of three separate sources disagreeing. One generate pass yields one coherent artifact set. This internal consistency is part of why generated docs are trustworthy.
+
+</details>
+
+<details><summary><b>99.</b> A new EMT field is added to the gold model but its description and the exposure are not updated — what acceptance criteria does this violate?</summary>
+
+It violates "every model and column has a description" (the new column is undocumented) and undermines "a business analyst can answer where this EMT field comes from" since the field's provenance is not documented. If the new field changes the consumer contract, the exposure's description may also be stale. The docs-as-code review should have blocked the merge until the description was added.
+
+</details>
+
+<details><summary><b>100.</b> Summarize the end-to-end documentation workflow this lesson expects you to operate.</summary>
+
+You write model and column descriptions (and reusable docs blocks) in versioned YAML reviewed in PRs alongside the SQL, optionally push them to the warehouse with `persist_docs`, declare exposures like the EMT output naming their consumers and owners, then run `dbt docs generate` and publish the site from CI. The result is always-current, self-service documentation where an analyst can trace any EMT field to its source without asking you. That self-service traceability — not the docs site itself — is the real governance deliverable.
+
+</details>
