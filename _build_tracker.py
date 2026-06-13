@@ -224,13 +224,11 @@ def finalize(html: str, link_names: bool = True) -> str:
     return html
 
 
-# ---------------------------------------------------------------- Phase-0 quizzes
+# ---------------------------------------------------------------- per-lesson quizzes
+# Phase-agnostic: a quiz is attached to a lesson wherever _quizzes/<ids[0]>.md exists.
+# QUIZ_IDS (for QUIZZES.md) is collected in lesson order during the phase loop below.
 QUIZ_DIR = root / "_quizzes"
-QUIZ_IDS_P0 = [f"0.{i}" for i in range(1, 13)]
-QUIZ_IDS_P1 = ["1.6.1", "1.6.3", "1.7.1", "1.8.1", "1.8.9", "1.5.1",
-               "3.2.1", "8.2.1", "8.2.4", "8.5.1", "1.10.1", "9.1.3"]
-QUIZ_IDS = QUIZ_IDS_P0 + QUIZ_IDS_P1
-QUIZ_PHASES = (0, 1)
+quiz_order: list[str] = []
 
 
 def _inline_code(s: str) -> str:
@@ -300,13 +298,14 @@ for fname in PHASE_FILES:
         clean_title = re.sub(r"—\s*T[123](?:/T[123])?\s*$", "", heading).strip(" —")
         body_html = finalize(md2html(body.strip()))
         nq = 0
-        if n in QUIZ_PHASES and ids:
+        if ids:
             qp = QUIZ_DIR / f"{ids[0]}.md"
             if qp.exists():
                 qpairs = parse_quiz(qp)
                 if qpairs:
                     body_html += quiz_html(qpairs)
                     nq = len(qpairs)
+                    quiz_order.append(ids[0])
         items.append({"key": key, "title": clean_title, "ids": ids, "tier": tier or "T2",
                       "est": est, "kind": "entry", "quiz": nq, "html": body_html})
 
@@ -375,11 +374,11 @@ js = "window.PLAN = " + json.dumps(data, ensure_ascii=False) + ";"
 print(f"wrote docs/data.js ({len(js) // 1024} KB)")
 
 # ---------------------------------------------------------------- QUIZZES.md (GitHub-readable)
-qz = ["# Phase 0 & 1 — Self-test Question Banks\n",
+qz = ["# Self-test Question Banks\n",
       "100 questions per lesson. Click a question to reveal its answer. "
       "These also appear inside each lesson in the [tracker app](https://sergeiosipov.github.io/data-architect-roadmap/).\n"]
 qtotal = 0
-for qid in QUIZ_IDS:
+for qid in quiz_order:
     p = QUIZ_DIR / f"{qid}.md"
     if not p.exists():
         continue
@@ -391,5 +390,4 @@ for qid in QUIZ_IDS:
     for i, (q, a) in enumerate(pairs, 1):
         qz.append(f"<details><summary><b>{i}.</b> {q}</summary>\n\n{a}\n\n</details>\n")
 (root / "QUIZZES.md").write_text("\n".join(qz), encoding="utf-8")
-print(f"wrote QUIZZES.md ({qtotal} questions across "
-      f"{sum(1 for q in QUIZ_IDS if (QUIZ_DIR / f'{q}.md').exists())} lessons)")
+print(f"wrote QUIZZES.md ({qtotal} questions across {len(quiz_order)} lessons)")
