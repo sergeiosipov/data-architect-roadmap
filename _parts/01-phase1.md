@@ -167,14 +167,17 @@
     - reading `EXPLAIN (ANALYZE, BUFFERS)` — where time and I/O go in a real plan *(Postgres docs: Using EXPLAIN)*
     - connection pooling — why a fund platform fronts Postgres with a pooler, and pooling modes *(PgBouncer docs)*
     - table partitioning — when partition pruning helps and when it just adds planning cost *(Postgres docs: Table Partitioning)*
+    - the extension ecosystem — Postgres is a platform: `pgvector` (vectors), PostGIS (geo), TimescaleDB (time-series), Apache AGE (graph), `pgmq` (queues), `pg_cron` (scheduling), `pg_duckdb`/Citus (analytics), DBOS (durable execution) *(Postgres docs: contrib)*
 - **Resources:**
     - **[CMU 15-445/645 (latest year)](https://15445.courses.cs.cmu.edu/)** — lectures + notes for storage, buffer pool, indexes, sorting/joins, query optimization, MVCC, logging/recovery (~14 of 26 lectures) (primary)
     - [*Database Internals* (Petrov), Part I](https://www.databass.dev/) — storage-engine and B-tree internals in book form (alternate/deepening)
     - [PostgreSQL docs: Using EXPLAIN](https://www.postgresql.org/docs/current/using-explain.html) — plus the [MVCC](https://www.postgresql.org/docs/current/mvcc.html) and [Table Partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html) chapters — the exact engine you tune (reference)
     - [PgBouncer docs](https://www.pgbouncer.org/) — session vs transaction pooling and their gotchas (reference)
+    - [PostgreSQL docs: Additional Supplied Modules & Extensions](https://www.postgresql.org/docs/current/contrib.html) — the extension surface that turns Postgres into a platform (reference)
 - **Tools:**
     - FOSS (hands-on): [PostgreSQL 16](https://www.postgresql.org/docs/) with `EXPLAIN (ANALYZE, BUFFERS)` and [pgbench](https://www.postgresql.org/docs/current/pgbench.html) — the lab engine (↔ Azure SQL)
     - Corp (evaluate): [Azure SQL](https://learn.microsoft.com/azure/azure-sql/) / [Oracle Database](https://docs.oracle.com/en/database/) — planner-hint culture and licensing economics at evaluation level
+- 🐘 **Architect's lens — "Postgres until you can't":** one well-run Postgres plus extensions can stand in for a queue (`pgmq`), a cache, a vector DB (`pgvector`), a time-series DB (TimescaleDB), a graph DB (Apache AGE), a scheduler (`pg_cron`), durable execution (DBOS), and a small analytics warehouse (`pg_duckdb`/Citus) — collapsing operational surface and keeping every workload transactional with your data. *Better when* volumes are low-to-moderate and you value one system to run, secure and back up; *worse when* a single workload's scale, latency, or fan-out outgrows one node — then graduate just that workload to a specialist (Kafka, ClickHouse, Neo4j, a warehouse) and keep the rest on Postgres. Knowing the crossover point per extension is the architect's skill.
 - **Do:**
     1. Build (or reuse the capstone seed of) a 5-table fund-holdings schema in Postgres and load enough Faker data that scans hurt — millions of rows in holdings and NAV history.
     2. Write a deliberately slow 5-table fund-holdings query; capture its plan with `EXPLAIN (ANALYZE, BUFFERS)`.

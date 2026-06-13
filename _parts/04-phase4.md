@@ -310,6 +310,7 @@
 - **Tools:**
     - FOSS (hands-on): [RabbitMQ](https://www.rabbitmq.com/docs) — short hands-on with exchanges and queues (↔ Azure Service Bus / AWS SQS)
     - Corp (evaluate): [Azure Service Bus](https://learn.microsoft.com/en-us/azure/service-bus-messaging/) — the corp-native queue: sessions, dead-lettering, TTL
+- 🐘 **Postgres-native alternative — [pgmq](https://github.com/pgmq/pgmq) (SQS-style queues) + `LISTEN`/`NOTIFY` (lightweight pub/sub):** *Better when* you already run Postgres, volumes are low-to-moderate, and you want transactional enqueue — the message and the business row commit in one transaction — with a single system to operate, secure and back up. *Worse when* you need high-throughput fan-out, topic routing/exchanges, very long retention with replay, or a broker protocol ecosystem: reach for RabbitMQ (routing) or Kafka (replayable log).
 - **Do:**
     1. Stand up RabbitMQ and run a small competing-consumers task-distribution example.
     2. Contrast it with a Kafka consumer-group example over the same workload.
@@ -335,7 +336,9 @@
     - [Temporal documentation root](https://docs.temporal.io/) — the Python SDK tutorial path for the hands-on build (reference)
 - **Tools:**
     - FOSS (hands-on): [Temporal](https://docs.temporal.io/) — OSS server in compose running the durable saga (↔ Temporal Cloud / Durable Functions / Step Functions)
+    - FOSS (Postgres-native): [DBOS](https://docs.dbos.dev/) — durable execution as a library with workflow/queue state in Postgres (↔ Hatchet, pgflow)
     - Corp (evaluate): [Azure Durable Functions](https://learn.microsoft.com/en-us/azure/azure-functions/durable/) — the Azure-native durable-execution analogue
+- 🐘 **Postgres-native alternative — [DBOS](https://docs.dbos.dev/) (also Hatchet, pgflow):** *Better when* you already run Postgres and want durable workflows without operating a Temporal cluster — workflow and queue state live in your DB, commit transactionally with your business data, far lighter ops and lower latency. *Worse when* you need Temporal's maturity at scale: massive parallel fan-out, very long-lived workflows, rich signals/queries and visibility tooling, or multi-language/multi-region — there a single Postgres becomes the bottleneck and Temporal's ecosystem wins.
 - **Do:**
     1. Run Temporal OSS in compose with a worker.
     2. Reimplement the Phase-4 subscription saga as a Temporal workflow with activities for each step.

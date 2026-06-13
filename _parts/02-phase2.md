@@ -224,6 +224,7 @@
 - **Tools:**
     - FOSS (hands-on): [DuckDB](https://duckdb.org/docs/) — the embedded engine for marts and benchmarks
     - Corp (evaluate): [MotherDuck](https://motherduck.com/docs/), [ClickHouse Cloud](https://clickhouse.com/docs) — at awareness level
+- 🐘 **Postgres-native alternative — [pg_duckdb](https://github.com/duckdb/pg_duckdb) / [Citus](https://www.citusdata.com/) columnar:** *Better when* you want columnar analytics inside the same Postgres that serves OLTP — DuckDB's engine embedded via `pg_duckdb`, or Citus for distributed/columnar tables — so analysts query live data with no separate warehouse to load. *Worse when* you need true lakehouse scale, open table formats, or storage/compute separation: that's Trino/Spark/warehouse territory.
 - **Do:**
     1. Benchmark the Phase-1 mart queries two ways: DuckDB over Parquet vs Postgres.
     2. Record query times and resource use for each.

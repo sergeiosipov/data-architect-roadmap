@@ -131,7 +131,8 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - core language — values/types, control flow, functions, modules; small composable functions over script-blobs *(py4e ch. 1–5)*
     - collections — lists, dicts, sets, and which fits a funds-by-ISIN lookup *(py4e ch. 8–10)*
     - files & exceptions — read a CSV line by line and fail loudly on a malformed row *(py4e ch. 7)*
-    - environments — `uv init`, `uv add`, `uv run` from day one; lockfiles, and why bare `pip` is banned here; ruff wired into the editor early *(uv docs: Projects)*
+    - environments — `uv init`, `uv add`, `uv run` from day one; lockfiles, and why bare `pip` is banned here; the Astral toolchain (`uv`, `ruff`, `ty`) wired into the editor early *(uv docs: Projects)*
+    - type checking — `ty` (Astral's fast Rust-based type checker) catches a wrong type before runtime; type hints on function signatures make `fundcli` self-documenting and reviewable *(ty docs)*
     - tracebacks & debugging — read bottom-up, reproduce minimally, then fix *(Automate: Debugging chapter)*
     - calling an HTTP API — fetch JSON, handle status codes and timeouts *(py4e ch. 12–13)*
     - small CLI scripts — argparse flags, `--help`, exit codes, so scripts behave like real tools *(Python docs: Argparse Tutorial)*
@@ -139,19 +140,21 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - **[Python for Everybody](https://www.py4e.com/)** (Severance — free full course) — values through files, exceptions and web data; the core path (primary)
     - [Automate the Boring Stuff with Python](https://automatetheboringstuff.com/) (free online) — alternate full course; its Debugging chapter covers tracebacks hands-on (alternate)
     - [uv documentation](https://docs.astral.sh/uv/) — projects, dependencies, `uv run`; the only way Python runs in this plan (reference)
+    - [ty documentation](https://docs.astral.sh/ty/) — Astral's fast type checker; the third of the `uv`/`ruff`/`ty` toolchain (reference)
     - [Python docs: Argparse Tutorial](https://docs.python.org/3/howto/argparse.html) — flags, defaults and help text for `fundcli` (reference)
 - **Tools:**
-    - FOSS (hands-on): [Python](https://docs.python.org/3/) via [uv](https://docs.astral.sh/uv/), [ruff](https://docs.astral.sh/ruff/), [VS Code](https://code.visualstudio.com/docs) — the daily toolchain for four years
+    - FOSS (hands-on): [Python](https://docs.python.org/3/) via [uv](https://docs.astral.sh/uv/), [ruff](https://docs.astral.sh/ruff/), [ty](https://docs.astral.sh/ty/), [VS Code](https://code.visualstudio.com/docs) — the daily Astral toolchain for four years
 - **Do:**
-    1. `uv init fundcli` and commit the empty scaffold; add ruff and run it on every save from now on.
+    1. `uv init fundcli` and commit the empty scaffold; add `ruff` and `ty` (`uv add --dev ruff ty`) and run both on every save from now on.
     2. Build `fundcli`: read a CSV of funds (ISIN, name, currency, domicile), filter by `--currency`/`--domicile` flags via argparse, write a summary JSON (counts per currency and per domicile).
-    3. Split it into functions — parse, filter, summarize, write — so each is callable (and, in 0.11, testable) on its own.
+    3. Split it into functions — parse, filter, summarize, write — each with type hints so `uv run ty check` passes clean, and each callable (and, in 0.11, testable) on its own.
     4. Make failure honest: a malformed row raises with its row number; a missing input file exits non-zero with a one-line message, not a raw traceback.
     5. Write `--help` text good enough that someone else can run it without reading the code.
 - **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 36 h)*
     - [ ] Write a 100-line script (read a CSV, filter rows via a function you define, write JSON, handle a malformed line) without copying structure from examples.
     - [ ] Verify `uv run fundcli.py --help` behaves like a real tool — flags documented, errors clean, exit codes correct.
     - [ ] Diagnose a planted TypeError from its traceback alone, narrating the read order.
+    - [ ] `uv run ty check` passes clean, with type hints on every function signature.
 - Est. hours: counted as A.28 (36 h, Appendix A)
 
 #### 0.3 — A.29 SQL from zero
@@ -351,7 +354,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 - **Why:** Tooling friction taxes every hour of the next four years; set it up once, properly. Print-debugging through a reconciliation script costs hours where a breakpoint costs minutes — and the habit gap compounds across every later phase.
 - **Learn:**
     - workspace & integrated terminal — VS Code running natively on Ubuntu, so editor and lab share one filesystem *(VS Code docs: Linux)*
-    - extensions — Python, ruff, Jupyter, Docker; what each actually adds *(VS Code docs: Python tutorial)*
+    - extensions — Python, ruff, ty, Jupyter, Docker; what each actually adds *(VS Code docs: Python tutorial)*
     - debugging with breakpoints — set, step, inspect variables, watch expressions; stop print-debugging early *(VS Code docs: Python debugging)*
     - keyboard-first habits — command palette, go-to-definition, multi-cursor; a dozen bindings beat a hundred *(VS Code docs: Python tutorial)*
     - JupyterLab vs VS Code notebooks — same kernels, different ergonomics; pick per task *(VS Code docs: Jupyter Notebooks)*
@@ -363,7 +366,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 - **Tools:**
     - FOSS (hands-on): [VS Code](https://code.visualstudio.com/docs) (↔ JetBrains; choice is taste, fluency is mandatory)
 - **Do:**
-    1. Install VS Code on Ubuntu with the Python, ruff, Jupyter and Docker extensions; open your `fundcli` repo from your home directory.
+    1. Install VS Code on Ubuntu with the Python, ruff, ty, Jupyter and Docker extensions; open your `fundcli` repo from your home directory.
     2. Plant a bug in a `fundcli` function (e.g., a filter that drops the wrong currency) on a branch.
     3. Debug it with a breakpoint inside the function: inspect variables, step through the filter, fix it — without a single print.
     4. Drill the bindings for run, breakpoint toggle, command palette and go-to-definition until the mouse is optional.
@@ -601,14 +604,17 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - reading `EXPLAIN (ANALYZE, BUFFERS)` — where time and I/O go in a real plan *(Postgres docs: Using EXPLAIN)*
     - connection pooling — why a fund platform fronts Postgres with a pooler, and pooling modes *(PgBouncer docs)*
     - table partitioning — when partition pruning helps and when it just adds planning cost *(Postgres docs: Table Partitioning)*
+    - the extension ecosystem — Postgres is a platform: `pgvector` (vectors), PostGIS (geo), TimescaleDB (time-series), Apache AGE (graph), `pgmq` (queues), `pg_cron` (scheduling), `pg_duckdb`/Citus (analytics), DBOS (durable execution) *(Postgres docs: contrib)*
 - **Resources:**
     - **[CMU 15-445/645 (latest year)](https://15445.courses.cs.cmu.edu/)** — lectures + notes for storage, buffer pool, indexes, sorting/joins, query optimization, MVCC, logging/recovery (~14 of 26 lectures) (primary)
     - [*Database Internals* (Petrov), Part I](https://www.databass.dev/) — storage-engine and B-tree internals in book form (alternate/deepening)
     - [PostgreSQL docs: Using EXPLAIN](https://www.postgresql.org/docs/current/using-explain.html) — plus the [MVCC](https://www.postgresql.org/docs/current/mvcc.html) and [Table Partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html) chapters — the exact engine you tune (reference)
     - [PgBouncer docs](https://www.pgbouncer.org/) — session vs transaction pooling and their gotchas (reference)
+    - [PostgreSQL docs: Additional Supplied Modules & Extensions](https://www.postgresql.org/docs/current/contrib.html) — the extension surface that turns Postgres into a platform (reference)
 - **Tools:**
     - FOSS (hands-on): [PostgreSQL 16](https://www.postgresql.org/docs/) with `EXPLAIN (ANALYZE, BUFFERS)` and [pgbench](https://www.postgresql.org/docs/current/pgbench.html) — the lab engine (↔ Azure SQL)
     - Corp (evaluate): [Azure SQL](https://learn.microsoft.com/azure/azure-sql/) / [Oracle Database](https://docs.oracle.com/en/database/) — planner-hint culture and licensing economics at evaluation level
+- 🐘 **Architect's lens — "Postgres until you can't":** one well-run Postgres plus extensions can stand in for a queue (`pgmq`), a cache, a vector DB (`pgvector`), a time-series DB (TimescaleDB), a graph DB (Apache AGE), a scheduler (`pg_cron`), durable execution (DBOS), and a small analytics warehouse (`pg_duckdb`/Citus) — collapsing operational surface and keeping every workload transactional with your data. *Better when* volumes are low-to-moderate and you value one system to run, secure and back up; *worse when* a single workload's scale, latency, or fan-out outgrows one node — then graduate just that workload to a specialist (Kafka, ClickHouse, Neo4j, a warehouse) and keep the rest on Postgres. Knowing the crossover point per extension is the architect's skill.
 - **Do:**
     1. Build (or reuse the capstone seed of) a 5-table fund-holdings schema in Postgres and load enough Faker data that scans hurt — millions of rows in holdings and NAV history.
     2. Write a deliberately slow 5-table fund-holdings query; capture its plan with `EXPLAIN (ANALYZE, BUFFERS)`.
@@ -1007,6 +1013,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 - **Tools:**
     - FOSS (hands-on): [DuckDB](https://duckdb.org/docs/) — the embedded engine for marts and benchmarks
     - Corp (evaluate): [MotherDuck](https://motherduck.com/docs/), [ClickHouse Cloud](https://clickhouse.com/docs) — at awareness level
+- 🐘 **Postgres-native alternative — [pg_duckdb](https://github.com/duckdb/pg_duckdb) / [Citus](https://www.citusdata.com/) columnar:** *Better when* you want columnar analytics inside the same Postgres that serves OLTP — DuckDB's engine embedded via `pg_duckdb`, or Citus for distributed/columnar tables — so analysts query live data with no separate warehouse to load. *Worse when* you need true lakehouse scale, open table formats, or storage/compute separation: that's Trino/Spark/warehouse territory.
 - **Do:**
     1. Benchmark the Phase-1 mart queries two ways: DuckDB over Parquet vs Postgres.
     2. Record query times and resource use for each.
@@ -1348,6 +1355,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - FOSS (hands-on): [Dagster](https://docs.dagster.io/) — primary orchestrator for the capstone (↔ Dagster+ / ADF)
     - FOSS (market fluency): [Apache Airflow](https://airflow.apache.org/docs/) — one comparison DAG; the incumbent in most fund-admin shops (↔ MWAA / Cloud Composer)
     - Corp (evaluate): [Azure Data Factory](https://learn.microsoft.com/azure/data-factory/), [MWAA](https://docs.aws.amazon.com/mwaa/), [Cloud Composer](https://cloud.google.com/composer/docs) — managed offerings at build-vs-buy level: pricing model, upgrade cadence, lock-in
+- 🐘 **Postgres-native alternative — [pg_cron](https://github.com/citusdata/pg_cron):** *Better when* the need is just periodic SQL in one database — refresh a materialized view, nightly cleanup, a scheduled `VACUUM` — with zero extra infrastructure. *Worse when* you have cross-system DAGs, inter-task dependencies, backfills, retries, or lineage: pg_cron has no dependency graph or observability, so reach for Dagster/Airflow.
 - **Do:**
     1. Orchestrate the Capstone-2 pipeline as Dagster assets with daily partitions; add asset checks for row counts and NAV-total reconciliation.
     2. Wire declarative automation so the gold layer rebuilds when silver assets materialize, not on a cron guess.
@@ -1833,6 +1841,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 - **Tools:**
     - FOSS (hands-on): [RabbitMQ](https://www.rabbitmq.com/docs) — short hands-on with exchanges and queues (↔ Azure Service Bus / AWS SQS)
     - Corp (evaluate): [Azure Service Bus](https://learn.microsoft.com/en-us/azure/service-bus-messaging/) — the corp-native queue: sessions, dead-lettering, TTL
+- 🐘 **Postgres-native alternative — [pgmq](https://github.com/pgmq/pgmq) (SQS-style queues) + `LISTEN`/`NOTIFY` (lightweight pub/sub):** *Better when* you already run Postgres, volumes are low-to-moderate, and you want transactional enqueue — the message and the business row commit in one transaction — with a single system to operate, secure and back up. *Worse when* you need high-throughput fan-out, topic routing/exchanges, very long retention with replay, or a broker protocol ecosystem: reach for RabbitMQ (routing) or Kafka (replayable log).
 - **Do:**
     1. Stand up RabbitMQ and run a small competing-consumers task-distribution example.
     2. Contrast it with a Kafka consumer-group example over the same workload.
@@ -1858,7 +1867,9 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [Temporal documentation root](https://docs.temporal.io/) — the Python SDK tutorial path for the hands-on build (reference)
 - **Tools:**
     - FOSS (hands-on): [Temporal](https://docs.temporal.io/) — OSS server in compose running the durable saga (↔ Temporal Cloud / Durable Functions / Step Functions)
+    - FOSS (Postgres-native): [DBOS](https://docs.dbos.dev/) — durable execution as a library with workflow/queue state in Postgres (↔ Hatchet, pgflow)
     - Corp (evaluate): [Azure Durable Functions](https://learn.microsoft.com/en-us/azure/azure-functions/durable/) — the Azure-native durable-execution analogue
+- 🐘 **Postgres-native alternative — [DBOS](https://docs.dbos.dev/) (also Hatchet, pgflow):** *Better when* you already run Postgres and want durable workflows without operating a Temporal cluster — workflow and queue state live in your DB, commit transactionally with your business data, far lighter ops and lower latency. *Worse when* you need Temporal's maturity at scale: massive parallel fan-out, very long-lived workflows, rich signals/queries and visibility tooling, or multi-language/multi-region — there a single Postgres becomes the bottleneck and Temporal's ecosystem wins.
 - **Do:**
     1. Run Temporal OSS in compose with a worker.
     2. Reimplement the Phase-4 subscription saga as a Temporal workflow with activities for each step.

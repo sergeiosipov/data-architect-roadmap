@@ -150,6 +150,12 @@ MANUAL = {
     "uv": "https://docs.astral.sh/uv/",
     "ruff": "https://docs.astral.sh/ruff/",
     "Anthropic “Building Effective Agents”": "https://www.anthropic.com/engineering/building-effective-agents",
+    "DBOS": "https://docs.dbos.dev/",
+    "pgmq": "https://github.com/pgmq/pgmq",
+    "pg_cron": "https://github.com/citusdata/pg_cron",
+    "pg_duckdb": "https://github.com/duckdb/pg_duckdb",
+    "Citus": "https://www.citusdata.com/",
+    "Apache AGE": "https://age.apache.org/",
 }
 for k, v in MANUAL.items():
     LINKS[k] = v

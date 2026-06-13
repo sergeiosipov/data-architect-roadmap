@@ -47,7 +47,8 @@
     - core language — values/types, control flow, functions, modules; small composable functions over script-blobs *(py4e ch. 1–5)*
     - collections — lists, dicts, sets, and which fits a funds-by-ISIN lookup *(py4e ch. 8–10)*
     - files & exceptions — read a CSV line by line and fail loudly on a malformed row *(py4e ch. 7)*
-    - environments — `uv init`, `uv add`, `uv run` from day one; lockfiles, and why bare `pip` is banned here; ruff wired into the editor early *(uv docs: Projects)*
+    - environments — `uv init`, `uv add`, `uv run` from day one; lockfiles, and why bare `pip` is banned here; the Astral toolchain (`uv`, `ruff`, `ty`) wired into the editor early *(uv docs: Projects)*
+    - type checking — `ty` (Astral's fast Rust-based type checker) catches a wrong type before runtime; type hints on function signatures make `fundcli` self-documenting and reviewable *(ty docs)*
     - tracebacks & debugging — read bottom-up, reproduce minimally, then fix *(Automate: Debugging chapter)*
     - calling an HTTP API — fetch JSON, handle status codes and timeouts *(py4e ch. 12–13)*
     - small CLI scripts — argparse flags, `--help`, exit codes, so scripts behave like real tools *(Python docs: Argparse Tutorial)*
@@ -55,19 +56,21 @@
     - **[Python for Everybody](https://www.py4e.com/)** (Severance — free full course) — values through files, exceptions and web data; the core path (primary)
     - [Automate the Boring Stuff with Python](https://automatetheboringstuff.com/) (free online) — alternate full course; its Debugging chapter covers tracebacks hands-on (alternate)
     - [uv documentation](https://docs.astral.sh/uv/) — projects, dependencies, `uv run`; the only way Python runs in this plan (reference)
+    - [ty documentation](https://docs.astral.sh/ty/) — Astral's fast type checker; the third of the `uv`/`ruff`/`ty` toolchain (reference)
     - [Python docs: Argparse Tutorial](https://docs.python.org/3/howto/argparse.html) — flags, defaults and help text for `fundcli` (reference)
 - **Tools:**
-    - FOSS (hands-on): [Python](https://docs.python.org/3/) via [uv](https://docs.astral.sh/uv/), [ruff](https://docs.astral.sh/ruff/), [VS Code](https://code.visualstudio.com/docs) — the daily toolchain for four years
+    - FOSS (hands-on): [Python](https://docs.python.org/3/) via [uv](https://docs.astral.sh/uv/), [ruff](https://docs.astral.sh/ruff/), [ty](https://docs.astral.sh/ty/), [VS Code](https://code.visualstudio.com/docs) — the daily Astral toolchain for four years
 - **Do:**
-    1. `uv init fundcli` and commit the empty scaffold; add ruff and run it on every save from now on.
+    1. `uv init fundcli` and commit the empty scaffold; add `ruff` and `ty` (`uv add --dev ruff ty`) and run both on every save from now on.
     2. Build `fundcli`: read a CSV of funds (ISIN, name, currency, domicile), filter by `--currency`/`--domicile` flags via argparse, write a summary JSON (counts per currency and per domicile).
-    3. Split it into functions — parse, filter, summarize, write — so each is callable (and, in 0.11, testable) on its own.
+    3. Split it into functions — parse, filter, summarize, write — each with type hints so `uv run ty check` passes clean, and each callable (and, in 0.11, testable) on its own.
     4. Make failure honest: a malformed row raises with its row number; a missing input file exits non-zero with a one-line message, not a raw traceback.
     5. Write `--help` text good enough that someone else can run it without reading the code.
 - **Done when:** *(this checklist is also the module's Skip test — tick every box cold today and skip the module, banking 36 h)*
     - [ ] Write a 100-line script (read a CSV, filter rows via a function you define, write JSON, handle a malformed line) without copying structure from examples.
     - [ ] Verify `uv run fundcli.py --help` behaves like a real tool — flags documented, errors clean, exit codes correct.
     - [ ] Diagnose a planted TypeError from its traceback alone, narrating the read order.
+    - [ ] `uv run ty check` passes clean, with type hints on every function signature.
 - Est. hours: counted as A.28 (36 h, Appendix A)
 
 #### 0.3 — A.29 SQL from zero
@@ -267,7 +270,7 @@
 - **Why:** Tooling friction taxes every hour of the next four years; set it up once, properly. Print-debugging through a reconciliation script costs hours where a breakpoint costs minutes — and the habit gap compounds across every later phase.
 - **Learn:**
     - workspace & integrated terminal — VS Code running natively on Ubuntu, so editor and lab share one filesystem *(VS Code docs: Linux)*
-    - extensions — Python, ruff, Jupyter, Docker; what each actually adds *(VS Code docs: Python tutorial)*
+    - extensions — Python, ruff, ty, Jupyter, Docker; what each actually adds *(VS Code docs: Python tutorial)*
     - debugging with breakpoints — set, step, inspect variables, watch expressions; stop print-debugging early *(VS Code docs: Python debugging)*
     - keyboard-first habits — command palette, go-to-definition, multi-cursor; a dozen bindings beat a hundred *(VS Code docs: Python tutorial)*
     - JupyterLab vs VS Code notebooks — same kernels, different ergonomics; pick per task *(VS Code docs: Jupyter Notebooks)*
@@ -279,7 +282,7 @@
 - **Tools:**
     - FOSS (hands-on): [VS Code](https://code.visualstudio.com/docs) (↔ JetBrains; choice is taste, fluency is mandatory)
 - **Do:**
-    1. Install VS Code on Ubuntu with the Python, ruff, Jupyter and Docker extensions; open your `fundcli` repo from your home directory.
+    1. Install VS Code on Ubuntu with the Python, ruff, ty, Jupyter and Docker extensions; open your `fundcli` repo from your home directory.
     2. Plant a bug in a `fundcli` function (e.g., a filter that drops the wrong currency) on a branch.
     3. Debug it with a breakpoint inside the function: inspect variables, step through the filter, fix it — without a single print.
     4. Drill the bindings for run, breakpoint toggle, command palette and go-to-definition until the mouse is optional.

@@ -87,6 +87,7 @@
     - FOSS (hands-on): [Dagster](https://docs.dagster.io/) — primary orchestrator for the capstone (↔ Dagster+ / ADF)
     - FOSS (market fluency): [Apache Airflow](https://airflow.apache.org/docs/) — one comparison DAG; the incumbent in most fund-admin shops (↔ MWAA / Cloud Composer)
     - Corp (evaluate): [Azure Data Factory](https://learn.microsoft.com/azure/data-factory/), [MWAA](https://docs.aws.amazon.com/mwaa/), [Cloud Composer](https://cloud.google.com/composer/docs) — managed offerings at build-vs-buy level: pricing model, upgrade cadence, lock-in
+- 🐘 **Postgres-native alternative — [pg_cron](https://github.com/citusdata/pg_cron):** *Better when* the need is just periodic SQL in one database — refresh a materialized view, nightly cleanup, a scheduled `VACUUM` — with zero extra infrastructure. *Worse when* you have cross-system DAGs, inter-task dependencies, backfills, retries, or lineage: pg_cron has no dependency graph or observability, so reach for Dagster/Airflow.
 - **Do:**
     1. Orchestrate the Capstone-2 pipeline as Dagster assets with daily partitions; add asset checks for row counts and NAV-total reconciliation.
     2. Wire declarative automation so the gold layer rebuilds when silver assets materialize, not on a cron guess.
