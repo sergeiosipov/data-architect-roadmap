@@ -174,7 +174,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [PostgreSQL Tutorial](https://www.postgresqltutorial.com/) — alternate track with explicit CTE, NULL and window-function sections (alternate)
     - [PostgreSQL documentation](https://www.postgresql.org/docs/) — indexes, information_schema and exact semantics when the tutorials run out (reference)
 - **Tools:**
-    - FOSS (hands-on): [PostgreSQL](https://www.postgresql.org/docs/) in Docker (from 0.5), [DBeaver](https://dbeaver.io/) or [psql](https://www.postgresql.org/docs/current/app-psql.html) (↔ [Azure SQL](https://learn.microsoft.com/azure/azure-sql/) — same language)
+    - FOSS (hands-on): the SQLBolt/PgExercises drills above need no install — do those first; [PostgreSQL](https://www.postgresql.org/docs/) in Docker (from 0.5) with [DBeaver](https://dbeaver.io/) or [psql](https://www.postgresql.org/docs/current/app-psql.html) is only needed to load your own data in Do step 1 (↔ [Azure SQL](https://learn.microsoft.com/azure/azure-sql/) — same language)
 - **Do:**
     1. Load your 0.2 funds CSV plus a NAV-history table into Postgres (via the 0.5 Compose stack) so you have a two-table funds/nav schema sharing a fund key.
     2. Answer 15 questions of rising difficulty in a committed `.sql` file: filters → joins → GROUP BY → CTEs → "latest NAV per fund via window function".
@@ -670,12 +670,12 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [Kimball Group: Dimensional Modeling Techniques](https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/) — the full technique catalog, free, for lookup during design (reference)
     - [Corr & Stagnitto, *Agile Data Warehouse Design*](https://books.google.com/books/about/Agile_Data_Warehouse_Design.html?id=TRWFmnv8jP0C) — BEAM workshops for modeling with business stakeholders (alternate)
 - **Tools:**
-    - FOSS (hands-on): [dbt Core](https://docs.getdbt.com/) + [DuckDB](https://duckdb.org/docs/) — implement the star and SCD2 logic as versioned models (↔ Synapse/Snowflake marts)
+    - FOSS (hands-on): [DuckDB](https://duckdb.org/docs/) — implement the star and SCD2 logic in plain SQL/DDL (you have SQL from Phase 0; you rebuild this mart as a dbt project later in 5.2.1) (↔ Synapse/Snowflake marts)
     - Corp (evaluate): [Azure Synapse](https://learn.microsoft.com/azure/synapse-analytics/) / [Snowflake](https://docs.snowflake.com/) — the same patterns on licensed mart engines
 - **Do:**
     1. Design the bus matrix for a fund administrator — processes: orders, NAV calculation, fee accrual, transfer agency — against conformed dimensions (fund, share class, investor, date).
     2. Declare the grain of each fact table in one written sentence before touching any column list.
-    3. Implement the NAV periodic-snapshot star in SQL (dbt + DuckDB) with an SCD2 fund dimension (valid_from / valid_to + current flag).
+    3. Implement the NAV periodic-snapshot star in plain SQL/DDL on DuckDB with an SCD2 fund dimension (valid_from / valid_to + current flag).
     4. Write the point-in-time query joining the snapshot fact to the SCD2 dimension as of an arbitrary historical date; test it across at least one attribute change.
 - **Done when:**
     - [ ] State the grain of each fact table in one sentence.
@@ -830,9 +830,9 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - vendor positioning — Databricks vs Snowflake-with-Iceberg vs Fabric/OneLake at architecture level *(Lakehouse paper, CIDR 2021)*
 - **Resources:**
     - **[Lakehouse: A New Generation of Open Platforms (CIDR 2021)](https://www.cidrdb.org/cidr2021/papers/cidr2021_paper17.pdf)** — Armbrust et al.; the technical core of the lakehouse argument (primary)
-    - [Building the Data Lakehouse](https://www.oreilly.com/library/view/building-the-data/9781098117290/) — Inmon et al.; skim for the warehouse-veteran perspective and where lakes earn distrust (reference)
+    - [Building the Data Lakehouse](https://technicspub.com/data-lakehouse-collection/) — Inmon et al.; skim for the warehouse-veteran perspective and where lakes earn distrust (reference)
 - **Tools:**
-    - FOSS (hands-on): [MinIO](https://min.io/docs/minio/linux/index.html) + [Apache Iceberg](https://iceberg.apache.org/docs/latest/) + [Trino](https://trino.io/docs/current/) + [DuckDB](https://duckdb.org/docs/) — the four open layers assembled (↔ a managed lakehouse)
+    - FOSS (hands-on): [MinIO](https://docs.min.io/index.html) + [Apache Iceberg](https://iceberg.apache.org/docs/latest/) + [Trino](https://trino.io/docs/current/) + [DuckDB](https://duckdb.org/docs/) — the four open layers assembled (↔ a managed lakehouse)
     - Corp (evaluate): [Databricks](https://docs.databricks.com/), [Microsoft Fabric / OneLake](https://learn.microsoft.com/fabric/onelake/), [Snowflake](https://docs.snowflake.com/) — what each bundles and where the lock-in sits
 - **Do:**
     1. Write a 2-page build-vs-buy memo: open lakehouse vs Databricks vs Fabric for a 50-person Luxembourg fund administrator.
@@ -854,10 +854,10 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - multipart upload mechanics — how large NAV/holdings files land reliably *(MinIO docs: Core Concepts)*
     - ADLS Gen2 hierarchical namespace — why atomic directory rename exists and what it buys *(ADLS Gen2 introduction)*
 - **Resources:**
-    - **[MinIO documentation](https://min.io/docs/minio/linux/index.html)** — S3-compatible object store: core concepts, lifecycle, multipart upload (primary)
+    - **[MinIO documentation](https://docs.min.io/index.html)** — S3-compatible object store: core concepts, lifecycle, multipart upload (primary)
     - [Azure Data Lake Storage Gen2 introduction](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-introduction) — hierarchical namespace and atomic directory operations on Azure (reference)
 - **Tools:**
-    - FOSS (hands-on): [MinIO](https://min.io/docs/minio/linux/index.html) — the local S3 substrate for the whole phase (↔ ADLS Gen2 / S3)
+    - FOSS (hands-on): [MinIO](https://docs.min.io/index.html) — the local S3 substrate for the whole phase (↔ ADLS Gen2 / S3)
     - Corp (evaluate): [ADLS Gen2](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-introduction) — primary cloud target; [S3](https://docs.aws.amazon.com/s3/) — awareness of the de-facto standard
 - **Do:**
     1. Run MinIO in Docker Compose and create a bucket for the fund lakehouse.
@@ -908,7 +908,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [DuckDB docs: Reading Parquet](https://duckdb.org/docs/data/parquet/overview) — pushdown and projection from the reader's side, used in the lab (reference)
     - [Fundamentals of Data Engineering](https://www.oreilly.com/library/view/fundamentals-of-data/9781098108298/) ch. 6 — file-format context including Avro/ORC tradeoffs (alternate)
 - **Tools:**
-    - FOSS (hands-on): [pyarrow](https://arrow.apache.org/docs/python/), [DuckDB](https://duckdb.org/docs/), [parquet-tools](https://github.com/apache/parquet-java/tree/master/parquet-tools-deprecated) — write, inspect, and benchmark Parquet
+    - FOSS (hands-on): [pyarrow](https://arrow.apache.org/docs/python/), [DuckDB](https://duckdb.org/docs/), [parquet-tools](https://github.com/apache/parquet-java/blob/master/parquet-cli/README.md) — write, inspect, and benchmark Parquet
     - Corp (evaluate): same formats everywhere — this knowledge is vendor-neutral by design
 - **Do:**
     1. With pyarrow via `uv run`, write the same 10M-row holdings table at three row-group sizes and two compressions (snappy, zstd).
@@ -934,7 +934,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - **[Apache Iceberg documentation](https://iceberg.apache.org/docs/latest/)** — spec, Maintenance, Partitioning, Configuration: the operational core (primary)
     - [Apache Iceberg: The Definitive Guide](https://hello.dremio.com/wp-apache-iceberg-the-definitive-guide-reg.html) — free via Dremio; format-war context, Delta/Hudi comparison, COW vs MOR (alternate)
 - **Tools:**
-    - FOSS (hands-on): [Iceberg](https://iceberg.apache.org/docs/latest/) on [MinIO](https://min.io/docs/minio/linux/index.html) via [Trino](https://trino.io/docs/current/connector/iceberg.html); Delta via [DuckDB](https://duckdb.org/docs/) / [delta-rs](https://delta-io.github.io/delta-rs/) — exercise both formats
+    - FOSS (hands-on): [Iceberg](https://iceberg.apache.org/docs/latest/) on [MinIO](https://docs.min.io/index.html) via [Trino](https://trino.io/docs/current/connector/iceberg.html); Delta via [DuckDB](https://duckdb.org/docs/) / [delta-rs](https://delta-io.github.io/delta-rs/) — exercise both formats
     - Corp (evaluate): [Databricks Delta](https://docs.databricks.com/delta/), [Snowflake managed Iceberg](https://docs.snowflake.com/en/user-guide/tables-iceberg), [Fabric OneLake](https://learn.microsoft.com/fabric/onelake/) — managed forms
 - **Do:**
     1. Create an Iceberg NAV table via Trino on MinIO.
@@ -962,7 +962,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [Lakekeeper documentation](https://docs.lakekeeper.io/) — a lightweight Rust REST catalog, easy to run in compose (alternate)
 - **Tools:**
     - FOSS (hands-on): [Lakekeeper](https://docs.lakekeeper.io/) or [Apache Polaris](https://polaris.apache.org/) — a REST catalog in Docker Compose (↔ managed catalog)
-    - Corp (evaluate): [Unity Catalog](https://docs.databricks.com/data-governance/unity-catalog/), [AWS Glue](https://docs.aws.amazon.com/glue/), [Snowflake Open Catalog](https://other-docs.snowflake.com/en/opencatalog/) — what each bundles
+    - Corp (evaluate): [Unity Catalog](https://docs.databricks.com/data-governance/unity-catalog/), [AWS Glue](https://docs.aws.amazon.com/glue/), [Snowflake Open Catalog](https://docs.snowflake.com/en/user-guide/opencatalog/overview) — what each bundles
 - **Do:**
     1. Swap your capstone's catalog from Trino's Hive-style catalog to a Lakekeeper or Polaris REST catalog.
     2. Re-point Trino at the REST catalog and confirm the existing Iceberg tables resolve unchanged.
@@ -1041,7 +1041,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [SQLMesh documentation](https://sqlmesh.readthedocs.io/) — the challenger's virtual environments and lineage, for evaluation (alternate)
 - **Tools:**
     - FOSS (hands-on): [dbt Core](https://docs.getdbt.com/) + [dbt-duckdb](https://github.com/duckdb/dbt-duckdb) / [dbt-trino](https://github.com/starburstdata/dbt-trino); [SQLMesh](https://sqlmesh.readthedocs.io/) (eval) — the transformation layer (↔ dbt Cloud)
-    - Corp (evaluate): [dbt Cloud](https://docs.getdbt.com/docs/cloud/about-cloud/dbt-cloud-features), [Coalesce](https://docs.coalesce.io/), [Dataform](https://cloud.google.com/dataform/docs) — managed options
+    - Corp (evaluate): [dbt Cloud](https://docs.getdbt.com/docs/cloud/about-cloud/dbt-cloud-featuresabout-cloud/dbt-cloud-features), [Coalesce](https://docs.coalesce.io/), [Dataform](https://cloud.google.com/dataform/docs) — managed options
 - **Do:**
     1. Rebuild the Phase-1 mart as a layered dbt project on DuckDB: sources with freshness checks, staging → marts.
     2. Implement a snapshot-based SCD2 fund/share-class dimension.
@@ -1109,7 +1109,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - PIT and bridge tables — restoring query performance over a normalized vault *(Data Vault 2.0 ch. 7)*
     - when Vault is overkill, and Vault-on-lakehouse with dbt/AutomateDV *(AutomateDV docs)*
 - **Resources:**
-    - **[Building a Scalable Data Warehouse with Data Vault 2.0 (Linstedt & Olschimke)](https://www.oreilly.com/library/view/building-a-scalable/9780128025109/)** ch. 1–7 (modeling) + ch. 11–12 (loading) (primary)
+    - **[Building a Scalable Data Warehouse with Data Vault 2.0 (Linstedt & Olschimke)](https://www.oreilly.com/library/view/building-a-scalable/9780128026489/)** ch. 1–7 (modeling) + ch. 11–12 (loading) (primary)
     - [AutomateDV documentation](https://automate-dv.readthedocs.io/) — the dbt package that generates hub/link/sat loads on the lakehouse (reference)
 - **Tools:**
     - FOSS (hands-on): [dbt](https://docs.getdbt.com/) + [AutomateDV package](https://automate-dv.readthedocs.io/) — raw vault generated and tested (↔ VaultSpeed)
@@ -1153,6 +1153,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - EMT structure — manufacturer target market and costs & charges blocks *(FinDatEx: templates)*
     - EPT structure — PRIIPs KID inputs (SRI, performance scenarios, costs) *(PRIIPs Regulation 1286/2014)*
     - CEPT and delta templates and how distributors consume them *(FinDatEx: templates)*
+    - EET (European ESG Template, FinDatEx v1.1.3) — the ESG sibling of EMT/EPT that carries the SFDR / Taxonomy / MiFID-II sustainability data points (PAIs, taxonomy alignment, SFDR Article 6/8/9 flags) to distributors; same versioning/partial-file pain as EMT *(FinDatEx: templates)*
     - data-quality pain points — versioning, partial files, code lists *(FinDatEx: templates)*
 - **Resources:**
     - **[FinDatEx templates](https://findatex.eu/)** — current EMT and EPT specifications, free downloads (primary)
@@ -1178,7 +1179,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - identifier lifecycle events — corporate actions that rename or retire ISINs *(ANNA: standards)*
 - **Resources:**
     - **[GLEIF: LEI data](https://www.gleif.org/en/lei-data/gleif-golden-copy)** — golden copy, Level 1/Level 2 data, registry concepts (primary)
-    - [ANNA — standards (ISIN ISO 6166)](https://www.anna-web.org/standards/) — ISIN structure, allocation, and check digits (reference)
+    - [ANNA — standards (ISIN ISO 6166)](https://anna-web.org/identifiers/) — ISIN structure, allocation, and check digits (reference)
 - **Tools:**
     - FOSS (hands-on): [GLEIF golden copy](https://www.gleif.org/en/lei-data/gleif-golden-copy) — free LEI dataset loaded to lakehouse bronze
 - **Do:**
@@ -1199,6 +1200,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - MX = ISO 20022 over SWIFT and the translation/coexistence rules *(SWIFT: standards)*
     - the MT-to-MX mapping — which MX message replaces a given MT *(iso20022.org: catalogue)*
     - what SWIFT network membership means operationally *(SWIFT: standards)*
+    - T+1 settlement (EU go-live 11 Oct 2027, ESMA/CSDR) — the securities settlement cycle these messages run on compresses to one day, squeezing dealing cut-offs, NAV-strike and subscription/redemption funding windows, and the time to reconcile and repair breaks; design it as a data-flow latency pressure, not just an ops change *(ESMA: T+1 report)*
 - **Resources:**
     - **[SWIFT: standards](https://www.swift.com/standards)** — MT category 5 (securities) and MX/ISO 20022 standards landing (primary)
     - [ISO 20022 message catalogue](https://www.iso20022.org/iso-20022-message-definitions) — the MX messages that replace MT equivalents (reference)
@@ -1241,7 +1243,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 | ID | Topic | What it is | Read | Est. min |
 |---|---|---|---|---|
 | 1.4.6 | Hub-and-spoke | Centralized integration hub feeding domain marts; the pre-mesh enterprise default architecture | [*Data Management at Scale* ch. 2 (architecture survey)](https://www.oreilly.com/library/view/data-management-at/9781098138851/) | 20 |
-| 1.12.4 | CFI (ISO 10962) | 6-character instrument classification code carried in reference data, complementing the ISIN | [ANNA standards (CFI ISO 10962)](https://www.anna-web.org/standards/) | 20 |
+| 1.12.4 | CFI (ISO 10962) | 6-character instrument classification code carried in reference data, complementing the ISIN | [ANNA standards (CFI ISO 10962)](https://anna-web.org/identifiers/) | 20 |
 | 1.12.5 | FIGI | Bloomberg's open venue-level instrument identifier; the ISIN complement for listing-level identity | [OpenFIGI — about FIGI](https://www.openfigi.com/about/figi) | 20 |
 | 1.12.9 | FpML | ISDA's XML standard for OTC derivatives; appears at fund boundaries (hedging share classes) | [FpML official site](https://www.fpml.org/) | 20 |
 | 1.12.10 | FIX | Trading-venue messaging protocol; upstream of fund data and rarely modeled directly by you | [FIX Trading Community — standards](https://www.fixtrading.org/standards/) | 20 |
@@ -1257,7 +1259,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 ### Capstone 2 — Fund-document lakehouse
 
 - **Goal:** a working open lakehouse carrying real fund-data shapes (NAV series, holdings, EMT outputs, GLEIF entities) through bronze→silver→gold, with the format/catalog decisions documented like a vendor selection.
-- **Stack (100% free):** [MinIO](https://min.io/docs/minio/linux/index.html) (↔ ADLS Gen2), [Apache Iceberg](https://iceberg.apache.org/docs/latest/) (↔ Databricks Delta / Snowflake managed Iceberg), [Lakekeeper](https://docs.lakekeeper.io/) or [Apache Polaris](https://polaris.apache.org/) REST catalog (↔ Unity Catalog / Glue), [Trino](https://trino.io/docs/current/) (↔ Starburst / Athena / Synapse serverless), [DuckDB](https://duckdb.org/docs/) + [dbt Core](https://docs.getdbt.com/) (↔ dbt Cloud on a warehouse), [Airbyte OSS](https://docs.airbyte.com/) (↔ Fivetran / ADF), [AutomateDV](https://automate-dv.readthedocs.io/) raw-vault slice (↔ VaultSpeed), [Docker Compose](https://docs.docker.com/compose/) throughout.
+- **Stack (100% free):** [MinIO](https://docs.min.io/index.html) (↔ ADLS Gen2), [Apache Iceberg](https://iceberg.apache.org/docs/latest/) (↔ Databricks Delta / Snowflake managed Iceberg), [Lakekeeper](https://docs.lakekeeper.io/) or [Apache Polaris](https://polaris.apache.org/) REST catalog (↔ Unity Catalog / Glue), [Trino](https://trino.io/docs/current/) (↔ Starburst / Athena / Synapse serverless), [DuckDB](https://duckdb.org/docs/) + [dbt Core](https://docs.getdbt.com/) (↔ dbt Cloud on a warehouse), [Airbyte OSS](https://docs.airbyte.com/) (↔ Fivetran / ADF), [AutomateDV](https://automate-dv.readthedocs.io/) raw-vault slice (↔ VaultSpeed), [Docker Compose](https://docs.docker.com/compose/) throughout.
 - **Build:** (1) Airbyte lands Phase-1 Postgres + GLEIF golden copy into bronze (Parquet on MinIO); (2) silver Iceberg tables: cleansed NAV/holdings with DQ-checked conformance, raw vault for fund/share-class from two "source systems"; (3) gold: dbt marts incl. the EMT-shaped output and the SCD2 dimensional mart; (4) Trino federates a live Postgres dimension against Iceberg facts; (5) demonstrate time travel + schema evolution + a compaction run. Drive every step from documented commands so the whole stack rebuilds from an empty MinIO.
 - **Architecture deliverables:** C4 context/container for the lakehouse; ADR-004 Iceberg vs Delta (estate-specific), ADR-005 REST catalog choice (lock-in analysis), ADR-006 medallion layer contracts (the sheet from 1.4.3 made binding).
 - **Acceptance criteria:** end-to-end rebuild from empty MinIO via documented commands; `dbt build` green with tests + docs published; EMT output validates against the FinDatEx column spec; time-travel query reproduces yesterday's NAV report after a correction lands; every stack component annotated with its corporate equivalent in the README; the catalog can be swapped (Hive-style → REST) without rewriting data files.
@@ -1634,7 +1636,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [Kafka: The Definitive Guide, 2nd ed. (free via Confluent)](https://www.confluent.io/resources/kafka-the-definitive-guide-v2/) ch. 9 — Connect in practice, error handling and DLQ patterns (reference)
 - **Tools:**
     - FOSS (hands-on): [Kafka Connect](https://kafka.apache.org/documentation/#connect) — distributed-mode workers running a MinIO sink (↔ Confluent managed connectors, Event Hubs Capture)
-    - FOSS (hands-on): [MinIO](https://min.io/docs/minio/linux/index.html) — S3-compatible object store as the sink target (↔ Azure Blob / ADLS)
+    - FOSS (hands-on): [MinIO](https://docs.min.io/index.html) — S3-compatible object store as the sink target (↔ Azure Blob / ADLS)
 - **Do:**
     1. Run Connect in distributed mode and configure an S3/MinIO sink connector with a dead-letter topic enabled.
     2. Send a poison message (wrong schema) through the source topic.
@@ -1868,7 +1870,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 - **Tools:**
     - FOSS (hands-on): [Temporal](https://docs.temporal.io/) — OSS server in compose running the durable saga (↔ Temporal Cloud / Durable Functions / Step Functions)
     - FOSS (Postgres-native): [DBOS](https://docs.dbos.dev/) — durable execution as a library with workflow/queue state in Postgres (↔ Hatchet, pgflow)
-    - Corp (evaluate): [Azure Durable Functions](https://learn.microsoft.com/en-us/azure/azure-functions/durable/) — the Azure-native durable-execution analogue
+    - Corp (evaluate): [Azure Durable Functions](https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-overview) — the Azure-native durable-execution analogue
 - 🐘 **Postgres-native alternative — [DBOS](https://docs.dbos.dev/) (also Hatchet, pgflow):** *Better when* you already run Postgres and want durable workflows without operating a Temporal cluster — workflow and queue state live in your DB, commit transactionally with your business data, far lighter ops and lower latency. *Worse when* you need Temporal's maturity at scale: massive parallel fan-out, very long-lived workflows, rich signals/queries and visibility tooling, or multi-language/multi-region — there a single Postgres becomes the bottleneck and Temporal's ecosystem wins.
 - **Do:**
     1. Run Temporal OSS in compose with a worker.
@@ -1997,7 +1999,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 ### Capstone 4 — Real-time fund-flow & price CDC streaming
 
 - **Goal:** the platform gains a streaming spine: operational changes flow as events, stateful aggregations stay correct under late data, and every guarantee is stated and demonstrated.
-- **Stack (100% free):** [Kafka KRaft](https://kafka.apache.org/documentation/) or [Redpanda](https://docs.redpanda.com/) (↔ Confluent Cloud / Event Hubs), [Kafka Connect](https://kafka.apache.org/documentation/#connect) + [Debezium](https://debezium.io/documentation/reference/stable/index.html) with [outbox router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html) (↔ Qlik Replicate / GoldenGate / ADF), [Apicurio](https://www.apicur.io/registry/docs/) or [Confluent SR](https://docs.confluent.io/platform/current/schema-registry/index.html) with [Avro](https://avro.apache.org/docs/1.12.0/specification/) (↔ Confluent Cloud SR / Azure Schema Registry), [Flink](https://nightlies.apache.org/flink/flink-docs-stable/) (↔ Confluent Flink / Managed Flink / ASA), [Iceberg](https://iceberg.apache.org/docs/latest/) sink on [MinIO](https://min.io/docs/minio/linux/index.html), [Temporal](https://docs.temporal.io/) saga + [Camunda](https://docs.camunda.io/) BPMN process from the entries above, [Dagster](https://docs.dagster.io/) supervising batch reconciliation, all in compose.
+- **Stack (100% free):** [Kafka KRaft](https://kafka.apache.org/documentation/) or [Redpanda](https://docs.redpanda.com/) (↔ Confluent Cloud / Event Hubs), [Kafka Connect](https://kafka.apache.org/documentation/#connect) + [Debezium](https://debezium.io/documentation/reference/stable/index.html) with [outbox router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html) (↔ Qlik Replicate / GoldenGate / ADF), [Apicurio](https://www.apicur.io/registry/docs/) or [Confluent SR](https://docs.confluent.io/platform/current/schema-registry/index.html) with [Avro](https://avro.apache.org/docs/1.12.0/specification/) (↔ Confluent Cloud SR / Azure Schema Registry), [Flink](https://nightlies.apache.org/flink/flink-docs-stable/) (↔ Confluent Flink / Managed Flink / ASA), [Iceberg](https://iceberg.apache.org/docs/latest/) sink on [MinIO](https://docs.min.io/index.html), [Temporal](https://docs.temporal.io/) saga + [Camunda](https://docs.camunda.io/) BPMN process from the entries above, [Dagster](https://docs.dagster.io/) supervising batch reconciliation, all in compose.
 - **Build:** (1) Debezium streams orders/NAV + the outbox topic; (2) Flink computes per-share-class windowed flow totals (heuristic watermarks, allowed lateness, late-event side output) exactly-once into Iceberg; (3) nightly Dagster batch reconciles streamed totals against batch recompute and alerts on drift; (4) schema registry enforces the 1.9.7 policy (one rejected evolution kept as evidence); (5) the subscription saga (Temporal) and BPMN process (Camunda) run against the same events; (6) chaos drills: kill broker, connector, Flink job — document recovery and guarantee held. Capture the recovery narrative for each drill as you run it, naming the mechanism that restored correctness.
 - **Architecture deliverables:** C4 updated with the streaming spine; ADR-010 log platform choice (Kafka vs Event Hubs vs Redpanda), ADR-011 delivery-guarantee design (where exactly-once is real and where idempotent-at-least-once is the honest answer), ADR-012 orchestration species (BPM vs durable execution vs scheduler, per workflow). Each ADR states the decision, the alternatives weighed, and the EU/fund-industry constraint that drove it.
 - **Acceptance criteria:** reconciliation drift = 0 over a 3-day simulated run incl. injected late/duplicate events; each chaos drill has a written recovery narrative naming the mechanism (ISR, checkpoint, offset commit); schema policy violation is blocked by the registry and the evidence archived; saga failure path leaves consistent state with full audit trail.
@@ -2288,7 +2290,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - [Reliability in Azure Backup](https://learn.microsoft.com/en-us/azure/reliability/reliability-backup) — soft delete, immutable vaults, ZRS/GRS for the backups themselves, and the restore-RPO/RTO mechanics (reference)
 - **Tools:**
     - Corp (evaluate): [Azure Backup](https://learn.microsoft.com/en-us/azure/backup/backup-overview) — vault-based backup with immutability (↔ FOSS object-store versioning)
-    - FOSS (hands-on): [MinIO versioning](https://min.io/docs/minio/linux/administration/object-management/object-versioning.html) — the local stand-in for object-store backup/restore
+    - FOSS (hands-on): [MinIO versioning](https://docs.min.io/administration/object-management/object-versioning.html) — the local stand-in for object-store backup/restore
 - **Do:**
     1. Define a backup policy matrix for every store: what, frequency, retention, immutability, restore-test cadence.
     2. Run one real restore from MinIO versioning and time it.
@@ -2357,7 +2359,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - **[Azure Architecture Center: Caching guidance](https://learn.microsoft.com/en-us/azure/architecture/best-practices/caching)** — cache-aside, write-through, invalidation, TTL, what to cache (primary)
     - [Azure Cache for Redis: overview](https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/cache-overview) — the managed cache tiers and patterns (reference)
 - **Tools:**
-    - FOSS (hands-on): [Valkey](https://valkey.io/documentation/) — the open Redis fork for the serving-layer cache (↔ Azure Cache for Redis)
+    - FOSS (hands-on): [Valkey](https://valkey.io/docs/) — the open Redis fork for the serving-layer cache (↔ Azure Cache for Redis)
     - Corp (evaluate): [Azure Cache for Redis](https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/cache-overview) — managed cache; note the retirement/Managed Redis migration path
 - **Do:**
     1. Decide cache placement for the Phase-8 data API: yes/no, where in the path, and TTL.
@@ -2392,7 +2394,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 ### Capstone 5 — IaC-provisioned platform on Kubernetes + Well-Architected review
 
 - **Goal:** the platform becomes infrastructure-as-code on a cloud-shaped runtime, with observability, a DR position, and a cost model — everything an architecture review board would demand.
-- **Stack (100% free):** [kind](https://kind.sigs.k8s.io/docs/) or [k3d](https://k3d.io/) local Kubernetes (↔ AKS), [Helm](https://helm.sh/docs/) charts for [Kafka](https://kafka.apache.org/documentation/)/[Flink](https://nightlies.apache.org/flink/flink-docs-stable/)/[Trino](https://trino.io/docs/current/)/[Dagster](https://docs.dagster.io/)/[MinIO](https://min.io/docs/minio/kubernetes/upstream/)/[Postgres](https://www.postgresql.org/docs/) (↔ managed PaaS equivalents), [OpenTofu](https://opentofu.org/docs/) with kubernetes/helm/azurerm providers (↔ Terraform Enterprise), [Bicep](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/) comparison module, [OpenBao](https://openbao.org/docs/) (↔ [Key Vault](https://learn.microsoft.com/en-us/azure/key-vault/general/overview)), [OTel](https://opentelemetry.io/docs/) + [Prometheus](https://prometheus.io/docs/) + [Grafana](https://grafana.com/docs/grafana/latest/) + [Loki](https://grafana.com/docs/loki/latest/) (↔ [Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/)), [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/) + free-trial `tofu plan` (no spend).
+- **Stack (100% free):** [kind](https://kind.sigs.k8s.io/docs/) or [k3d](https://k3d.io/) local Kubernetes (↔ AKS), [Helm](https://helm.sh/docs/) charts for [Kafka](https://kafka.apache.org/documentation/)/[Flink](https://nightlies.apache.org/flink/flink-docs-stable/)/[Trino](https://trino.io/docs/current/)/[Dagster](https://docs.dagster.io/)/[MinIO](https://docs.min.io/)/[Postgres](https://www.postgresql.org/docs/) (↔ managed PaaS equivalents), [OpenTofu](https://opentofu.org/docs/) with kubernetes/helm/azurerm providers (↔ Terraform Enterprise), [Bicep](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/) comparison module, [OpenBao](https://openbao.org/docs/) (↔ [Key Vault](https://learn.microsoft.com/en-us/azure/key-vault/general/overview)), [OTel](https://opentelemetry.io/docs/) + [Prometheus](https://prometheus.io/docs/) + [Grafana](https://grafana.com/docs/grafana/latest/) + [Loki](https://grafana.com/docs/loki/latest/) (↔ [Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/)), [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/) + free-trial `tofu plan` (no spend).
 - **Build:** (1) migrate the compose stack to kind via Helm, OpenTofu-managed end to end; (2) secrets via OpenBao with documented rotation; (3) full observability: traces through one pipeline run, platform dashboard, two alerts (freshness, consumer lag); (4) azurerm module expressing the target Azure architecture (landing-zone slice: VNet/Private Link per A.3, ADLS, AKS, Event Hubs, Key Vault) — validated plan-only; (5) WAF review of the result (one finding per pillar, remediated or accepted in writing); (6) DR design + tabletop drill; (7) monthly cost model at 1×/10×.
 - **Architecture deliverables:** C4 deployment diagram (new level for this phase); ADR-013 Kubernetes vs managed-PaaS-per-service, ADR-014 OpenTofu vs Bicep for this estate, ADR-015 DR topology per data tier.
 - **Acceptance criteria:** fresh machine → `tofu apply` → healthy platform → one full pipeline run → `tofu destroy`, all documented; seeded failure diagnosed from dashboards in <5 min; WAF review yields ≥5 genuine findings with dispositions; cost model withstands a "what if volumes 10×?" challenge; DR drill writeup names RTO/RPO per tier.
@@ -2751,7 +2753,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - client-side encryption tradeoffs — it breaks query pushdown for analytics *(Azure Key Vault docs)*
 - **Resources:**
     - **[Azure Key Vault documentation](https://learn.microsoft.com/en-us/azure/key-vault/)** — keys, secrets, CMK, rotation, and Managed HSM (primary)
-    - [Practical Cloud Security, 2nd ed.](https://www.oreilly.com/library/view/practical-cloud-security/9781098148171/) — vendor-neutral envelope encryption, KMS hierarchies, and key-management practice (reference)
+    - [Practical Cloud Security, 2nd ed.](https://www.oreilly.com/library/view/practical-cloud-security/9781098148164/) — vendor-neutral envelope encryption, KMS hierarchies, and key-management practice (reference)
 - **Do:**
     1. Inventory which Azure stores hold which data classes.
     2. Decide which stores get CMK vs platform-managed keys and justify each.
@@ -2837,7 +2839,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 - **Learn:**
     - GDPR for platform builders — lawful basis, minimization, purpose limitation, DSAR/erasure across Iceberg + backups + event logs, RoPA, DPIA triggers, processor chains & SCCs *(gdpr.eu guides)*
     - DORA — ICT risk framework, incident-reporting timelines, resilience testing, the ICT third-party register and exit strategies (cloud concentration) *(EIOPA: DORA)*
-    - the fund regulatory stack — UCITS/AIFMD (incl. Annex IV), MiFID II product governance (→ EMT), PRIIPs (→ EPT/KID), SFDR (ESG data) at orientation level *(EIOPA: DORA)*
+    - EU AI Act for the data platform — high-risk (Annex III) obligations (risk-management system, data governance, human oversight, logging, accuracy/robustness/cybersecurity) and how they land on a GenAI extraction pipeline over regulated docs; the Digital Omnibus deferral (stand-alone high-risk now 2 Dec 2027) and the DORA overlap on ICT resilience *(EU AI Act: implementation timeline)*
     - CSSF cloud-outsourcing expectations — notification and audit rights, aligned to EBA/ESMA guidelines (verify current circular at assembly) *(CSSF regulatory framework)*
     - SOC 2 / ISO 27001 — the vendor-evidence vocabulary you read in supplier reviews *(gdpr.eu guides)*
 - **Resources:**
@@ -2932,7 +2934,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
     - **[Azure Blob: lifecycle management](https://learn.microsoft.com/en-us/azure/storage/blobs/lifecycle-management-overview)** — tiering and deletion policies by rule (primary)
     - [Apache Iceberg: expire_snapshots](https://iceberg.apache.org/docs/latest/spark-procedures/) — snapshot expiry and table maintenance procedures (reference)
 - **Tools:**
-    - FOSS (hands-on): [MinIO lifecycle](https://min.io/docs/minio/linux/administration/object-management/object-lifecycle-management.html) + [Iceberg maintenance](https://iceberg.apache.org/docs/latest/maintenance/) — tiering and snapshot expiry
+    - FOSS (hands-on): [MinIO lifecycle](https://docs.min.io/administration/object-management/object-lifecycle-management.html) + [Iceberg maintenance](https://iceberg.apache.org/docs/latest/maintenance/) — tiering and snapshot expiry
 - **Do:**
     1. Write the retention schedule for five record classes (orders, NAV, investor KYC, logs, EMT outputs).
     2. Implement it as MinIO lifecycle rules plus Iceberg maintenance jobs (expire_snapshots, remove orphan files).
@@ -2949,7 +2951,7 @@ Nothing is skipped by assumption. **Each Phase-0 module's *Done when* checklist 
 | 3.2.5 | Property graph databases | Neo4j/Cypher for relationship-heavy ops use (fraud rings, ownership chains) | [Neo4j: Getting Started](https://neo4j.com/docs/getting-started/current/) | 25 |
 | 7.3.2 | Glossary embedded in catalogs | Same discipline as 7.3.1, delivered as a feature of Collibra/Purview | [covered by 10.1.2 reading](https://learn.microsoft.com/en-us/purview/) | 10 |
 | 9.8.2 | Test data management | Subset/mask/refresh tooling (Delphix-class) for legacy estates | [Delphix (Perforce) test data management](https://www.perforce.com/products/delphix) | 20 |
-| 10.2.1 | AI-native data discovery | LLM-assisted search and Q&A over catalog metadata | [Atlan AI](https://atlan.com/atlan-ai/) | 20 |
+| 10.2.1 | AI-native data discovery | LLM-assisted search and Q&A over catalog metadata | [Atlan AI](https://docs.atlan.com/product/capabilities/atlan-ai/concepts/what-is-atlan-ai) | 20 |
 | 10.2.2 | Catalog-embedded discovery | Search/browse UX delivered as a catalog feature | [covered by 10.1.1 hands-on](https://docs.open-metadata.org/) | 10 |
 | 10.3.2 | Lineage embedded in catalogs | Lineage as a catalog feature vs the open OpenLineage standard | [covered by 10.1.1/10.3.1](https://openlineage.io/docs/) | 10 |
 | 10.5.2 | Modern/cloud MDM | ML-first MDM (Tamr) and lighter cloud MDM (Reltio) | [Tamr product overview](https://www.tamr.com/) | 20 |

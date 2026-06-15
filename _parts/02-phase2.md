@@ -41,9 +41,9 @@
     - vendor positioning — Databricks vs Snowflake-with-Iceberg vs Fabric/OneLake at architecture level *(Lakehouse paper, CIDR 2021)*
 - **Resources:**
     - **[Lakehouse: A New Generation of Open Platforms (CIDR 2021)](https://www.cidrdb.org/cidr2021/papers/cidr2021_paper17.pdf)** — Armbrust et al.; the technical core of the lakehouse argument (primary)
-    - [Building the Data Lakehouse](https://www.oreilly.com/library/view/building-the-data/9781098117290/) — Inmon et al.; skim for the warehouse-veteran perspective and where lakes earn distrust (reference)
+    - [Building the Data Lakehouse](https://technicspub.com/data-lakehouse-collection/) — Inmon et al.; skim for the warehouse-veteran perspective and where lakes earn distrust (reference)
 - **Tools:**
-    - FOSS (hands-on): [MinIO](https://min.io/docs/minio/linux/index.html) + [Apache Iceberg](https://iceberg.apache.org/docs/latest/) + [Trino](https://trino.io/docs/current/) + [DuckDB](https://duckdb.org/docs/) — the four open layers assembled (↔ a managed lakehouse)
+    - FOSS (hands-on): [MinIO](https://docs.min.io/index.html) + [Apache Iceberg](https://iceberg.apache.org/docs/latest/) + [Trino](https://trino.io/docs/current/) + [DuckDB](https://duckdb.org/docs/) — the four open layers assembled (↔ a managed lakehouse)
     - Corp (evaluate): [Databricks](https://docs.databricks.com/), [Microsoft Fabric / OneLake](https://learn.microsoft.com/fabric/onelake/), [Snowflake](https://docs.snowflake.com/) — what each bundles and where the lock-in sits
 - **Do:**
     1. Write a 2-page build-vs-buy memo: open lakehouse vs Databricks vs Fabric for a 50-person Luxembourg fund administrator.
@@ -65,10 +65,10 @@
     - multipart upload mechanics — how large NAV/holdings files land reliably *(MinIO docs: Core Concepts)*
     - ADLS Gen2 hierarchical namespace — why atomic directory rename exists and what it buys *(ADLS Gen2 introduction)*
 - **Resources:**
-    - **[MinIO documentation](https://min.io/docs/minio/linux/index.html)** — S3-compatible object store: core concepts, lifecycle, multipart upload (primary)
+    - **[MinIO documentation](https://docs.min.io/index.html)** — S3-compatible object store: core concepts, lifecycle, multipart upload (primary)
     - [Azure Data Lake Storage Gen2 introduction](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-introduction) — hierarchical namespace and atomic directory operations on Azure (reference)
 - **Tools:**
-    - FOSS (hands-on): [MinIO](https://min.io/docs/minio/linux/index.html) — the local S3 substrate for the whole phase (↔ ADLS Gen2 / S3)
+    - FOSS (hands-on): [MinIO](https://docs.min.io/index.html) — the local S3 substrate for the whole phase (↔ ADLS Gen2 / S3)
     - Corp (evaluate): [ADLS Gen2](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-introduction) — primary cloud target; [S3](https://docs.aws.amazon.com/s3/) — awareness of the de-facto standard
 - **Do:**
     1. Run MinIO in Docker Compose and create a bucket for the fund lakehouse.
@@ -119,7 +119,7 @@
     - [DuckDB docs: Reading Parquet](https://duckdb.org/docs/data/parquet/overview) — pushdown and projection from the reader's side, used in the lab (reference)
     - [Fundamentals of Data Engineering](https://www.oreilly.com/library/view/fundamentals-of-data/9781098108298/) ch. 6 — file-format context including Avro/ORC tradeoffs (alternate)
 - **Tools:**
-    - FOSS (hands-on): [pyarrow](https://arrow.apache.org/docs/python/), [DuckDB](https://duckdb.org/docs/), [parquet-tools](https://github.com/apache/parquet-java/tree/master/parquet-tools-deprecated) — write, inspect, and benchmark Parquet
+    - FOSS (hands-on): [pyarrow](https://arrow.apache.org/docs/python/), [DuckDB](https://duckdb.org/docs/), [parquet-tools](https://github.com/apache/parquet-java/blob/master/parquet-cli/README.md) — write, inspect, and benchmark Parquet
     - Corp (evaluate): same formats everywhere — this knowledge is vendor-neutral by design
 - **Do:**
     1. With pyarrow via `uv run`, write the same 10M-row holdings table at three row-group sizes and two compressions (snappy, zstd).
@@ -145,7 +145,7 @@
     - **[Apache Iceberg documentation](https://iceberg.apache.org/docs/latest/)** — spec, Maintenance, Partitioning, Configuration: the operational core (primary)
     - [Apache Iceberg: The Definitive Guide](https://hello.dremio.com/wp-apache-iceberg-the-definitive-guide-reg.html) — free via Dremio; format-war context, Delta/Hudi comparison, COW vs MOR (alternate)
 - **Tools:**
-    - FOSS (hands-on): [Iceberg](https://iceberg.apache.org/docs/latest/) on [MinIO](https://min.io/docs/minio/linux/index.html) via [Trino](https://trino.io/docs/current/connector/iceberg.html); Delta via [DuckDB](https://duckdb.org/docs/) / [delta-rs](https://delta-io.github.io/delta-rs/) — exercise both formats
+    - FOSS (hands-on): [Iceberg](https://iceberg.apache.org/docs/latest/) on [MinIO](https://docs.min.io/index.html) via [Trino](https://trino.io/docs/current/connector/iceberg.html); Delta via [DuckDB](https://duckdb.org/docs/) / [delta-rs](https://delta-io.github.io/delta-rs/) — exercise both formats
     - Corp (evaluate): [Databricks Delta](https://docs.databricks.com/delta/), [Snowflake managed Iceberg](https://docs.snowflake.com/en/user-guide/tables-iceberg), [Fabric OneLake](https://learn.microsoft.com/fabric/onelake/) — managed forms
 - **Do:**
     1. Create an Iceberg NAV table via Trino on MinIO.
@@ -173,7 +173,7 @@
     - [Lakekeeper documentation](https://docs.lakekeeper.io/) — a lightweight Rust REST catalog, easy to run in compose (alternate)
 - **Tools:**
     - FOSS (hands-on): [Lakekeeper](https://docs.lakekeeper.io/) or [Apache Polaris](https://polaris.apache.org/) — a REST catalog in Docker Compose (↔ managed catalog)
-    - Corp (evaluate): [Unity Catalog](https://docs.databricks.com/data-governance/unity-catalog/), [AWS Glue](https://docs.aws.amazon.com/glue/), [Snowflake Open Catalog](https://other-docs.snowflake.com/en/opencatalog/) — what each bundles
+    - Corp (evaluate): [Unity Catalog](https://docs.databricks.com/data-governance/unity-catalog/), [AWS Glue](https://docs.aws.amazon.com/glue/), [Snowflake Open Catalog](https://docs.snowflake.com/en/user-guide/opencatalog/overview) — what each bundles
 - **Do:**
     1. Swap your capstone's catalog from Trino's Hive-style catalog to a Lakekeeper or Polaris REST catalog.
     2. Re-point Trino at the REST catalog and confirm the existing Iceberg tables resolve unchanged.
@@ -252,7 +252,7 @@
     - [SQLMesh documentation](https://sqlmesh.readthedocs.io/) — the challenger's virtual environments and lineage, for evaluation (alternate)
 - **Tools:**
     - FOSS (hands-on): [dbt Core](https://docs.getdbt.com/) + [dbt-duckdb](https://github.com/duckdb/dbt-duckdb) / [dbt-trino](https://github.com/starburstdata/dbt-trino); [SQLMesh](https://sqlmesh.readthedocs.io/) (eval) — the transformation layer (↔ dbt Cloud)
-    - Corp (evaluate): [dbt Cloud](https://docs.getdbt.com/docs/cloud/about-cloud/dbt-cloud-features), [Coalesce](https://docs.coalesce.io/), [Dataform](https://cloud.google.com/dataform/docs) — managed options
+    - Corp (evaluate): [dbt Cloud](https://docs.getdbt.com/docs/cloud/about-cloud/dbt-cloud-featuresabout-cloud/dbt-cloud-features), [Coalesce](https://docs.coalesce.io/), [Dataform](https://cloud.google.com/dataform/docs) — managed options
 - **Do:**
     1. Rebuild the Phase-1 mart as a layered dbt project on DuckDB: sources with freshness checks, staging → marts.
     2. Implement a snapshot-based SCD2 fund/share-class dimension.
@@ -320,7 +320,7 @@
     - PIT and bridge tables — restoring query performance over a normalized vault *(Data Vault 2.0 ch. 7)*
     - when Vault is overkill, and Vault-on-lakehouse with dbt/AutomateDV *(AutomateDV docs)*
 - **Resources:**
-    - **[Building a Scalable Data Warehouse with Data Vault 2.0 (Linstedt & Olschimke)](https://www.oreilly.com/library/view/building-a-scalable/9780128025109/)** ch. 1–7 (modeling) + ch. 11–12 (loading) (primary)
+    - **[Building a Scalable Data Warehouse with Data Vault 2.0 (Linstedt & Olschimke)](https://www.oreilly.com/library/view/building-a-scalable/9780128026489/)** ch. 1–7 (modeling) + ch. 11–12 (loading) (primary)
     - [AutomateDV documentation](https://automate-dv.readthedocs.io/) — the dbt package that generates hub/link/sat loads on the lakehouse (reference)
 - **Tools:**
     - FOSS (hands-on): [dbt](https://docs.getdbt.com/) + [AutomateDV package](https://automate-dv.readthedocs.io/) — raw vault generated and tested (↔ VaultSpeed)
@@ -364,6 +364,7 @@
     - EMT structure — manufacturer target market and costs & charges blocks *(FinDatEx: templates)*
     - EPT structure — PRIIPs KID inputs (SRI, performance scenarios, costs) *(PRIIPs Regulation 1286/2014)*
     - CEPT and delta templates and how distributors consume them *(FinDatEx: templates)*
+    - EET (European ESG Template, FinDatEx v1.1.3) — the ESG sibling of EMT/EPT that carries the SFDR / Taxonomy / MiFID-II sustainability data points (PAIs, taxonomy alignment, SFDR Article 6/8/9 flags) to distributors; same versioning/partial-file pain as EMT *(FinDatEx: templates)*
     - data-quality pain points — versioning, partial files, code lists *(FinDatEx: templates)*
 - **Resources:**
     - **[FinDatEx templates](https://findatex.eu/)** — current EMT and EPT specifications, free downloads (primary)
@@ -389,7 +390,7 @@
     - identifier lifecycle events — corporate actions that rename or retire ISINs *(ANNA: standards)*
 - **Resources:**
     - **[GLEIF: LEI data](https://www.gleif.org/en/lei-data/gleif-golden-copy)** — golden copy, Level 1/Level 2 data, registry concepts (primary)
-    - [ANNA — standards (ISIN ISO 6166)](https://www.anna-web.org/standards/) — ISIN structure, allocation, and check digits (reference)
+    - [ANNA — standards (ISIN ISO 6166)](https://anna-web.org/identifiers/) — ISIN structure, allocation, and check digits (reference)
 - **Tools:**
     - FOSS (hands-on): [GLEIF golden copy](https://www.gleif.org/en/lei-data/gleif-golden-copy) — free LEI dataset loaded to lakehouse bronze
 - **Do:**
@@ -410,6 +411,7 @@
     - MX = ISO 20022 over SWIFT and the translation/coexistence rules *(SWIFT: standards)*
     - the MT-to-MX mapping — which MX message replaces a given MT *(iso20022.org: catalogue)*
     - what SWIFT network membership means operationally *(SWIFT: standards)*
+    - T+1 settlement (EU go-live 11 Oct 2027, ESMA/CSDR) — the securities settlement cycle these messages run on compresses to one day, squeezing dealing cut-offs, NAV-strike and subscription/redemption funding windows, and the time to reconcile and repair breaks; design it as a data-flow latency pressure, not just an ops change *(ESMA: T+1 report)*
 - **Resources:**
     - **[SWIFT: standards](https://www.swift.com/standards)** — MT category 5 (securities) and MX/ISO 20022 standards landing (primary)
     - [ISO 20022 message catalogue](https://www.iso20022.org/iso-20022-message-definitions) — the MX messages that replace MT equivalents (reference)
@@ -452,7 +454,7 @@
 | ID | Topic | What it is | Read | Est. min |
 |---|---|---|---|---|
 | 1.4.6 | Hub-and-spoke | Centralized integration hub feeding domain marts; the pre-mesh enterprise default architecture | [*Data Management at Scale* ch. 2 (architecture survey)](https://www.oreilly.com/library/view/data-management-at/9781098138851/) | 20 |
-| 1.12.4 | CFI (ISO 10962) | 6-character instrument classification code carried in reference data, complementing the ISIN | [ANNA standards (CFI ISO 10962)](https://www.anna-web.org/standards/) | 20 |
+| 1.12.4 | CFI (ISO 10962) | 6-character instrument classification code carried in reference data, complementing the ISIN | [ANNA standards (CFI ISO 10962)](https://anna-web.org/identifiers/) | 20 |
 | 1.12.5 | FIGI | Bloomberg's open venue-level instrument identifier; the ISIN complement for listing-level identity | [OpenFIGI — about FIGI](https://www.openfigi.com/about/figi) | 20 |
 | 1.12.9 | FpML | ISDA's XML standard for OTC derivatives; appears at fund boundaries (hedging share classes) | [FpML official site](https://www.fpml.org/) | 20 |
 | 1.12.10 | FIX | Trading-venue messaging protocol; upstream of fund data and rarely modeled directly by you | [FIX Trading Community — standards](https://www.fixtrading.org/standards/) | 20 |
@@ -468,7 +470,7 @@
 ### Capstone 2 — Fund-document lakehouse
 
 - **Goal:** a working open lakehouse carrying real fund-data shapes (NAV series, holdings, EMT outputs, GLEIF entities) through bronze→silver→gold, with the format/catalog decisions documented like a vendor selection.
-- **Stack (100% free):** [MinIO](https://min.io/docs/minio/linux/index.html) (↔ ADLS Gen2), [Apache Iceberg](https://iceberg.apache.org/docs/latest/) (↔ Databricks Delta / Snowflake managed Iceberg), [Lakekeeper](https://docs.lakekeeper.io/) or [Apache Polaris](https://polaris.apache.org/) REST catalog (↔ Unity Catalog / Glue), [Trino](https://trino.io/docs/current/) (↔ Starburst / Athena / Synapse serverless), [DuckDB](https://duckdb.org/docs/) + [dbt Core](https://docs.getdbt.com/) (↔ dbt Cloud on a warehouse), [Airbyte OSS](https://docs.airbyte.com/) (↔ Fivetran / ADF), [AutomateDV](https://automate-dv.readthedocs.io/) raw-vault slice (↔ VaultSpeed), [Docker Compose](https://docs.docker.com/compose/) throughout.
+- **Stack (100% free):** [MinIO](https://docs.min.io/index.html) (↔ ADLS Gen2), [Apache Iceberg](https://iceberg.apache.org/docs/latest/) (↔ Databricks Delta / Snowflake managed Iceberg), [Lakekeeper](https://docs.lakekeeper.io/) or [Apache Polaris](https://polaris.apache.org/) REST catalog (↔ Unity Catalog / Glue), [Trino](https://trino.io/docs/current/) (↔ Starburst / Athena / Synapse serverless), [DuckDB](https://duckdb.org/docs/) + [dbt Core](https://docs.getdbt.com/) (↔ dbt Cloud on a warehouse), [Airbyte OSS](https://docs.airbyte.com/) (↔ Fivetran / ADF), [AutomateDV](https://automate-dv.readthedocs.io/) raw-vault slice (↔ VaultSpeed), [Docker Compose](https://docs.docker.com/compose/) throughout.
 - **Build:** (1) Airbyte lands Phase-1 Postgres + GLEIF golden copy into bronze (Parquet on MinIO); (2) silver Iceberg tables: cleansed NAV/holdings with DQ-checked conformance, raw vault for fund/share-class from two "source systems"; (3) gold: dbt marts incl. the EMT-shaped output and the SCD2 dimensional mart; (4) Trino federates a live Postgres dimension against Iceberg facts; (5) demonstrate time travel + schema evolution + a compaction run. Drive every step from documented commands so the whole stack rebuilds from an empty MinIO.
 - **Architecture deliverables:** C4 context/container for the lakehouse; ADR-004 Iceberg vs Delta (estate-specific), ADR-005 REST catalog choice (lock-in analysis), ADR-006 medallion layer contracts (the sheet from 1.4.3 made binding).
 - **Acceptance criteria:** end-to-end rebuild from empty MinIO via documented commands; `dbt build` green with tests + docs published; EMT output validates against the FinDatEx column spec; time-travel query reproduces yesterday's NAV report after a correction lands; every stack component annotated with its corporate equivalent in the README; the catalog can be swapped (Hive-style → REST) without rewriting data files.

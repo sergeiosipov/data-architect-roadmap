@@ -90,7 +90,7 @@
     - [PostgreSQL Tutorial](https://www.postgresqltutorial.com/) — alternate track with explicit CTE, NULL and window-function sections (alternate)
     - [PostgreSQL documentation](https://www.postgresql.org/docs/) — indexes, information_schema and exact semantics when the tutorials run out (reference)
 - **Tools:**
-    - FOSS (hands-on): [PostgreSQL](https://www.postgresql.org/docs/) in Docker (from 0.5), [DBeaver](https://dbeaver.io/) or [psql](https://www.postgresql.org/docs/current/app-psql.html) (↔ [Azure SQL](https://learn.microsoft.com/azure/azure-sql/) — same language)
+    - FOSS (hands-on): the SQLBolt/PgExercises drills above need no install — do those first; [PostgreSQL](https://www.postgresql.org/docs/) in Docker (from 0.5) with [DBeaver](https://dbeaver.io/) or [psql](https://www.postgresql.org/docs/current/app-psql.html) is only needed to load your own data in Do step 1 (↔ [Azure SQL](https://learn.microsoft.com/azure/azure-sql/) — same language)
 - **Do:**
     1. Load your 0.2 funds CSV plus a NAV-history table into Postgres (via the 0.5 Compose stack) so you have a two-table funds/nav schema sharing a fund key.
     2. Answer 15 questions of rising difficulty in a committed `.sql` file: filters → joins → GROUP BY → CTEs → "latest NAV per fund via window function".

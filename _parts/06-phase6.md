@@ -348,7 +348,7 @@
     - client-side encryption tradeoffs — it breaks query pushdown for analytics *(Azure Key Vault docs)*
 - **Resources:**
     - **[Azure Key Vault documentation](https://learn.microsoft.com/en-us/azure/key-vault/)** — keys, secrets, CMK, rotation, and Managed HSM (primary)
-    - [Practical Cloud Security, 2nd ed.](https://www.oreilly.com/library/view/practical-cloud-security/9781098148171/) — vendor-neutral envelope encryption, KMS hierarchies, and key-management practice (reference)
+    - [Practical Cloud Security, 2nd ed.](https://www.oreilly.com/library/view/practical-cloud-security/9781098148164/) — vendor-neutral envelope encryption, KMS hierarchies, and key-management practice (reference)
 - **Do:**
     1. Inventory which Azure stores hold which data classes.
     2. Decide which stores get CMK vs platform-managed keys and justify each.
@@ -434,7 +434,7 @@
 - **Learn:**
     - GDPR for platform builders — lawful basis, minimization, purpose limitation, DSAR/erasure across Iceberg + backups + event logs, RoPA, DPIA triggers, processor chains & SCCs *(gdpr.eu guides)*
     - DORA — ICT risk framework, incident-reporting timelines, resilience testing, the ICT third-party register and exit strategies (cloud concentration) *(EIOPA: DORA)*
-    - the fund regulatory stack — UCITS/AIFMD (incl. Annex IV), MiFID II product governance (→ EMT), PRIIPs (→ EPT/KID), SFDR (ESG data) at orientation level *(EIOPA: DORA)*
+    - EU AI Act for the data platform — high-risk (Annex III) obligations (risk-management system, data governance, human oversight, logging, accuracy/robustness/cybersecurity) and how they land on a GenAI extraction pipeline over regulated docs; the Digital Omnibus deferral (stand-alone high-risk now 2 Dec 2027) and the DORA overlap on ICT resilience *(EU AI Act: implementation timeline)*
     - CSSF cloud-outsourcing expectations — notification and audit rights, aligned to EBA/ESMA guidelines (verify current circular at assembly) *(CSSF regulatory framework)*
     - SOC 2 / ISO 27001 — the vendor-evidence vocabulary you read in supplier reviews *(gdpr.eu guides)*
 - **Resources:**
@@ -529,7 +529,7 @@
     - **[Azure Blob: lifecycle management](https://learn.microsoft.com/en-us/azure/storage/blobs/lifecycle-management-overview)** — tiering and deletion policies by rule (primary)
     - [Apache Iceberg: expire_snapshots](https://iceberg.apache.org/docs/latest/spark-procedures/) — snapshot expiry and table maintenance procedures (reference)
 - **Tools:**
-    - FOSS (hands-on): [MinIO lifecycle](https://min.io/docs/minio/linux/administration/object-management/object-lifecycle-management.html) + [Iceberg maintenance](https://iceberg.apache.org/docs/latest/maintenance/) — tiering and snapshot expiry
+    - FOSS (hands-on): [MinIO lifecycle](https://docs.min.io/administration/object-management/object-lifecycle-management.html) + [Iceberg maintenance](https://iceberg.apache.org/docs/latest/maintenance/) — tiering and snapshot expiry
 - **Do:**
     1. Write the retention schedule for five record classes (orders, NAV, investor KYC, logs, EMT outputs).
     2. Implement it as MinIO lifecycle rules plus Iceberg maintenance jobs (expire_snapshots, remove orphan files).
@@ -546,7 +546,7 @@
 | 3.2.5 | Property graph databases | Neo4j/Cypher for relationship-heavy ops use (fraud rings, ownership chains) | [Neo4j: Getting Started](https://neo4j.com/docs/getting-started/current/) | 25 |
 | 7.3.2 | Glossary embedded in catalogs | Same discipline as 7.3.1, delivered as a feature of Collibra/Purview | [covered by 10.1.2 reading](https://learn.microsoft.com/en-us/purview/) | 10 |
 | 9.8.2 | Test data management | Subset/mask/refresh tooling (Delphix-class) for legacy estates | [Delphix (Perforce) test data management](https://www.perforce.com/products/delphix) | 20 |
-| 10.2.1 | AI-native data discovery | LLM-assisted search and Q&A over catalog metadata | [Atlan AI](https://atlan.com/atlan-ai/) | 20 |
+| 10.2.1 | AI-native data discovery | LLM-assisted search and Q&A over catalog metadata | [Atlan AI](https://docs.atlan.com/product/capabilities/atlan-ai/concepts/what-is-atlan-ai) | 20 |
 | 10.2.2 | Catalog-embedded discovery | Search/browse UX delivered as a catalog feature | [covered by 10.1.1 hands-on](https://docs.open-metadata.org/) | 10 |
 | 10.3.2 | Lineage embedded in catalogs | Lineage as a catalog feature vs the open OpenLineage standard | [covered by 10.1.1/10.3.1](https://openlineage.io/docs/) | 10 |
 | 10.5.2 | Modern/cloud MDM | ML-first MDM (Tamr) and lighter cloud MDM (Reltio) | [Tamr product overview](https://www.tamr.com/) | 20 |

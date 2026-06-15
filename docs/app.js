@@ -6,6 +6,8 @@
   const LS_KEY = "spt-v1";
   const SY_KEY = "spt-sync";
   const PLAN = window.PLAN;
+  const QUIZ = window.QUIZ || {};
+  let TOTAL_CARDS = 0; for (const _l in QUIZ) TOTAL_CARDS += QUIZ[_l].length;
   const $ = (sel) => document.querySelector(sel);
 
   // ---------- state ----------
@@ -21,6 +23,7 @@
     try { S = JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch { S = {}; }
     S.items = S.items || {};
     S.runner = S.runner || null;
+    S.srs = S.srs || {};
     // migrate: min must equal the session sum (sync merges depend on it)
     let migrated = false;
     Object.values(S.items).forEach((r) => {
@@ -58,6 +61,63 @@
   const now19 = () => new Date().toISOString().slice(0, 19);
   const STICON = { todo: "○", doing: "◐", done: "✅", skip: "⏭" };
   const esc = (t) => (t || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmtInline = (t) => esc(t).replace(/`([^`]+)`/g, "<code>$1</code>");
+
+  // ---------- spaced repetition (SRS) ----------
+  // cardId = "<lessonId>#<NNN>"; record: {due:"YYYY-MM-DD", ivl, ease, reps, lapses, last}
+  const GRADES = ["Again", "Hard", "Good", "Easy"];
+  const cid = (lid, i) => lid + "#" + String(i).padStart(3, "0");
+  const todayStr = () => new Date().toISOString().slice(0, 10);
+  function addDays(n) { const d = new Date(); d.setDate(d.getDate() + Math.round(n)); return d.toISOString().slice(0, 10); }
+  function cardById(id) {
+    const k = id.lastIndexOf("#"); if (k < 0) return null;
+    const lid = id.slice(0, k), i = +id.slice(k + 1), arr = QUIZ[lid];
+    return arr && arr[i - 1] ? { id, lid, i, q: arr[i - 1].q, a: arr[i - 1].a } : null;
+  }
+  function srsRec(id) {
+    if (!S.srs[id]) S.srs[id] = { due: "", ivl: 0, ease: 2.5, reps: 0, lapses: 0, last: 0 };
+    return S.srs[id];
+  }
+  // SM-2-lite spaced-repetition schedule. g: 0 Again, 1 Hard, 2 Good, 3 Easy.
+  // ponytail: SM-2-lite (the Anki default family). Ceiling: scheduling uses only ease,
+  // not full per-card difficulty modelling; upgrade path is FSRS if the data warrants it.
+  function grade(id, g) {
+    const c = srsRec(id);
+    if (g === 0) { c.reps = 0; c.lapses++; c.ivl = 0; c.ease = Math.max(1.3, c.ease - 0.2); }
+    else {
+      c.ease = Math.max(1.3, c.ease + (g === 1 ? -0.15 : g === 3 ? 0.15 : 0));
+      c.reps++;
+      c.ivl = c.reps === 1 ? (g === 3 ? 2 : 1)
+        : c.reps === 2 ? (g === 1 ? 3 : 6)
+          : Math.max(1, Math.round(c.ivl * (g === 1 ? 1.2 : c.ease)));
+    }
+    c.due = addDays(c.ivl); c.last = Date.now();
+    save(); autoSync();
+  }
+  function dueCount() {
+    const t = todayStr(); let n = 0;
+    for (const id in S.srs) { const r = S.srs[id]; if (r.due && r.due <= t && cardById(id)) n++; }
+    return n;
+  }
+  // Build a study session: most-overdue reviews first (cap 30), topped up toward 20 with new
+  // cards, preferring lessons you're actively studying (status doing/done) then plan order.
+  function buildQueue() {
+    const t = todayStr();
+    const due = [];
+    for (const id in S.srs) { const r = S.srs[id]; if (r.due && r.due <= t && cardById(id)) due.push(id); }
+    due.sort((a, b) => (S.srs[a].due < S.srs[b].due ? -1 : S.srs[a].due > S.srs[b].due ? 1 : 0));
+    due.splice(30);
+    const need = Math.max(0, 20 - due.length), fresh = [];
+    if (need > 0) {
+      const act = (it) => { const r = S.items[it.key]; return r && (r.st === "doing" || r.st === "done") ? 0 : 1; };
+      const lessons = PLAN.phases.flatMap((p) => p.items).filter((it) => it.qid).sort((a, b) => act(a) - act(b));
+      outer: for (const it of lessons) for (const c of QUIZ[it.qid]) {
+        const id = cid(it.qid, c.i);
+        if (!S.srs[id]) { fresh.push(id); if (fresh.length >= need) break outer; }
+      }
+    }
+    return [...due, ...fresh]; // overdue-first then new; no shuffle (the old one was a no-op that broke the sort)
+  }
 
   // ---------- timer ----------
   let tick = null;
@@ -113,6 +173,14 @@
     });
     return out;
   }
+  function mergeSrs(local, remote) {
+    const out = {};
+    new Set([...Object.keys(local || {}), ...Object.keys(remote || {})]).forEach((k) => {
+      const x = local && local[k], y = remote && remote[k];
+      out[k] = (!x || !y) ? (x || y) : ((y.last || 0) > (x.last || 0) ? y : x);
+    });
+    return out;
+  }
   function setSync(t) { syncStatus = t; const el = $("#sync-status"); if (el) el.textContent = t; const b = $("#btn-sync"); if (b) b.textContent = t.startsWith("sync failed") ? "⚠" : "⟳"; }
   async function syncNow(manual) {
     if (!SY.token) { if (manual) location.hash = "#/sync"; return; }
@@ -130,7 +198,8 @@
         }
       }
       if (remote && remote.items) S.items = mergeItems(S.items, remote.items);
-      const payload = JSON.stringify({ items: S.items, synced: new Date().toISOString() });
+      if (remote && remote.srs) S.srs = mergeSrs(S.srs, remote.srs);
+      const payload = JSON.stringify({ items: S.items, srs: S.srs, synced: new Date().toISOString() });
       const body = JSON.stringify({ description: "Data Architect study progress (tracker sync)", public: false, files: { [FILE]: { content: payload } } });
       const resp = SY.gist
         ? await fetch(GH + "/" + SY.gist, { method: "PATCH", headers: ghHeaders(), body })
@@ -164,6 +233,61 @@
     return { spent, doneEst, skipEst, est };
   }
 
+  // ---------- quiz rendering (grade-on-reveal SRS) ----------
+  function srsBadge(id) {
+    const r = S.srs[id];
+    if (!r || !r.last) return '<span class="srs new">new</span>';
+    return r.due && r.due <= todayStr() ? '<span class="srs due">due</span>'
+      : '<span class="srs ok" title="next review">' + esc(r.due) + "</span>";
+  }
+  // In-lesson self-test is REFERENCE only (question summary -> reveal answer). Grading happens
+  // question-first in #/review, so the answer is never shown before recall (no fluency illusion).
+  function quizBlockHtml(qid) {
+    const cards = QUIZ[qid]; if (!cards) return "";
+    const inner = cards.map((c) => {
+      const id = cid(qid, c.i);
+      return '<details class="q"><summary>' + srsBadge(id) + " <b>" + c.i + ".</b> " +
+        fmtInline(c.q) + '</summary><div class="a">' + fmtInline(c.a) + "</div></details>";
+    }).join("");
+    return '<details class="quiz" open><summary>📝 Self-test — ' + cards.length +
+      " questions (reference) · graded question-first in your " +
+      '<a href="#/review" style="color:var(--accent)">spaced review ›</a></summary>' +
+      '<div class="quizwrap">' + inner + "</div></details>";
+  }
+
+  // ---------- review session (spaced repetition queue) ----------
+  let reviewQ = null, reviewPos = 0, reviewShown = false, reviewStats = null;
+  function reviewStart() { reviewQ = buildQueue(); reviewPos = 0; reviewShown = false; reviewStats = { done: 0, again: 0 }; }
+  function reviewView() {
+    if (!reviewQ) reviewStart();
+    const total = reviewQ.length;
+    if (!total) return `<a class="back" href="#/">‹ Home</a><h1>🔁 Review</h1>
+      <div class="card content"><p>Nothing due right now. 🎉</p>
+      <p class="muted">New cards become reviews as you study lessons and grade their self-tests; scheduled reviews come back on their due date.</p></div>`;
+    if (reviewPos >= total) {
+      const s = reviewStats || { done: 0, again: 0 };
+      return `<a class="back" href="#/">‹ Home</a><h1>Review complete</h1>
+        <div class="card"><div class="timerbig">✅</div>
+        <div class="muted" style="text-align:center">${s.done} cards reviewed · ${s.again} to relearn soon</div>
+        <div class="btn-row"><button class="btn primary" id="rv-again">Review more</button><a class="btn" href="#/">Home</a></div></div>`;
+    }
+    const id = reviewQ[reviewPos], card = cardById(id);
+    if (!card) { reviewPos++; return reviewView(); }
+    const lt = (INDEX["e-" + card.lid] || {}).it, tag = lt ? lt.title : card.lid;
+    let html = `<a class="back" href="#/">‹ Home</a>
+      <div class="rvbar"><div class="bar"><i class="g" style="width:${Math.round((reviewPos / total) * 100)}%"></i></div>
+      <div class="muted">card ${reviewPos + 1} / ${total} · <a href="#/i/e-${esc(card.lid)}" style="color:var(--accent)">${esc(String(tag).slice(0, 44))}</a></div></div>
+      <div class="card rvcard"><div class="rvq">${fmtInline(card.q)}</div>`;
+    if (!reviewShown) {
+      html += `<div class="btn-row"><button class="btn primary" id="rv-show">Show answer</button></div>`;
+    } else {
+      html += `<div class="rva">${fmtInline(card.a)}</div>
+        <div class="muted" style="text-align:center;margin:8px 0 4px">Rate recall — this sets the next interval:</div>
+        <div class="grades wide" data-cid="${id}">${GRADES.map((g, i) => `<button class="gr g${i}" data-g="${i}">${g}</button>`).join("")}</div>`;
+    }
+    return html + "</div>";
+  }
+
   // ---------- views ----------
   function home() {
     const all = PLAN.phases.flatMap((p) => p.items);
@@ -176,6 +300,13 @@
         <div class="muted">done ${a.doneEst.toFixed(0)} h + skipped ${a.skipEst.toFixed(0)} h of ${a.est.toFixed(0)} h planned · budget ${PLAN.budgetH} h</div>
         <div class="muted">skip-test bank: ${a.skipEst.toFixed(0)} h returned to slack · <a href="#/sync" style="color:var(--accent)">${SY.token ? "sync settings" : "set up sync"}</a></div>
       </div>`;
+    if (TOTAL_CARDS) {
+      const due = dueCount();
+      html += `<a class="row review-tile" href="#/review"><span class="st">↻</span>
+        <div class="grow"><div class="title">Spaced review</div>
+        <div class="sub">${due} due now · ${Object.keys(S.srs).length} of ${TOTAL_CARDS} questions scheduled</div></div>
+        <span class="muted">›</span></a>`;
+    }
     PLAN.phases.forEach((p) => {
       const pa = agg(p.items);
       const ppct = Math.round(((pa.doneEst + pa.skipEst) / pa.est) * 100);
@@ -243,7 +374,8 @@
         <div style="margin-top:10px"><textarea id="t-note" placeholder="Journal: what I did, what surprised me, open question…">${esc(r.note)}</textarea></div>
         ${r.sessions.length ? `<div class="sessions">Recent: ${r.sessions.slice(-5).reverse().map((s) => `${esc(String(s[0]).replace("T", " ").slice(0, 16))} · ${hm(s[1])}`).join(" · ")}</div>` : ""}
       </div>
-      <div class="card content">${it.html}</div>`;
+      <div class="card content">${it.html}</div>
+      ${it.qid ? quizBlockHtml(it.qid) : ""}`;
   }
 
   function syncView() {
@@ -270,11 +402,13 @@
   // ---------- router / render ----------
   function render() {
     const hash = location.hash || "#/";
+    if (hash !== "#/review") { reviewQ = null; reviewShown = false; }
     let html, m;
     if ((m = hash.match(/^#\/p\/(\d)/))) html = phaseView(+m[1]);
     else if ((m = hash.match(/^#\/i\/(.+)$/))) html = itemView(decodeURIComponent(m[1]));
     else if ((m = hash.match(/^#\/doc\/(\w+)/))) html = docView(m[1]);
     else if (hash === "#/sync") html = syncView();
+    else if (hash === "#/review") html = reviewView();
     else html = home();
     $("#view").innerHTML = html;
     banner();
@@ -298,6 +432,19 @@
         saveSync(); syncNow(true);
       });
       on("#sy-off", () => { if (confirm("Disconnect sync? (progress stays on this device)")) { SY = {}; saveSync(); render(); } });
+      return;
+    }
+    if (hash === "#/review") {
+      on("#rv-show", () => { reviewShown = true; render(); });
+      on("#rv-again", () => { reviewStart(); render(); });
+      const g = $(".grades.wide");
+      if (g) g.onclick = (ev) => {
+        const btn = ev.target.closest("button.gr"); if (!btn) return;
+        const gv = +btn.getAttribute("data-g");
+        grade(g.getAttribute("data-cid"), gv);
+        reviewStats.done++; if (gv === 0) reviewStats.again++;
+        reviewPos++; reviewShown = false; render();
+      };
       return;
     }
     const m = hash.match(/^#\/i\/(.+)$/);
@@ -335,6 +482,7 @@
         if (!d.state || !d.state.items) throw new Error("not a progress file");
         if (confirm("Merge imported progress into this device?")) {
           S.items = mergeItems(S.items, d.state.items);
+          if (d.state.srs) S.srs = mergeSrs(S.srs, d.state.srs);
           save(); render();
         }
       } catch (e) { alert("Import failed: " + e.message); }

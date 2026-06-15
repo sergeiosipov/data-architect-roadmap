@@ -229,11 +229,7 @@ def finalize(html: str, link_names: bool = True) -> str:
 # QUIZ_IDS (for QUIZZES.md) is collected in lesson order during the phase loop below.
 QUIZ_DIR = root / "_quizzes"
 quiz_order: list[str] = []
-
-
-def _inline_code(s: str) -> str:
-    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+quizzes_out: dict[str, list[dict]] = {}  # lessonId -> [{i,q,a}] for docs/quizzes.js (stable-ID SRS data)
 
 
 def parse_quiz(path: Path):
@@ -245,15 +241,6 @@ def parse_quiz(path: Path):
             pairs.append((q, line[2:].strip()))
             q = None
     return pairs
-
-
-def quiz_html(pairs) -> str:
-    inner = "".join(
-        f'<details class="q"><summary><b>{i}.</b> {_inline_code(q)}</summary>'
-        f'<div class="a">{_inline_code(a)}</div></details>'
-        for i, (q, a) in enumerate(pairs, 1))
-    return ('<details class="quiz"><summary>\U0001F4DD Self-test — '
-            f'{len(pairs)} questions (tap one to reveal its answer)</summary>{inner}</details>')
 
 
 # ---------------------------------------------------------------- Appendix A rows
@@ -303,11 +290,15 @@ for fname in PHASE_FILES:
             if qp.exists():
                 qpairs = parse_quiz(qp)
                 if qpairs:
-                    body_html += quiz_html(qpairs)
+                    # Quiz data is now emitted to docs/quizzes.js with stable IDs and
+                    # rendered by the app (grade-on-reveal SRS), not baked into body_html.
+                    quizzes_out[ids[0]] = [{"i": i, "q": q, "a": a}
+                                           for i, (q, a) in enumerate(qpairs, 1)]
                     nq = len(qpairs)
                     quiz_order.append(ids[0])
         items.append({"key": key, "title": clean_title, "ids": ids, "tier": tier or "T2",
-                      "est": est, "kind": "entry", "quiz": nq, "html": body_html})
+                      "est": est, "kind": "entry",
+                      "qid": ids[0] if nq else None, "html": body_html})
 
     t3 = re.search(r"^### T3 awareness topics\n((?:(?!^### ).*\n?)*)", text, re.M)
     if t3:
@@ -372,6 +363,12 @@ data = {"version": 2, "budgetH": 1152, "fullH": round(total_est, 1),
 js = "window.PLAN = " + json.dumps(data, ensure_ascii=False) + ";"
 (out_dir / "data.js").write_text(js, encoding="utf-8")
 print(f"wrote docs/data.js ({len(js) // 1024} KB)")
+
+# stable-ID quiz dataset for the in-app SRS (grade-on-reveal, review queue)
+qjs = "window.QUIZ = " + json.dumps(quizzes_out, ensure_ascii=False) + ";"
+(out_dir / "quizzes.js").write_text(qjs, encoding="utf-8")
+print(f"wrote docs/quizzes.js ({len(quizzes_out)} lessons, "
+      f"{sum(len(v) for v in quizzes_out.values())} cards, {len(qjs) // 1024} KB)")
 
 # ---------------------------------------------------------------- QUIZZES.md (GitHub-readable)
 qz = ["# Self-test Question Banks\n",

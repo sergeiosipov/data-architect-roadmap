@@ -1322,7 +1322,7 @@ Foundational data-modeling notation by Peter Chen (1976). Multiple notations: Ch
 <a id="s-idef1x"></a>
 ### IDEF1X
 US Federal Information Processing Standard 184. Rigorous data-modeling notation, more formal than Crow's Foot. Used in defense, government, regulated industries.
-🔗 https://www.idef.com/idefx-data-modeling-method/
+🔗 https://www.idef.com/idef1x-data-modeling-method/
 
 <a id="s-crowsfoot"></a>
 ### Crow's Foot Notation
@@ -1695,7 +1695,7 @@ Cameron Cyr & Dustin Dorsey (O'Reilly, 2024). Practical guide to dbt-style analy
 ### The Informed Company
 
 Dave Fowler & Matthew C. David (Wiley, 2021). Modern data stack adoption journey — stages of maturity, organizational patterns, tooling choices.
-🔗 https://www.wiley.com/en-us/The+Informed+Company%3A+How+to+Build+Modern+Agile+Data+Stacks+that+Drive+Winning+Insights-p-9781119748021
+🔗 https://books.google.com/books/about/The_Informed_Company.html?id=7y9CEAAAQBAJ
 
 <a id="b-dggtg"></a>
 ### Data Governance: The Definitive Guide
@@ -1731,7 +1731,7 @@ Nishant Bhajaria (Manning, 2022). Implementation-level privacy engineering — P
 ### Practical Cloud Security (2nd ed.)
 
 Chris Dotson (O'Reilly, 2023). Hands-on cloud security across AWS/Azure/GCP — IAM, network security, encryption, incident response.
-🔗 https://www.oreilly.com/library/view/practical-cloud-security/9781098148171/
+🔗 https://www.oreilly.com/library/view/practical-cloud-security/9781098148164/
 
 <a id="b-dmls"></a>
 ### Designing Machine Learning Systems
@@ -1972,7 +1972,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Azure DevOps** — *(C)* — Microsoft CI/CD and project management. 🔗 https://learn.microsoft.com/azure/devops/
 
 <a id="t-azdurable"></a>
-**Azure Durable Functions** — *(C)* — durable workflow extension for Azure Functions; orchestrator/activity functions in C#/Python/JS/Java. 🔗 https://learn.microsoft.com/azure/azure-functions/durable/
+**Azure Durable Functions** — *(C)* — durable workflow extension for Azure Functions; orchestrator/activity functions in C#/Python/JS/Java. 🔗 https://learn.microsoft.com/azure/azure-functions/durable/durable-functions-overview
 
 <a id="t-azfunc"></a>
 **Azure Functions** — *(C)* — Microsoft serverless compute. 🔗 https://learn.microsoft.com/azure/azure-functions/
@@ -2034,7 +2034,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Cloud Bigtable** — *(C)* — Google wide-column NoSQL store. 🔗 https://cloud.google.com/bigtable/docs
 
 <a id="t-birt"></a>
-**Eclipse BIRT** — *(OS)* — Business Intelligence and Reporting Tools. 🔗 https://eclipse.github.io/birt-website/
+**Eclipse BIRT** — *(OS)* — Business Intelligence and Reporting Tools. 🔗 https://eclipse-birt.github.io/birt-website/
 
 <a id="t-bitbucket"></a>
 **Bitbucket** — *(C)* — Atlassian Git hosting. 🔗 https://support.atlassian.com/bitbucket-cloud/
@@ -2248,7 +2248,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **dbt Core** — *(OS)* — SQL-based transformation, testing, docs. 🔗 https://docs.getdbt.com/
 
 <a id="t-dbtcloud"></a>
-**dbt Cloud** — *(C)* — managed dbt with IDE, scheduler, semantic layer. 🔗 https://docs.getdbt.com/docs/cloud/
+**dbt Cloud** — *(C)* — managed dbt with IDE, scheduler, semantic layer. 🔗 https://docs.getdbt.com/docs/cloud/about-cloud/dbt-cloud-features
 
 <a id="t-demyst"></a>
 **Demyst** — *(C)* — external data marketplace for financial services. 🔗 https://demyst.com/
@@ -2458,7 +2458,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **GCP Persistent Disk** — *(C)* — GCP block storage. 🔗 https://cloud.google.com/persistent-disk
 
 <a id="t-gcpdm"></a>
-**GCP Deployment Manager** — *(C)* — GCP-native declarative infrastructure templates (legacy; Terraform/Config Connector is current direction). 🔗 https://cloud.google.com/deployment-manager/docs
+**GCP Deployment Manager** — *(C)* — GCP-native declarative infrastructure templates (legacy; Terraform/Config Connector is current direction). 🔗 https://docs.cloud.google.com/deployment-manager/docs
 
 <a id="t-gcpsecrets"></a>
 **Google Secret Manager** — *(C)* — GCP secrets store. 🔗 https://cloud.google.com/secret-manager/docs
@@ -2597,10 +2597,10 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Apache Ignite** — *(OS)* — distributed in-memory data grid and SQL. 🔗 https://ignite.apache.org/docs/
 
 <a id="t-immuta"></a>
-**Immuta** — *(C)* — fine-grained data access control and policy. 🔗 https://docs.immuta.com/
+**Immuta** — *(C)* — fine-grained data access control and policy. 🔗 https://documentation.immuta.com/
 
 <a id="t-impala"></a>
-**Apache Impala** — *(OS)* — MPP SQL engine on Hadoop/object storage. 🔗 https://impala.apache.org/docs.html
+**Apache Impala** — *(OS)* — MPP SQL engine on Hadoop/object storage. 🔗 https://impala.apache.org/impala-docs.html
 
 <a id="t-imply"></a>
 **Imply** — *(C, E)* — managed Apache Druid platform with Pivot UI. 🔗 https://docs.imply.io/
@@ -2615,7 +2615,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Informatica PowerCenter** — *(E)* — enterprise ETL platform. 🔗 https://docs.informatica.com/data-integration/powercenter.html
 
 <a id="t-informaticadq"></a>
-**Informatica Data Quality** — *(E)* — enterprise DQ platform. 🔗 https://docs.informatica.com/data-quality.html
+**Informatica Data Quality** — *(E)* — enterprise DQ platform. 🔗 https://docs.informatica.com/data-quality-and-governance/informatica-data-quality.html
 
 <a id="t-informaticaedc"></a>
 **Informatica EDC / IDMC** — *(E, C)* — enterprise data catalog (now Intelligent Data Management Cloud). 🔗 https://docs.informatica.com/data-catalog.html
@@ -2771,7 +2771,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Luigi** — *(OS)* — Spotify's Python workflow engine (legacy). 🔗 https://luigi.readthedocs.io/
 
 <a id="t-luzmo"></a>
-**Luzmo** — *(C)* — embedded analytics platform (formerly Cumul.io). 🔗 https://docs.luzmo.com/
+**Luzmo** — *(C)* — embedded analytics platform (formerly Cumul.io). 🔗 https://developer.luzmo.com/
 
 ## M
 
@@ -2788,7 +2788,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Manta** — *(E)* — automated data lineage. 🔗 https://manta.io/
 
 <a id="t-marquez"></a>
-**Marquez** — *(OS)* — open-source metadata service (OpenLineage backend). 🔗 https://marquezproject.ai/docs/
+**Marquez** — *(OS)* — open-source metadata service (OpenLineage backend). 🔗 https://marquezproject.ai/docs/quickstart/
 
 <a id="t-matillion"></a>
 **Matillion** — *(C)* — cloud-native ELT/orchestration platform. 🔗 https://docs.matillion.com/
@@ -2830,7 +2830,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Grafana Mimir** — *(OS)* — horizontally scalable Prometheus-compatible metrics backend (AGPLv3). 🔗 https://grafana.com/docs/mimir/
 
 <a id="t-minio"></a>
-**MinIO** — *(OS, E)* — S3-compatible object storage. **License note:** core is AGPLv3. 🔗 https://min.io/docs/minio/linux/
+**MinIO** — *(OS, E)* — S3-compatible object storage. **License note:** core is AGPLv3. 🔗 https://docs.min.io/
 
 <a id="t-mlflow"></a>
 **MLflow** — *(OS)* — open-source MLOps platform with tracking, models, registry. 🔗 https://mlflow.org/docs/latest/
@@ -2889,7 +2889,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Neptune.ai** — *(C)* — ML experiment tracking. 🔗 https://docs.neptune.ai/
 
 <a id="t-nessie"></a>
-**Project Nessie** — *(OS)* — Git-like versioning for Iceberg tables. 🔗 https://projectnessie.org/docs/
+**Project Nessie** — *(OS)* — Git-like versioning for Iceberg tables. 🔗 https://projectnessie.org/guides/
 
 <a id="t-netezza"></a>
 **IBM Netezza Performance Server** — *(E, C)* — IBM MPP appliance / cloud DB. 🔗 https://www.ibm.com/docs/en/netezza
@@ -2968,7 +2968,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **1Password Secrets Automation** — *(C)* — programmatic secrets vault. 🔗 https://developer.1password.com/
 
 <a id="t-pachyderm"></a>
-**Pachyderm** — *(OS, E)* — data versioning + pipeline platform. 🔗 https://docs.pachyderm.com/
+**Pachyderm** — *(OS, E)* — data versioning + pipeline platform. 🔗 https://github.com/pachyderm/pachyderm
 
 <a id="t-pact"></a>
 **Pact** — *(OS)* — consumer-driven contract testing. 🔗 https://docs.pact.io/
@@ -3223,7 +3223,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Select Star** — *(C)* — automated data lineage and discovery platform. 🔗 https://docs.selectstar.com/
 
 <a id="t-semarchy"></a>
-**Semarchy xDM** — *(E, C)* — MDM and data hub. 🔗 https://www.semarchy.com/docs/
+**Semarchy xDM** — *(E, C)* — MDM and data hub. 🔗 https://www.semarchy.com/doc/
 
 <a id="t-semantickernel"></a>
 **Microsoft Semantic Kernel** — *(OS)* — LLM orchestration SDK. 🔗 https://learn.microsoft.com/semantic-kernel/
@@ -3244,7 +3244,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **scikit-learn** — *(OS)* — Python classical ML library. 🔗 https://scikit-learn.org/stable/
 
 <a id="t-slingshot"></a>
-**Capital One Slingshot** — *(C)* — Snowflake cost optimization. 🔗 https://www.capitalone.com/software/slingshot/
+**Capital One Slingshot** — *(C)* — Snowflake cost optimization. 🔗 https://www.capitalone.com/software/products/slingshot/
 
 <a id="t-snowflake"></a>
 **Snowflake** — *(C)* — cloud data warehouse + sharing + AI features. 🔗 https://docs.snowflake.com/
@@ -3253,7 +3253,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Soda Cloud** — *(C)* — data quality monitoring platform. 🔗 https://docs.soda.io/
 
 <a id="t-sodacore"></a>
-**Soda Core** — *(OS)* — open-source data quality library (SodaCL). 🔗 https://docs.soda.io/soda-core/
+**Soda Core** — *(OS)* — open-source data quality library (SodaCL). 🔗 https://docs.soda.io/soda-documentation/soda-v3/overview-main
 
 <a id="t-solace"></a>
 **Solace PubSub+** — *(E, C)* — event mesh / messaging platform spanning cloud and on-prem. 🔗 https://docs.solace.com/
@@ -3295,7 +3295,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **SqlDBM** — *(C)* — cloud-based data modeling tool. 🔗 https://docs.sqldbm.com/
 
 <a id="t-sqlmesh"></a>
-**SQLMesh** — *(OS)* — data transformation framework with virtual env, diff, CI built-in. 🔗 https://sqlmesh.com/docs/
+**SQLMesh** — *(OS)* — data transformation framework with virtual env, diff, CI built-in. 🔗 https://sqlmesh.readthedocs.io/en/stable/
 
 <a id="t-sqlserver"></a>
 **Microsoft SQL Server** — *(E, C)* — Microsoft enterprise RDBMS. 🔗 https://learn.microsoft.com/sql/
@@ -3357,7 +3357,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **Tableau (Server / Cloud)** — *(E, C)* — Salesforce visual BI platform. 🔗 https://help.tableau.com/
 
 <a id="t-tableauprep"></a>
-**Tableau Prep** — *(E)* — visual data preparation for Tableau. 🔗 https://help.tableau.com/current/prep/
+**Tableau Prep** — *(E)* — visual data preparation for Tableau. 🔗 https://help.tableau.com/current/prep/en-us/prep_welcome.htm
 
 <a id="t-talend"></a>
 **Talend (Qlik)** — *(E, C)* — data integration and quality platform. 🔗 https://help.qlik.com/talend/
@@ -3426,7 +3426,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **ToolJet** — *(OS, C)* — open-source low-code internal tools. 🔗 https://docs.tooljet.com/
 
 <a id="t-topaz"></a>
-**Topaz (Aserto)** — *(OS)* — open-source authorization with OPA + ReBAC built on top of Edge directory. 🔗 https://www.topaz.sh/docs
+**Topaz (Aserto)** — *(OS)* — open-source authorization with OPA + ReBAC built on top of Edge directory. 🔗 https://www.topaz.sh/docs/intro
 
 <a id="t-torchserve"></a>
 **TorchServe** — *(OS)* — PyTorch model serving. 🔗 https://pytorch.org/serve/
@@ -3531,7 +3531,7 @@ Tags: `OS` open-source · `C` cloud-managed (SaaS / fully-managed) · `E` enterp
 **WhereScape** — *(E)* — data automation (3NF, Kimball, Data Vault). 🔗 https://www.wherescape.com/
 
 <a id="t-whylogs"></a>
-**whylogs** — *(OS)* — open-source data and ML logging library for profiling and drift detection (WhyLabs). 🔗 https://docs.whylabs.ai/docs/whylogs/
+**whylogs** — *(OS)* — open-source data and ML logging library for profiling and drift detection (WhyLabs). 🔗 https://docs.whylabs.ai/docs/whylogs-overview/
 
 <a id="t-wk"></a>
 **Wolters Kluwer OneSumX** — *(E)* — finance, risk, regulatory reporting. 🔗 https://www.wolterskluwer.com/en/solutions/onesumx-for-finance-risk-and-regulatory-reporting

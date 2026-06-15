@@ -1,5 +1,5 @@
-const CACHE = "spt-cache-v10";
-const ASSETS = ["./", "index.html", "style.css", "app.js", "data.js", "manifest.webmanifest", "icon.svg"];
+const CACHE = "spt-cache-v11";
+const ASSETS = ["./", "index.html", "style.css", "app.js", "data.js", "quizzes.js", "manifest.webmanifest", "icon.svg"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
 });
@@ -10,7 +10,7 @@ self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
   e.respondWith(
     fetch(e.request)
-      .then((r) => { const cp = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, cp)); return r; })
+      .then((r) => { if (r.ok && r.type === "basic") { const cp = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, cp)); } return r; })
       .catch(() => caches.match(e.request))
   );
 });

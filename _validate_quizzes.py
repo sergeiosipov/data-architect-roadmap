@@ -36,6 +36,11 @@ ordered = [i for i in all_expected if i in present]
 extras = sorted(present - set(all_expected))
 IDS = ordered + extras
 
+# Target pairs per lesson: Phase 0 stays at 100 (hand-tuned); phases 1-8 target 150.
+P0 = set(expected[0])
+def target_for(qid):
+    return 100 if qid in P0 else 150
+
 fail = False
 total = 0
 for qid in IDS:
@@ -55,7 +60,8 @@ for qid in IDS:
     dupes = len(pairs) - len({a for a, _ in pairs})
     total += len(pairs)
     probs = []
-    if len(pairs) != 100: probs.append(f"{len(pairs)} pairs (want 100)")
+    tgt = target_for(qid)
+    if len(pairs) != tgt: probs.append(f"{len(pairs)} pairs (want {tgt})")
     if len(qs) != len(as_): probs.append(f"Q lines {len(qs)} != A lines {len(as_)}")
     if empty: probs.append(f"{empty} empty Q or A")
     if badtick: probs.append(f"{badtick} unbalanced backticks")

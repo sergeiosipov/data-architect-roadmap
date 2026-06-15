@@ -233,12 +233,12 @@
     - [Kimball Group: Dimensional Modeling Techniques](https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/) — the full technique catalog, free, for lookup during design (reference)
     - [Corr & Stagnitto, *Agile Data Warehouse Design*](https://books.google.com/books/about/Agile_Data_Warehouse_Design.html?id=TRWFmnv8jP0C) — BEAM workshops for modeling with business stakeholders (alternate)
 - **Tools:**
-    - FOSS (hands-on): [dbt Core](https://docs.getdbt.com/) + [DuckDB](https://duckdb.org/docs/) — implement the star and SCD2 logic as versioned models (↔ Synapse/Snowflake marts)
+    - FOSS (hands-on): [DuckDB](https://duckdb.org/docs/) — implement the star and SCD2 logic in plain SQL/DDL (you have SQL from Phase 0; you rebuild this mart as a dbt project later in 5.2.1) (↔ Synapse/Snowflake marts)
     - Corp (evaluate): [Azure Synapse](https://learn.microsoft.com/azure/synapse-analytics/) / [Snowflake](https://docs.snowflake.com/) — the same patterns on licensed mart engines
 - **Do:**
     1. Design the bus matrix for a fund administrator — processes: orders, NAV calculation, fee accrual, transfer agency — against conformed dimensions (fund, share class, investor, date).
     2. Declare the grain of each fact table in one written sentence before touching any column list.
-    3. Implement the NAV periodic-snapshot star in SQL (dbt + DuckDB) with an SCD2 fund dimension (valid_from / valid_to + current flag).
+    3. Implement the NAV periodic-snapshot star in plain SQL/DDL on DuckDB with an SCD2 fund dimension (valid_from / valid_to + current flag).
     4. Write the point-in-time query joining the snapshot fact to the SCD2 dimension as of an arbitrary historical date; test it across at least one attribute change.
 - **Done when:**
     - [ ] State the grain of each fact table in one sentence.
